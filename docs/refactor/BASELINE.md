@@ -18,6 +18,9 @@ cd backend
 uv venv --python 3.11 .venv
 uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cpu
 uv pip install --python .venv/bin/python -r requirements-dev.txt
+cd ../mt5_connector
+uv venv --python 3.14 .venv
+uv pip install --python .venv/bin/python -r requirements-test.txt
 cd ../frontend && npm ci
 ```
 

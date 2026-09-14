@@ -1,0 +1,9 @@
+# Runs the connector against a fake MetaTrader5 module, on any OS.
+# MetaTrader5 itself is omitted because it only installs on Windows.
+numpy==2.4.6
+pandas==2.3.3
+fastapi==0.141.1
+pydantic==2.13.5
+uvicorn==0.53.0
+httpx==0.28.1
+pytest>=8.0

@@ -20,6 +20,9 @@ export SECRET_KEY="${SECRET_KEY:-verify-only-test-key-not-for-production}"
 run "backend tests" \
   bash -c "cd '$ROOT/backend' && .venv/bin/python -m pytest tests -q -o timeout=120 -p no:cacheprovider -rs"
 
+run "connector tests, Python 3.14, fake MT5" \
+  bash -c "cd '$ROOT/mt5_connector' && .venv/bin/python -m pytest tests -q -p no:cacheprovider"
+
 run "frontend unit tests" \
   bash -c "cd '$ROOT/frontend' && npx vitest run"
 
