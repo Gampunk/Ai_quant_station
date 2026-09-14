@@ -29,6 +29,7 @@ from ..core.providers import PROVIDERS, get_api_key as _get_api_key, get_base_ur
 from ..models.ai_memory import AutopilotTrade, AutopilotSettings, UserPrompt, AutopilotLog, ModelUsage, AiCallLog
 from ..models.strategy_score import StrategyScore
 from ..core.providers import estimate_cost
+from ..core.connector_guard import check_connector_url, ConnectorAddressBlocked
 
 router = APIRouter(prefix="/autopilot", tags=["Autopilot"])
 
@@ -281,6 +282,7 @@ async def _persist_log(user_id: int, level: str, message: str, cycle_number: int
 
 
 async def async_request(method: str, url: str, **kwargs) -> dict:
+    check_connector_url(url)
     client = get_http_client()
     headers = kwargs.pop("headers", {})
     if settings.MT5_API_TOKEN:
@@ -2095,6 +2097,10 @@ async def connect_mt5(
 ):
     """Connect to MT5 terminal."""
     user_id = current_user["id"]
+    try:
+        check_connector_url(connector_url)
+    except ConnectorAddressBlocked as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     # Use URL from request param, or fall back to DB settings, or fall back to .env
     if not connector_url:
@@ -2143,6 +2149,10 @@ async def save_settings(
 ):
     """Save autopilot settings."""
     user_id = current_user["id"]
+    try:
+        check_connector_url(config.mt5_connector_url)
+    except ConnectorAddressBlocked as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(

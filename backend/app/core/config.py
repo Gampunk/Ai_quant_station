@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     # MT5 Connector (External Windows Server)
     MT5_CONNECTOR_URL: str = ""
     MT5_USE_EXTERNAL_CONNECTOR: bool = False
+    # Connector traffic is limited to local and private networks unless this is true.
+    # See core/connector_guard.py.
+    ALLOW_REMOTE_CONNECTOR: bool = False
 
     # HuggingFace
     HF_REPO_ID: str = ""

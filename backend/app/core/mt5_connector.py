@@ -5,6 +5,7 @@ Connects to external MT5 Connector service instead of direct MT5
 import httpx
 from typing import Optional, Dict, Any
 from ..core.config import settings
+from .connector_guard import check_connector_url
 
 
 class MT5ConnectorClient:
@@ -20,6 +21,7 @@ class MT5ConnectorClient:
     
     async def _request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         """Make HTTP request to connector with auth token."""
+        check_connector_url(self.base_url)
         base = self.base_url.rstrip("/")
         path = "/" + endpoint.lstrip("/")
         url = f"{base}{path}"

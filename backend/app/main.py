@@ -141,6 +141,10 @@ async def startup_event():
     # Fail fast if secrets are not configured for production
     settings.validate_secret_key()
 
+    # Refuse to start if the configured connector is not local or private
+    from .core.connector_guard import check_connector_url
+    check_connector_url(settings.MT5_CONNECTOR_URL)
+
     # Create all database tables directly (works with both SQLite and PostgreSQL)
     from .core.database import init_db
     await init_db()
