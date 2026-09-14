@@ -11,6 +11,7 @@ class TestAIAnalyst:
     All tests make real API calls to NVIDIA NIM.
     """
 
+    @pytest.mark.requires_ai_key
     async def test_chat_simple_text(self, client: AsyncClient, auth_headers: dict):
         payload = {
             "messages": [{"role": "user", "content": "What is the current market sentiment for gold in 3 sentences?"}],
@@ -28,6 +29,7 @@ class TestAIAnalyst:
             assert len(msg) > 20, f"Response too short ({len(msg)} chars)"
         print(f"\n[test_chat_simple_text] Response length: {len(msg)} chars")
 
+    @pytest.mark.requires_ai_key
     async def test_chat_memory_saved(self, client: AsyncClient, auth_headers: dict, db_session: AsyncSession):
         from app.models.ai_memory import ChatMemory
 
@@ -51,6 +53,7 @@ class TestAIAnalyst:
         assert record.role == "assistant", f"Expected assistant role, got {record.role}"
         print(f"\n[test_chat_memory_saved] DB record ID={record.id}, symbol={record.symbol}")
 
+    @pytest.mark.requires_ai_key
     async def test_chat_with_code_execution(self, client: AsyncClient, auth_headers: dict):
         payload = {
             "messages": [{"role": "user", "content": "Write Python code to print the mean close price of the last 100 candles."}],
@@ -64,6 +67,7 @@ class TestAIAnalyst:
         data = resp.json()
         print(f"\n[test_chat_code_exec] message length: {len(data.get('message', ''))}")
 
+    @pytest.mark.requires_ai_key
     async def test_chat_detects_trade_setup(self, client: AsyncClient, auth_headers: dict):
         payload = {
             "messages": [{"role": "user", "content": "Analyze XAUUSD and generate a detailed trade setup with entry, SL, TP, and risk-reward ratio."}],
@@ -84,6 +88,7 @@ class TestAIAnalyst:
         else:
             print("\n[test_chat_trade_setup] No trade setup detected (AI chose not to recommend a trade)")
 
+    @pytest.mark.requires_ai_key
     async def test_chat_global_insights_updated(self, client: AsyncClient, auth_headers: dict, db_session: AsyncSession):
         from app.models.ai_memory import GlobalInsights
 
@@ -108,6 +113,7 @@ class TestAIAnalyst:
         else:
             print("\n[test_chat_global_insights] No insights record created (no trade setup)")
 
+    @pytest.mark.requires_ai_key
     async def test_chat_model_usage_tracked(self, client: AsyncClient, auth_headers: dict, db_session: AsyncSession):
         from app.models.ai_memory import ModelUsage
 

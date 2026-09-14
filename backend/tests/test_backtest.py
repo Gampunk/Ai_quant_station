@@ -45,6 +45,8 @@ class TestBacktest:
         assert len(err_msg) > 0, "Expected error message"
         print(f"\n[test_backtest_invalid_symbol] Correctly rejected: {err_msg[:100]}")
 
+    @pytest.mark.requires_parquet
+    @pytest.mark.requires_ai_key
     async def test_backtest_metrics_valid(self, client: AsyncClient, auth_headers: dict):
         resp = await client.post("/api/backtest/run", json={
             "prompt_id": "1",
@@ -72,6 +74,8 @@ class TestBacktest:
               f"WinRate={metrics['win_rate']}% DD={metrics['max_drawdown']}% "
               f"Trades={metrics.get('trades', 'N/A')}")
 
+    @pytest.mark.requires_parquet
+    @pytest.mark.requires_ai_key
     async def test_backtest_equity_curve(self, client: AsyncClient, auth_headers: dict):
         resp = await client.post("/api/backtest/run", json={
             "prompt_id": "2",
@@ -93,6 +97,8 @@ class TestBacktest:
         print(f"\n[test_backtest_equity_curve] {len(curve)} points, "
               f"start={curve[0]:.4f}, end={curve[-1]:.4f}")
 
+    @pytest.mark.requires_parquet
+    @pytest.mark.requires_ai_key
     async def test_backtest_trade_log(self, client: AsyncClient, auth_headers: dict):
         resp = await client.post("/api/backtest/run", json={
             "prompt_id": "3",

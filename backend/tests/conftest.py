@@ -145,3 +145,28 @@ def mt5_available() -> bool:
         return resp.status_code == 200
     except Exception:
         return False
+
+
+# ── Environment-dependent tests ──────────────────────────────────────────────
+# Some integration tests call a real AI provider or read the local parquet
+# archive. When those are unavailable the tests are SKIPPED with a visible
+# reason instead of failing, so a missing API key never hides a real bug.
+_PARQUET_DIR = BACKEND_DIR.parent / "data_archive" / "parquet_storage"
+
+
+def _missing_ai_key() -> bool:
+    return not settings.NVIDIA_API_KEY
+
+
+def _missing_parquet() -> bool:
+    return not (_PARQUET_DIR / "XAUUSD_2026.parquet").exists()
+
+
+def pytest_collection_modifyitems(config, items):
+    skip_ai = pytest.mark.skip(reason="requires NVIDIA_API_KEY in environment")
+    skip_data = pytest.mark.skip(reason=f"requires local parquet archive at {_PARQUET_DIR}")
+    for item in items:
+        if "requires_ai_key" in item.keywords and _missing_ai_key():
+            item.add_marker(skip_ai)
+        if "requires_parquet" in item.keywords and _missing_parquet():
+            item.add_marker(skip_data)
