@@ -23,6 +23,34 @@ app = FastAPI(title="MT5 Connector Service")
 
 CONNECTOR_API_TOKEN = os.getenv("MT5_API_TOKEN", "")
 
+# Listen on this machine only unless told otherwise. A remote deployment must set
+# MT5_CONNECTOR_HOST explicitly, for example to a private tunnel address.
+BIND_HOST = os.getenv("MT5_CONNECTOR_HOST", "127.0.0.1")
+
+# Refuse order, close and modify unless the terminal is logged into a demo account.
+# Anything other than an explicit false keeps the guard on.
+REQUIRE_DEMO = os.getenv("MT5_REQUIRE_DEMO", "true").strip().lower() not in ("0", "false", "no")
+
+
+def require_demo_account():
+    """Raise unless trading is allowed on the connected account."""
+    if not REQUIRE_DEMO:
+        return
+    acc = mt5.account_info()
+    if acc is None:
+        raise HTTPException(status_code=503, detail="Cannot read account info, refusing to trade")
+    if acc.trade_mode != mt5.ACCOUNT_TRADE_MODE_DEMO:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Account {acc.login} is not a demo account. "
+                   "Set MT5_REQUIRE_DEMO=false only for a deliberate live deployment.",
+        )
+
+
+def trade_mode_label(acc) -> str:
+    return {mt5.ACCOUNT_TRADE_MODE_DEMO: "demo", mt5.ACCOUNT_TRADE_MODE_CONTEST: "contest",
+            mt5.ACCOUNT_TRADE_MODE_REAL: "real"}.get(acc.trade_mode, "unknown")
+
 def verify_auth(authorization: str = ""):
     if CONNECTOR_API_TOKEN:
         token = authorization.replace("Bearer ", "").strip()
@@ -158,8 +186,10 @@ async def initialize_mt5(terminal_path_input: Optional[str] = None, authorizatio
                 "login": account.login,
                 "server": account.server,
                 "balance": account.balance,
-                "equity": account.equity
-            }
+                "equity": account.equity,
+                "trade_mode": trade_mode_label(account),
+            },
+            "require_demo": REQUIRE_DEMO,
         }
     except Exception as e:
         last_error = str(e)
@@ -265,6 +295,7 @@ async def place_order(order: OrderRequest, authorization: str = ""):
     """Place an order."""
     if not mt5_initialized:
         raise HTTPException(status_code=400, detail="MT5 not initialized")
+    require_demo_account()
     
     if not mt5.symbol_select(order.symbol, True):
         raise HTTPException(status_code=404, detail=f"Symbol {order.symbol} not found")
@@ -386,6 +417,7 @@ async def close_position(close_req: CloseRequest, authorization: str = ""):
     """Close a position."""
     if not mt5_initialized:
         raise HTTPException(status_code=400, detail="MT5 not initialized")
+    require_demo_account()
     
     positions = mt5.positions_get(ticket=close_req.ticket)
     if positions is None or len(positions) == 0:
@@ -448,6 +480,7 @@ async def modify_position(mod_req: ModifyRequest, authorization: str = ""):
     """Modify SL/TP of a position."""
     if not mt5_initialized:
         raise HTTPException(status_code=400, detail="MT5 not initialized")
+    require_demo_account()
     
     positions = mt5.positions_get(ticket=mod_req.ticket)
     if positions is None or len(positions) == 0:
@@ -697,8 +730,10 @@ if __name__ == "__main__":
         print(f"Manual MT5 initialization required (Call /initialize via API)")
         print(f"Error: {e}")
     
-    print(f"\nAPI Server starting on http://{SERVER_IP}:{PORT}")
-    print(f"Docs (Swagger UI): http://{SERVER_IP}:{PORT}/docs")
+    shown = SERVER_IP if BIND_HOST == "0.0.0.0" else BIND_HOST
+    print(f"\nAPI Server starting on http://{shown}:{PORT}")
+    print(f"Docs (Swagger UI): http://{shown}:{PORT}/docs")
+    print(f"Demo-only trading guard: {'ON' if REQUIRE_DEMO else 'OFF'}")
     print("=" * 60 + "\n")
     
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    uvicorn.run(app, host=BIND_HOST, port=PORT)

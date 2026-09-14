@@ -1,8 +1,8 @@
-# MT5 Connector Requirements
-fastapi==0.109.2
-uvicorn==0.27.1
-MetaTrader5==5.0.45
-pandas==2.1.4
-pytz==2024.1
-httpx==0.26.0
-python-dotenv==1.0.1
+# MT5 Connector. Runs on Windows with the MetaTrader 5 terminal installed.
+# Exact pins, all published with Windows wheels for Python 3.11 through 3.14.
+MetaTrader5==5.0.6180
+numpy==2.4.6
+pandas==2.3.3
+fastapi==0.141.1
+pydantic==2.13.5
+uvicorn==0.53.0
