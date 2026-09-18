@@ -53,7 +53,9 @@ git checkout -- app/core/connector_guard.py
 
 ## Step 2. Fake connector, Python 3.14, demo connection
 
-**Status:** built, waiting for your verification
+**Status:** verified by you on 2026-09-18. All four checks passed, including a full round trip on the
+OctaFX demo account: 0.01 lot XAUUSD opened with stop and target, stop modified, position closed,
+both deals present in history. The run exposed finding 14.
 
 **What changed**
 - Connector dependencies pinned to versions with Windows builds for Python 3.14, and three unused packages removed.
