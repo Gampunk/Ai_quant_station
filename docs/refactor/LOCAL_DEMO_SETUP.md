@@ -8,6 +8,34 @@ Work top to bottom. Every step says what you should see. If something differs, j
 
 ---
 
+## How to read this on Windows
+
+A copy sits on your Desktop as `mt5_demo_setup.txt`. Double-click it and it opens in Notepad.
+
+To refresh that copy later, run this in WSL:
+
+```bash
+cp ~/dev/Ai_quant_station/docs/refactor/LOCAL_DEMO_SETUP.md /mnt/c/Users/meetr/Desktop/mt5_demo_setup.txt
+```
+
+Keep the Desktop copy open while you work. Step 1 shuts WSL down, and the version inside the project is awkward to reach at that moment.
+
+---
+
+## Words used here
+
+| Word | What it means |
+|---|---|
+| PowerShell | The Windows command window. Press the Windows key, type `powershell`, press Enter. Nothing here needs Administrator. |
+| WSL | Your Ubuntu terminal inside Windows, where the project lives. |
+| Virtual environment | A private folder holding one project's Python packages. Installing into it never changes the Python installed on the machine, and deleting the folder removes everything cleanly. You already have two in the project, one for the backend and one for the connector tests. Step 2 creates a third, on the Windows side, because MetaTrader5 only installs on Windows. |
+| `$env:NAME = "value"` | How PowerShell sets a setting for that window only. Close the window and it is forgotten. |
+| `\\wsl.localhost\Ubuntu-24.04\...` | How Windows reaches files that live inside WSL. Windows treats it like a network drive. |
+| Port 5001 | The numbered door the connector listens on. The backend knocks on the same number. |
+| localhost | This machine. A service on localhost cannot be reached from the internet. |
+
+---
+
 ## Before you start
 
 - Finish checks 1 to 3 first. Step 1 below restarts WSL and closes VS Code.
@@ -62,16 +90,45 @@ In mirrored mode this prints your Windows machine name, `M-Raos-Laptop`, instead
 
 ## Step 2. Install the connector on Windows, once
 
-In **PowerShell**:
+You only ever do this once.
+
+**2a. Open PowerShell.** Press the Windows key, type `powershell`, press Enter.
+
+**2b. Check which Python versions Windows has.**
+
+```powershell
+py --list
+```
+
+You should see a line for `3.14`. If you see a different version, use that number everywhere below in place of `3.14`.
+
+**2c. Create the virtual environment.**
 
 ```powershell
 py -3.14 -m venv "$env:USERPROFILE\mt5-demo-venv"
+```
+
+This makes a folder called `mt5-demo-venv` in your user folder, `C:\Users\meetr`. It takes a few seconds and prints nothing when it works. Everything the connector needs goes in there, and nothing else on your machine changes.
+
+**2d. Install the connector's packages into it.**
+
+```powershell
 & "$env:USERPROFILE\mt5-demo-venv\Scripts\python.exe" -m pip install -r "\\wsl.localhost\Ubuntu-24.04\home\gampunk\dev\Ai_quant_station\mt5_connector\requirements.txt"
 ```
 
-Expect it to finish with `Successfully installed MetaTrader5-5.0.6180 ...`.
+This takes a minute or two and ends with `Successfully installed MetaTrader5-5.0.6180 ...`.
 
-This reads the connector straight out of your WSL repository, so it always runs the branch you have checked out. Nothing is copied.
+The leading `&` tells PowerShell to run the program whose path follows. You are calling the Python inside the new folder directly, so there is nothing to switch on or activate.
+
+**2e. Confirm it worked.**
+
+```powershell
+& "$env:USERPROFILE\mt5-demo-venv\Scripts\python.exe" -c "import MetaTrader5; print(MetaTrader5.__version__)"
+```
+
+Expect a version number such as `5.0.6180`. An error here means step 2d did not finish, so run it again before continuing.
+
+The long path in 2d reads the requirements straight out of your WSL project, so the connector always runs the code on your current branch. Nothing is copied to Windows except the packages.
 
 ---
 
@@ -87,7 +144,9 @@ This reads the connector straight out of your WSL repository, so it always runs 
 
 ## Step 4. Start the connector
 
-In **PowerShell**. Leave this window open for as long as you are testing.
+In **PowerShell**. Use the same window as step 2, or a new one. Leave it open for as long as you are testing.
+
+The first three lines set the port, tell the connector to accept connections only from this machine, and clear two settings that would weaken safety if they were left over from something else. They apply to this window only.
 
 ```powershell
 $env:MT5_CONNECTOR_PORT = "5001"
