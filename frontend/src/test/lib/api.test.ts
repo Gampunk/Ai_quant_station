@@ -1,5 +1,15 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import axios from 'axios'
 import api from '@/lib/api'
+
+// A fake transport, so no test ever reaches the network. Real calls made these
+// tests depend on a connection being refused quickly, which stopped being true
+// once WSL switched to mirrored networking: unused ports now hang instead.
+function fakeTransport() {
+  return vi.fn(async (config: any) => ({
+    data: { retried: true }, status: 200, statusText: 'OK', headers: {}, config,
+  }))
+}
 
 describe('API client', () => {
   beforeEach(() => {
@@ -68,6 +78,8 @@ describe('API client', () => {
   })
 
   describe('response interceptor', () => {
+    afterEach(() => { vi.restoreAllMocks() })
+
     let handlers: any[]
 
     beforeEach(() => {
@@ -105,41 +117,34 @@ describe('API client', () => {
       sessionStorage.setItem('auth-storage', JSON.stringify({
         state: { accessToken: 'old-tok', storedRefreshToken: 'refresh-me' },
       }))
-      const handler = extractErrorHandler()
-      const error = { response: { status: 401 }, config: {} }
+      const post = vi.spyOn(axios, 'post').mockResolvedValue({
+        data: { access_token: 'new-tok', refresh_token: 'new-refresh' },
+      } as any)
+      const adapter = fakeTransport()
 
-      try {
-        await handler(error)
-      } catch {
-        // Expected to fail since retry makes real HTTP call
-      }
+      const handler = extractErrorHandler()
+      const result = await handler({ response: { status: 401 }, config: { adapter } })
+
+      expect(post).toHaveBeenCalledWith('/api/auth/refresh', { refresh_token: 'refresh-me' })
+      const stored = JSON.parse(sessionStorage.getItem('auth-storage')!)
+      expect(stored.state.accessToken).toBe('new-tok')
+      expect(stored.state.storedRefreshToken).toBe('new-refresh')
+      expect(adapter).toHaveBeenCalledOnce()
+      expect(result.data).toEqual({ retried: true })
     })
 
     it('removes auth-storage and redirects on refresh failure', async () => {
       sessionStorage.setItem('auth-storage', JSON.stringify({
         state: { accessToken: 'old-tok', storedRefreshToken: 'bad-refresh' },
       }))
+      vi.spyOn(axios, 'post').mockRejectedValue(new Error('refresh rejected'))
+      Object.defineProperty(window, 'location', { value: { href: '/current' }, writable: true })
 
       const handler = extractErrorHandler()
-      const error = { response: { status: 401 }, config: {} }
-
-      const originalLocation = window.location.href
-      Object.defineProperty(window, 'location', {
-        value: { href: '/current' },
-        writable: true,
-      })
-
-      try {
-        await handler(error)
-      } catch {
-        // Expected
-      }
+      await handler({ response: { status: 401 }, config: { adapter: fakeTransport() } })
 
       expect(sessionStorage.getItem('auth-storage')).toBeNull()
-      Object.defineProperty(window, 'location', {
-        value: { href: originalLocation },
-        writable: true,
-      })
+      expect(window.location.href).toBe('/login')
     })
   })
 })

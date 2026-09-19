@@ -94,3 +94,52 @@ mt5_connector/.venv/bin/python -m pytest mt5_connector/tests -q
 ```
 
 Expect 4 failures. Restore with `git checkout -- mt5_connector/connector.py`.
+
+## Step 3. Connector security, and the fill price
+
+**Status:** built, waiting for your verification
+
+**What changed**
+- The token is read from the `Authorization` header on all 14 endpoints, compared in constant time. It used to be declared as a plain argument, which FastAPI reads from the query string, so the header every client sends was ignored. That is why the live connector runs with no token at all.
+- No token configured now refuses every request with 503. `MT5_ALLOW_NO_TOKEN=true` opts out, for an isolated instance such as the fake terminal.
+- `/docs`, `/redoc` and `/openapi.json` are off unless `MT5_ENABLE_DOCS=true`. The docs page is an interactive order form.
+- Order and close report the broker's fill price, plus `requested_price`. They used to report the quote seen beforehand. This is the connector half of finding 14.
+- Two frontend tests were making real network calls and asserting nothing. They now use a fake transport and check real behaviour. Mirrored networking made unused ports hang instead of refusing, which is how this surfaced.
+
+**Your checks**
+
+1. Five PASS lines.
+   ```bash
+   ./scripts/verify.sh
+   ```
+
+2. Token required, and the old broken behaviour gone. Start the fake connector with a token:
+   ```bash
+   mt5_connector/.venv/bin/python mt5_connector/testing/run_fake_connector.py --port 5001 --token mytoken
+   ```
+   In a second terminal, each of these should print what the comment says:
+   ```bash
+   curl -s -o /dev/null -w "no token: %{http_code}\n" http://127.0.0.1:5001/health
+   curl -s -o /dev/null -w "query string: %{http_code}\n" "http://127.0.0.1:5001/health?authorization=mytoken"
+   curl -s -o /dev/null -w "wrong token: %{http_code}\n" -H "Authorization: Bearer nope" http://127.0.0.1:5001/health
+   curl -s -o /dev/null -w "correct token: %{http_code}\n" -H "Authorization: Bearer mytoken" http://127.0.0.1:5001/health
+   curl -s -o /dev/null -w "docs page: %{http_code}\n" http://127.0.0.1:5001/docs
+   ```
+   Expect 401, 401, 401, 200, 404.
+
+3. Filled price against your demo account. Follow `LOCAL_DEMO_SETUP.md`, which now includes the token step, then:
+   ```bash
+   backend/.venv/bin/python scripts/demo_check.py --trade
+   ```
+   The order line shows `filled` and `quoted`. The filled price must match the OPEN deal printed at the end.
+
+**Negative controls**
+
+Auth: add `return True` as the first line of `verify_auth` in `mt5_connector/connector.py`. Expect 18 failures.
+
+Fill price: change both `filled_price = result.price if ...` lines to `filled_price = price`. Expect 3 failures.
+
+```bash
+mt5_connector/.venv/bin/python -m pytest mt5_connector/tests -q
+git checkout -- mt5_connector/connector.py
+```

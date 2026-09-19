@@ -148,10 +148,21 @@ In **PowerShell**. Use the same window as step 2, or a new one. Leave it open fo
 
 The first three lines set the port, tell the connector to accept connections only from this machine, and clear two settings that would weaken safety if they were left over from something else. They apply to this window only.
 
+**4a. Make up a token and show it.** The connector refuses every request without one.
+
+```powershell
+$env:MT5_API_TOKEN = [guid]::NewGuid().ToString("N")
+$env:MT5_API_TOKEN
+```
+
+Copy the value it prints. You need the same value in WSL in step 5.
+
+**4b. Start the connector.**
+
 ```powershell
 $env:MT5_CONNECTOR_PORT = "5001"
 $env:MT5_CONNECTOR_HOST = "127.0.0.1"
-Remove-Item Env:MT5_API_TOKEN, Env:MT5_REQUIRE_DEMO -ErrorAction SilentlyContinue
+Remove-Item Env:MT5_REQUIRE_DEMO, Env:MT5_ALLOW_NO_TOKEN, Env:MT5_ENABLE_DOCS -ErrorAction SilentlyContinue
 & "$env:USERPROFILE\mt5-demo-venv\Scripts\python.exe" "\\wsl.localhost\Ubuntu-24.04\home\gampunk\dev\Ai_quant_station\mt5_connector\connector.py"
 ```
 
@@ -162,26 +173,28 @@ Auto-Connected to MT5 Terminal (Default)
    Account: 12345678 | Server: YourBroker-Demo
 
 API Server starting on http://127.0.0.1:5001
-Docs (Swagger UI): http://127.0.0.1:5001/docs
 Demo-only trading guard: ON
+API token: required
+Docs page: disabled
 ```
 
-Two lines matter. The account must be your demo one, and the guard must say **ON**.
+Four lines matter. The account must be your demo one, the guard must say **ON**, the token must say **required**, and the docs page must say **disabled**.
 
-The API token is deliberately left unset. The connector's token check is broken until step 3 of the refactor, and this connector only accepts connections from your own machine.
+If the token line says MISSING, step 4a did not run in this window. Stop the connector, run 4a, and start it again.
 
 ---
 
 ## Step 5. Check it from WSL, read-only
 
-In **WSL**, at the repository root:
+In **WSL**, at the repository root. Paste the token from step 4a in place of `PASTE_TOKEN_HERE`.
 
 ```bash
 cd ~/dev/Ai_quant_station
+export MT5_API_TOKEN=PASTE_TOKEN_HERE
 backend/.venv/bin/python scripts/demo_check.py 2>&1 | tee ~/demo_check_readonly.log
 ```
 
-Add your symbol if gold is not called `XAUUSD`:
+The token stays set for that terminal window, so step 6 picks it up too. Add your symbol if gold is not called `XAUUSD`:
 
 ```bash
 backend/.venv/bin/python scripts/demo_check.py --symbol GOLD 2>&1 | tee ~/demo_check_readonly.log
@@ -202,6 +215,8 @@ backend/.venv/bin/python scripts/demo_check.py --trade 2>&1 | tee ~/demo_check_t
 Add `--symbol` again if you needed it in step 5.
 
 Expect every line to say PASS, ending with `All stages passed`, and a small profit or loss of a few cents from the spread.
+
+It now prints the price the broker filled at next to the price quoted a moment earlier. A small difference between them is normal and is the slippage on that fill.
 
 You can watch the position appear and disappear in the MT5 Toolbox under Trade and History.
 
@@ -239,6 +254,8 @@ Send me both, plus what the PowerShell window printed when the connector started
 | Order fails mentioning AutoTrading | Algo Trading is off | Switch it on in the MT5 toolbar |
 | Order fails mentioning volume | The broker's minimum lot is above 0.01 | Send me the message, do not raise the size yourself |
 | `ConnectorAddressBlocked` | The address is not local | You passed a `--url` that is not on your machine. Drop it and use the default |
+| `401, the token is missing or wrong` | The two windows have different tokens | Re-run `$env:MT5_API_TOKEN` in PowerShell to show it, and export the same value in WSL |
+| `503, the connector has no token configured` | The connector started without step 4a | Stop it, run 4a, start it again |
 | WSL feels broken, or a VPN stops working, after step 1 | Mirrored networking conflicts with some VPNs | See Rollback |
 
 ---
@@ -269,4 +286,4 @@ The same connector code runs against a fake terminal entirely inside WSL, with n
 mt5_connector/.venv/bin/python mt5_connector/testing/run_fake_connector.py --port 5001
 ```
 
-Then run `demo_check.py` exactly as in steps 5 and 6.
+The fake needs no token, so run `demo_check.py` as in steps 5 and 6 without setting one. To rehearse the real setup with a token, start it with `--token mytoken` and `export MT5_API_TOKEN=mytoken` in WSL.
