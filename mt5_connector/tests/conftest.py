@@ -22,6 +22,7 @@ import connector  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 FIXED_NOW = 1_789_380_000  # 2026-09-14 10:00:00 UTC
+TEST_TOKEN = "test-token-abc123"
 
 
 @pytest.fixture
@@ -32,10 +33,12 @@ def mt5():
 
 @pytest.fixture
 def client(mt5, monkeypatch):
-    """Connector with a demo account, initialized, demo guard on."""
+    """Connector with a demo account, initialized, demo guard on, token required."""
     monkeypatch.setattr(connector, "mt5_initialized", False)
     monkeypatch.setattr(connector, "REQUIRE_DEMO", True)
-    with TestClient(connector.app) as c:
+    monkeypatch.setattr(connector, "CONNECTOR_API_TOKEN", TEST_TOKEN)
+    monkeypatch.setattr(connector, "ALLOW_NO_TOKEN", False)
+    with TestClient(connector.app, headers={"Authorization": f"Bearer {TEST_TOKEN}"}) as c:
         resp = c.post("/initialize")
         assert resp.status_code == 200, resp.text
         yield c

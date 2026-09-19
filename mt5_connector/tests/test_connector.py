@@ -12,7 +12,7 @@ import sys
 import pytest
 
 import connector
-from conftest import CONNECTOR_DIR, FAKE_DIR, buy
+from conftest import CONNECTOR_DIR, FAKE_DIR, TEST_TOKEN, buy
 
 
 # ── Startup configuration ────────────────────────────────────────────────────
@@ -58,7 +58,8 @@ def test_initialize_failure_is_reported(mt5, monkeypatch):
     from fastapi.testclient import TestClient
     mt5._reset(init_ok=False)
     monkeypatch.setattr(connector, "mt5_initialized", False)
-    with TestClient(connector.app) as c:
+    monkeypatch.setattr(connector, "CONNECTOR_API_TOKEN", TEST_TOKEN)
+    with TestClient(connector.app, headers={"Authorization": f"Bearer {TEST_TOKEN}"}) as c:
         resp = c.post("/initialize")
     assert resp.status_code == 500
 
@@ -169,3 +170,37 @@ def test_unreadable_account_refuses_to_trade(client, mt5):
 def test_explicit_override_allows_real_account(client, real_account_ticket, monkeypatch):
     monkeypatch.setattr(connector, "REQUIRE_DEMO", False)
     assert buy(client).status_code == 200
+
+
+# ── Execution price is the fill, not the quote ───────────────────────────────
+def test_order_reports_the_filled_price_not_the_quote(client):
+    quote = client.get("/symbol/XAUUSD").json()
+    order = buy(client).json()
+    assert order["requested_price"] == quote["ask"]
+    assert order["price"] != quote["ask"], "fill price is still just the quote"
+
+    deals = client.get("/history").json()["deals"]
+    opened = next(d for d in deals if d["position_id"] == order["ticket"] and d["entry"] == "OPEN")
+    assert order["price"] == opened["price"], "reported price does not match the executed deal"
+
+
+def test_close_reports_the_filled_price_not_the_quote(client):
+    ticket = buy(client).json()["ticket"]
+    quote = client.get("/symbol/XAUUSD").json()
+    closed = client.post("/close", json={"ticket": ticket}).json()
+    assert closed["requested_price"] == quote["bid"]
+    assert closed["close_price"] != quote["bid"]
+
+    deals = client.get("/history").json()["deals"]
+    shut = next(d for d in deals if d["position_id"] == ticket and d["entry"] == "CLOSE")
+    assert closed["close_price"] == shut["price"]
+
+
+def test_reported_prices_explain_the_profit(client):
+    """Entry and exit as reported must account for the profit the broker paid."""
+    order = buy(client, volume=0.10).json()
+    closed = client.post("/close", json={"ticket": order["ticket"]}).json()
+    shut = next(d for d in client.get("/history").json()["deals"]
+                if d["position_id"] == order["ticket"] and d["entry"] == "CLOSE")
+    expected = (closed["close_price"] - order["price"]) * 0.10 * 100  # gold, 100 oz contract
+    assert abs(expected - shut["profit"]) < 0.01

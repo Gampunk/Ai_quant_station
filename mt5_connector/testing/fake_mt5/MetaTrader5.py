@@ -73,7 +73,8 @@ _S: dict = {}
 
 
 def _reset(trade_mode: int = ACCOUNT_TRADE_MODE_DEMO, now: int | None = None,
-           balance: float = 10_000.0, init_ok: bool = True, account_available: bool = True) -> None:
+           balance: float = 10_000.0, init_ok: bool = True, account_available: bool = True,
+           slippage_points: int = 2) -> None:
     """Test helper. Restore a clean account. `now` is a unix timestamp that fixes the clock."""
     with _lock:
         env_now = os.getenv("FAKE_MT5_NOW")
@@ -83,7 +84,7 @@ def _reset(trade_mode: int = ACCOUNT_TRADE_MODE_DEMO, now: int | None = None,
             trade_mode=trade_mode, balance=balance,
             now=now if now is not None else (int(env_now) if env_now else None),
             next_ticket=100_001, positions={}, deals=[], orders={},
-            ticks={}, last_error=(1, "Success"),
+            ticks={}, last_error=(1, "Success"), slippage_points=slippage_points,
         )
         for name, (_, point, digits, _, spread, _, _) in _SYMBOLS.items():
             bid = round(float(_mid(name, np.array([_now()]))[0]), digits)
@@ -264,6 +265,14 @@ def _ts(value):
 
 
 # ── Trading ──────────────────────────────────────────────────────────────────
+def _slipped(symbol, price, worse_upward):
+    """Fill a little away from the quote, the way a real broker does."""
+    point = _SYMBOLS[symbol][1]
+    digits = _SYMBOLS[symbol][2]
+    offset = _S["slippage_points"] * point
+    return round(price + offset if worse_upward else price - offset, digits)
+
+
 def _result(retcode, comment, order=0, deal=0, volume=0.0, price=0.0, bid=0.0, ask=0.0):
     return OrderSendResult(retcode=retcode, deal=deal, order=order, volume=volume, price=price,
                            bid=bid, ask=ask, comment=comment, request_id=1)
@@ -344,7 +353,8 @@ def order_send(request: dict):
             pos = _S["positions"].get(request["position"])
             if pos is None:
                 return _result(TRADE_RETCODE_POSITION_CLOSED, "Position doesn't exist", bid=bid, ask=ask)
-            price = bid if pos["type"] == POSITION_TYPE_BUY else ask
+            long = pos["type"] == POSITION_TYPE_BUY
+            price = _slipped(symbol, bid if long else ask, worse_upward=not long)
             deal, _ = _close(pos, min(volume, pos["volume"]), price, request.get("comment", ""))
             return _result(TRADE_RETCODE_DONE, "Request executed", order=deal, deal=deal,
                            volume=volume, price=price, bid=bid, ask=ask)
@@ -352,7 +362,7 @@ def order_send(request: dict):
         if order_type not in (ORDER_TYPE_BUY, ORDER_TYPE_SELL):
             return _result(TRADE_RETCODE_INVALID, "Invalid order type", bid=bid, ask=ask)
         buy = order_type == ORDER_TYPE_BUY
-        price = ask if buy else bid
+        price = _slipped(symbol, ask if buy else bid, worse_upward=buy)
         sl, tp = request.get("sl") or 0.0, request.get("tp") or 0.0
         if not _stops_valid(buy, price, sl, tp):
             return _result(TRADE_RETCODE_INVALID_STOPS, "Invalid stops", bid=bid, ask=ask)

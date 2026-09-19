@@ -4,10 +4,13 @@ Check a real MT5 connector connected to a DEMO account.
 Read-only by default. Pass --trade to place, modify and close one 0.01 lot
 position on the demo account. Refuses to trade unless the account reports demo.
 
+The connector's token is read from MT5_API_TOKEN, or pass --token.
+
     backend/.venv/bin/python scripts/demo_check.py
     backend/.venv/bin/python scripts/demo_check.py --trade
 """
 import argparse
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -32,15 +35,24 @@ def main():
     parser.add_argument("--url", default="http://127.0.0.1:5001")
     parser.add_argument("--symbol", default="XAUUSD", help="broker symbol name, for example XAUUSD or GOLD")
     parser.add_argument("--trade", action="store_true", help="place, modify and close one 0.01 lot demo trade")
+    parser.add_argument("--token", default=os.getenv("MT5_API_TOKEN", ""),
+                        help="connector API token; defaults to MT5_API_TOKEN")
     args = parser.parse_args()
 
     check_connector_url(args.url)
-    c = httpx.Client(base_url=args.url, timeout=30)
+    headers = {"Authorization": f"Bearer {args.token}"} if args.token else {}
+    c = httpx.Client(base_url=args.url, timeout=30, headers=headers)
 
     try:
         health = c.get("/health")
     except httpx.HTTPError as exc:
         stage("connector reachable", False, f"{exc}. Is connector.py running on Windows, and is mirrored networking on?")
+        return 1
+    if health.status_code == 401:
+        stage("connector reachable", False, "401, the token is missing or wrong. Set MT5_API_TOKEN or pass --token.")
+        return 1
+    if health.status_code == 503:
+        stage("connector reachable", False, "503, the connector has no token configured. Set MT5_API_TOKEN on Windows too.")
         return 1
     stage("connector reachable", health.status_code == 200, health.text)
 
@@ -82,7 +94,9 @@ def main():
         print("      If the error mentions AutoTrading, enable Algo Trading in the MT5 toolbar.")
         return 1
     ticket = order.json()["ticket"]
-    print(f"      ticket {ticket}  price {order.json()['price']}  sl {order.json()['sl']}  tp {order.json()['tp']}")
+    body = order.json()
+    print(f"      ticket {ticket}  filled {body['price']}  quoted {body.get('requested_price')}  "
+          f"sl {body['sl']}  tp {body['tp']}")
 
     time.sleep(1)
     pos = c.get("/positions").json()
@@ -94,6 +108,9 @@ def main():
 
     close = c.post("/close", json={"ticket": ticket})
     stage("close position", close.status_code == 200, close.text[:200])
+    if close.status_code == 200:
+        cb = close.json()
+        print(f"      filled {cb['close_price']}  quoted {cb.get('requested_price')}")
 
     time.sleep(1)
     deals = [x for x in c.get("/history", params={"hours": 24}).json().get("deals", []) if x["position_id"] == ticket]

@@ -20,10 +20,20 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--trade-mode", choices=["demo", "real"], default="demo",
                         help="account type the fake terminal reports")
+    parser.add_argument("--token", default="", help="require this API token; default is no token")
+    parser.add_argument("--enable-docs", action="store_true", help="serve the /docs page")
     args = parser.parse_args()
 
     os.environ["MT5_CONNECTOR_PORT"] = str(args.port)
     os.environ["MT5_CONNECTOR_HOST"] = args.host
+    if args.token:
+        os.environ["MT5_API_TOKEN"] = args.token
+    else:
+        # A fake terminal reachable only from this machine needs no token.
+        os.environ.pop("MT5_API_TOKEN", None)
+        os.environ["MT5_ALLOW_NO_TOKEN"] = "true"
+    if args.enable_docs:
+        os.environ["MT5_ENABLE_DOCS"] = "true"
 
     import MetaTrader5 as mt5
     if not getattr(mt5, "IS_FAKE", False):
@@ -37,7 +47,8 @@ def main():
     mt5.initialize()
     connector.mt5_initialized = True
     print(f"FAKE MT5 connector on http://{args.host}:{args.port}  trade_mode={args.trade_mode}  "
-          f"demo_guard={'ON' if connector.REQUIRE_DEMO else 'OFF'}")
+          f"demo_guard={'ON' if connector.REQUIRE_DEMO else 'OFF'}  "
+          f"token={'required' if connector.CONNECTOR_API_TOKEN else 'none'}")
     uvicorn.run(connector.app, host=args.host, port=args.port, log_level="warning")
 
 

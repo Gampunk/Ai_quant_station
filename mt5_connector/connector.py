@@ -4,12 +4,13 @@
 
 import sys
 import os
+import secrets
 import socket
 from datetime import datetime, timedelta
 from typing import Optional
 import MetaTrader5 as mt5
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -19,13 +20,25 @@ if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
     sys.stderr.reconfigure(encoding='utf-8')
 
-app = FastAPI(title="MT5 Connector Service")
+# The docs page is an interactive order form. It is off unless explicitly enabled.
+ENABLE_DOCS = os.getenv("MT5_ENABLE_DOCS", "").strip().lower() in ("1", "true", "yes")
+
+app = FastAPI(
+    title="MT5 Connector Service",
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_DOCS else None,
+)
 
 CONNECTOR_API_TOKEN = os.getenv("MT5_API_TOKEN", "")
 
 # Listen on this machine only unless told otherwise. A remote deployment must set
 # MT5_CONNECTOR_HOST explicitly, for example to a private tunnel address.
 BIND_HOST = os.getenv("MT5_CONNECTOR_HOST", "127.0.0.1")
+
+# Without a token the connector refuses every request. Only set this for an
+# instance nothing else can reach, such as the fake terminal used in tests.
+ALLOW_NO_TOKEN = os.getenv("MT5_ALLOW_NO_TOKEN", "").strip().lower() in ("1", "true", "yes")
 
 # Refuse order, close and modify unless the terminal is logged into a demo account.
 # Anything other than an explicit false keeps the guard on.
@@ -51,11 +64,27 @@ def trade_mode_label(acc) -> str:
     return {mt5.ACCOUNT_TRADE_MODE_DEMO: "demo", mt5.ACCOUNT_TRADE_MODE_CONTEST: "contest",
             mt5.ACCOUNT_TRADE_MODE_REAL: "real"}.get(acc.trade_mode, "unknown")
 
-def verify_auth(authorization: str = ""):
-    if CONNECTOR_API_TOKEN:
-        token = authorization.replace("Bearer ", "").strip()
-        if token != CONNECTOR_API_TOKEN:
-            raise HTTPException(status_code=401, detail="Invalid API token")
+def verify_auth(authorization: str | None = Header(default=None)):
+    """Check the Authorization header. Used as a dependency on every endpoint.
+
+    The header is the only accepted place for the token. An earlier version
+    declared `authorization` as a plain argument, which FastAPI reads from the
+    query string, so the header every client sends was ignored.
+    """
+    if not CONNECTOR_API_TOKEN:
+        if ALLOW_NO_TOKEN:
+            return True
+        raise HTTPException(
+            status_code=503,
+            detail="Connector has no MT5_API_TOKEN set. Set one, or set "
+                   "MT5_ALLOW_NO_TOKEN=true for an isolated local instance.",
+        )
+    supplied = (authorization or "")
+    if supplied.lower().startswith("bearer "):
+        supplied = supplied[7:]
+    supplied = supplied.strip()
+    if not supplied or not secrets.compare_digest(supplied, CONNECTOR_API_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid API token")
     return True
 
 app.add_middleware(
@@ -135,8 +164,7 @@ class ModifyRequest(BaseModel):
 
 
 @app.get("/")
-async def root(authorization: str = ""):
-    verify_auth(authorization)
+async def root(_auth: bool = Depends(verify_auth)):
     return {
         "service": "MT5 Connector",
         "version": "2.0.0",
@@ -148,8 +176,7 @@ async def root(authorization: str = ""):
 
 
 @app.get("/health")
-async def health(authorization: str = ""):
-    verify_auth(authorization)
+async def health(_auth: bool = Depends(verify_auth)):
     return {
         "status": "healthy" if mt5_initialized else "not_initialized",
         "mt5_connected": mt5_initialized,
@@ -158,8 +185,7 @@ async def health(authorization: str = ""):
 
 
 @app.post("/initialize")
-async def initialize_mt5(terminal_path_input: Optional[str] = None, authorization: str = ""):
-    verify_auth(authorization)
+async def initialize_mt5(terminal_path_input: Optional[str] = None, _auth: bool = Depends(verify_auth)):
     """Initialize MT5 connection."""
     global mt5_initialized, last_error, terminal_path
     
@@ -197,8 +223,7 @@ async def initialize_mt5(terminal_path_input: Optional[str] = None, authorizatio
 
 
 @app.post("/shutdown")
-async def shutdown_mt5(authorization: str = ""):
-    verify_auth(authorization)
+async def shutdown_mt5(_auth: bool = Depends(verify_auth)):
     """Shutdown MT5 connection."""
     global mt5_initialized
     mt5.shutdown()
@@ -207,8 +232,7 @@ async def shutdown_mt5(authorization: str = ""):
 
 
 @app.get("/account")
-async def get_account(authorization: str = ""):
-    verify_auth(authorization)
+async def get_account(_auth: bool = Depends(verify_auth)):
     """Get account info."""
     if not mt5_initialized:
         raise HTTPException(status_code=400, detail="MT5 not initialized")
@@ -235,8 +259,7 @@ async def get_account(authorization: str = ""):
 
 
 @app.get("/symbols")
-async def get_symbols(authorization: str = ""):
-    verify_auth(authorization)
+async def get_symbols(_auth: bool = Depends(verify_auth)):
     """Get all available symbols."""
     if not mt5_initialized:
         raise HTTPException(status_code=400, detail="MT5 not initialized")
@@ -264,8 +287,7 @@ async def get_symbols(authorization: str = ""):
 
 
 @app.get("/symbol/{symbol}")
-async def get_symbol(symbol: str, authorization: str = ""):
-    verify_auth(authorization)
+async def get_symbol(symbol: str, _auth: bool = Depends(verify_auth)):
     """Get specific symbol info."""
     if not mt5_initialized:
         raise HTTPException(status_code=400, detail="MT5 not initialized")
@@ -290,8 +312,7 @@ async def get_symbol(symbol: str, authorization: str = ""):
 
 
 @app.post("/order")
-async def place_order(order: OrderRequest, authorization: str = ""):
-    verify_auth(authorization)
+async def place_order(order: OrderRequest, _auth: bool = Depends(verify_auth)):
     """Place an order."""
     if not mt5_initialized:
         raise HTTPException(status_code=400, detail="MT5 not initialized")
@@ -398,12 +419,16 @@ async def place_order(order: OrderRequest, authorization: str = ""):
     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
         raise HTTPException(status_code=400, detail=f"Order failed: {result.comment if result else 'Unknown'}")
     
+    # result.price is what the broker filled at. `price` above was only the quote
+    # we saw beforehand, and the two differ by the slippage on the fill.
+    filled_price = result.price if getattr(result, "price", 0) else price
     return {
         "success": True,
         "ticket": result.order,
         "symbol": order.symbol,
-        "volume": volume,
-        "price": price,
+        "volume": result.volume if getattr(result, "volume", 0) else volume,
+        "price": filled_price,
+        "requested_price": price,
         "sl": sl,
         "tp": tp,
         "comment": result.comment,
@@ -412,8 +437,7 @@ async def place_order(order: OrderRequest, authorization: str = ""):
 
 
 @app.post("/close")
-async def close_position(close_req: CloseRequest, authorization: str = ""):
-    verify_auth(authorization)
+async def close_position(close_req: CloseRequest, _auth: bool = Depends(verify_auth)):
     """Close a position."""
     if not mt5_initialized:
         raise HTTPException(status_code=400, detail="MT5 not initialized")
@@ -465,18 +489,19 @@ async def close_position(close_req: CloseRequest, authorization: str = ""):
     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
         raise HTTPException(status_code=400, detail=f"Close failed: {result.comment if result else 'Unknown'}")
     
+    filled_price = result.price if getattr(result, "price", 0) else price
     return {
         "success": True,
         "ticket": close_req.ticket,
         "closed_volume": close_volume,
-        "close_price": price,
+        "close_price": filled_price,
+        "requested_price": price,
         "comment": result.comment
     }
 
 
 @app.post("/modify")
-async def modify_position(mod_req: ModifyRequest, authorization: str = ""):
-    verify_auth(authorization)
+async def modify_position(mod_req: ModifyRequest, _auth: bool = Depends(verify_auth)):
     """Modify SL/TP of a position."""
     if not mt5_initialized:
         raise HTTPException(status_code=400, detail="MT5 not initialized")
@@ -518,8 +543,7 @@ async def modify_position(mod_req: ModifyRequest, authorization: str = ""):
 
 
 @app.get("/positions")
-async def get_positions(authorization: str = ""):
-    verify_auth(authorization)
+async def get_positions(_auth: bool = Depends(verify_auth)):
     """Get all open positions."""
     if not mt5_initialized:
         raise HTTPException(status_code=400, detail="MT5 not initialized")
@@ -562,8 +586,7 @@ async def get_positions(authorization: str = ""):
 
 
 @app.get("/history")
-async def get_history(hours: int = 0, authorization: str = ""):
-    verify_auth(authorization)
+async def get_history(hours: int = 0, _auth: bool = Depends(verify_auth)):
     """Get trade history."""
     if not mt5_initialized:
         raise HTTPException(status_code=400, detail="MT5 not initialized")
@@ -604,8 +627,7 @@ async def get_history(hours: int = 0, authorization: str = ""):
 
 
 @app.get("/data/range/{symbol}")
-async def get_data_range(symbol: str, timeframe: str = "1h", start: str = "", end: str = "", authorization: str = ""):
-    verify_auth(authorization)
+async def get_data_range(symbol: str, timeframe: str = "1h", start: str = "", end: str = "", _auth: bool = Depends(verify_auth)):
     """Get OHLC data for a date range."""
     if not mt5_initialized:
         raise HTTPException(status_code=400, detail="MT5 not initialized")
@@ -652,8 +674,7 @@ async def get_data_range(symbol: str, timeframe: str = "1h", start: str = "", en
 
 
 @app.get("/data/latest/{symbol}")
-async def get_latest_data(symbol: str, timeframe: str = "1h", count: int = 500, authorization: str = ""):
-    verify_auth(authorization)
+async def get_latest_data(symbol: str, timeframe: str = "1h", count: int = 500, _auth: bool = Depends(verify_auth)):
     """Get latest OHLC data."""
     if not mt5_initialized:
         raise HTTPException(status_code=400, detail="MT5 not initialized")
@@ -734,6 +755,13 @@ if __name__ == "__main__":
     print(f"\nAPI Server starting on http://{shown}:{PORT}")
     print(f"Docs (Swagger UI): http://{shown}:{PORT}/docs")
     print(f"Demo-only trading guard: {'ON' if REQUIRE_DEMO else 'OFF'}")
+    if CONNECTOR_API_TOKEN:
+        print("API token: required")
+    elif ALLOW_NO_TOKEN:
+        print("API token: NONE, explicitly allowed. Local use only.")
+    else:
+        print("API token: MISSING. Every request will be refused with 503.")
+    print(f"Docs page: {'/docs enabled' if ENABLE_DOCS else 'disabled'}")
     print("=" * 60 + "\n")
     
     uvicorn.run(app, host=BIND_HOST, port=PORT)
