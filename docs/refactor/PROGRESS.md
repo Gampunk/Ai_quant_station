@@ -97,7 +97,8 @@ Expect 4 failures. Restore with `git checkout -- mt5_connector/connector.py`.
 
 ## Step 3. Connector security, and the fill price
 
-**Status:** built, waiting for your verification
+**Status:** verified by you on 2026-09-20. Checks 1 to 3 passed, including both negative controls.
+Check 4, the fill price against the real demo account, is deferred to a later session.
 
 **What changed**
 - The token is read from the `Authorization` header on all 14 endpoints, compared in constant time. It used to be declared as a plain argument, which FastAPI reads from the query string, so the header every client sends was ignored. That is why the live connector runs with no token at all.
