@@ -144,3 +144,67 @@ Fill price: change both `filled_price = result.price if ...` lines to `filled_pr
 mt5_connector/.venv/bin/python -m pytest mt5_connector/tests -q
 git checkout -- mt5_connector/connector.py
 ```
+
+## Step 4. Signing key, accounts, permissions
+
+**Status:** built, waiting for your verification
+
+**What changed**
+- The server refuses to start unless `SECRET_KEY` is at least 32 characters and not the example placeholder. The old code fell back to a new random key on every call.
+- On a fresh database, only `admin` is created, only from a strong `DEFAULT_ADMIN_PASSWORD`. The four accounts with passwords written in the code are gone, including from `setup_postgres.py`.
+- `create_admin.py` adds a person or resets a password, and prompts for it.
+- Trading, autopilot changes, AI chat, prompt backtests and historical lab runs need the admin or trader role. Viewers can still read.
+- Trade endpoints no longer accept the shared connector token, so every trade belongs to a logged-in person.
+- The endpoint that ran any Python sent to it is deleted. Nothing in the app used it.
+- Saving your own AI provider key works. It used to crash.
+- `backend/.env` was generated for you with a random signing key and admin password. It is not committed.
+
+**Before checking:** your old local database was created with the old accounts. Delete it so a fresh one is made:
+
+```bash
+rm -f ~/dev/Ai_quant_station/backend/finance_engine.db
+```
+
+**Your checks.** All from `~/dev/Ai_quant_station/backend`.
+
+1. Five PASS lines. The backend now takes about six minutes.
+   ```bash
+   ../scripts/verify.sh
+   ```
+
+2. No strong key, no server. Each should end with `Application startup failed`:
+   ```bash
+   SECRET_KEY= .venv/bin/python -m uvicorn app.main:app --port 8765
+   SECRET_KEY=short .venv/bin/python -m uvicorn app.main:app --port 8765
+   ```
+
+3. Only admin exists, the old password is dead, the new one works. Start the server and leave it running:
+   ```bash
+   .venv/bin/python -m uvicorn app.main:app --port 8765
+   ```
+   Look for `Admin account created from DEFAULT_ADMIN_PASSWORD`. In a second terminal:
+   ```bash
+   cd ~/dev/Ai_quant_station/backend
+   ADMIN_PW=$(grep ^DEFAULT_ADMIN_PASSWORD .env | cut -d= -f2-)
+   curl -s -o /dev/null -w "old published password: %{http_code}\n" -X POST localhost:8765/api/auth/login -H "content-type: application/json" -d '{"username":"admin","password":"admin@2026"}'
+   curl -s -o /dev/null -w "your admin password: %{http_code}\n" -X POST localhost:8765/api/auth/login -H "content-type: application/json" -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PW\"}"
+   curl -s -o /dev/null -w "old guest account: %{http_code}\n" -X POST localhost:8765/api/auth/login -H "content-type: application/json" -d '{"username":"guest","password":"Usdt@2026"}'
+   ```
+   Expect 401, 200, 401.
+
+4. A viewer cannot trade. Stop the server with Ctrl+C, then create a viewer. It asks for a password of at least 12 characters:
+   ```bash
+   .venv/bin/python create_admin.py --username viewer_test --name "Viewer Test" --role viewer
+   ```
+   Start the server again, then in the second terminal, using the password you just chose:
+   ```bash
+   TOKEN=$(curl -s -X POST localhost:8765/api/auth/login -H "content-type: application/json" -d '{"username":"viewer_test","password":"THE_PASSWORD_YOU_CHOSE"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+   curl -s -w "\ntrade as viewer: %{http_code}\n" -X POST localhost:8765/api/trade/order -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" -d '{"symbol":"XAUUSD","action":"BUY","volume":0.01}'
+   curl -s -o /dev/null -w "read status as viewer: %{http_code}\n" localhost:8765/api/autopilot/status -H "Authorization: Bearer $TOKEN"
+   ```
+   Expect 403 with a message naming the roles, then 200.
+
+**Negative controls.** Restore with `git checkout -- <file>` after each.
+
+- In `app/core/security.py`, add `return current_user` as the first line inside `checker`. Run `.venv/bin/python -m pytest tests/test_access_control.py -q -k viewer_is_refused`. Expect 14 failures.
+- In `app/core/security.py`, replace the two lines inside `_signing_key` with `return settings.SECRET_KEY or "x" * 40`. Run `.venv/bin/python -m pytest tests/test_access_control.py -q -k no_key_means_no_tokens`. Expect 1 failure.
