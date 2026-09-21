@@ -1,6 +1,7 @@
 """
-Code Execution Endpoint
-Executes Python code safely with market data and returns charts + tables
+Sandbox for AI-written Python, used by the AI Analyst, Autopilot, Historical Lab
+and Prompt Backtest. There is deliberately no endpoint that runs code sent by a
+client; an earlier POST /api/execute/code did, and nothing in the app used it.
 
 Multi-user isolation:
   - When user_id is provided, sandbox runs in an isolated subprocess
@@ -8,7 +9,7 @@ Multi-user isolation:
   - Each subprocess exits after one execution (no state persistence risk)
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import io
@@ -29,26 +30,8 @@ import uuid
 import re
 
 from ..core.utils import sanitize_for_json as _sanitize
-from ..core.rate_limit import limiter
 
 router = APIRouter(prefix="/execute", tags=["AI"])
-
-
-class ExecuteCodeRequest(BaseModel):
-    code: str
-    market_data: Optional[List[Dict[str, Any]]] = None
-    symbol: Optional[str] = None
-    session_id: Optional[str] = None   # client-generated id to isolate sessions
-    user_id: int = 0                   # Overridden by authenticated user_id from JWT
-
-
-class ExecuteCodeResponse(BaseModel):
-    success: bool
-    output: str = ""
-    error: Optional[str] = None
-    data_preview: Optional[str] = None
-    charts: Optional[List[Dict[str, Any]]] = None
-    tables: Optional[List[Dict[str, Any]]] = None
 
 
 # ── Sandbox session state ──────────────────────────────────────────────────
@@ -563,32 +546,6 @@ async def run_python_code(
     # ── Add session_id to response ──────────────────────────────────────────
     result["session_id"] = sess_key
     return result
-
-
-# ── API Endpoint ───────────────────────────────────────────────────────────
-@router.post("/code", response_model=ExecuteCodeResponse)
-@limiter.limit("20/minute")
-async def execute_code(request: Request, exec_request: ExecuteCodeRequest, current_user: dict = Depends(get_current_user)):
-    """Execute Python code with market data (df) and common libraries."""
-    user_id = current_user.get("user_id", 0)
-    try:
-        result = await asyncio.wait_for(
-            run_python_code(
-                exec_request.code,
-                exec_request.market_data,
-                exec_request.symbol,
-                exec_request.session_id,
-                user_id=user_id,
-            ),
-            timeout=60.0,
-        )
-    except asyncio.TimeoutError:
-        result = {
-            "success": False,
-            "error": "Execution timed out (60s limit). Simplify your code or reduce loop iterations.",
-            "output": "",
-        }
-    return ExecuteCodeResponse(**result)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

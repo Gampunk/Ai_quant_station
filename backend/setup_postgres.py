@@ -75,41 +75,9 @@ async def setup_postgres():
         
         print("Users table created!")
         
-        # Create default admin user
-        from app.core.security import get_password_hash
-        
-        admin_exists = await conn.fetchval(
-            "SELECT 1 FROM users WHERE username = $1", "admin"
-        )
-        
-        if not admin_exists:
-            await conn.execute("""
-                INSERT INTO users (username, name, hashed_password, role)
-                VALUES ($1, $2, $3, $4)
-            """, "admin", "System Administrator", get_password_hash("admin@2026"), "admin")
-            print("Default admin user created: admin / admin@2026")
-        else:
-            print("Admin user already exists")
-        
-        # Create test users
-        test_users = [
-            ("keval_viradiya", "Keval Viradiya", "Usdt@2026", "trader"),
-            ("sagar_barot", "Sagar Barot", "Usdt@2026", "trader"),
-            ("meet_rao", "Meet Rao", "Usdt@2026", "trader"),
-            ("guest", "Guest Viewer", "Usdt@2026", "viewer"),
-        ]
-        
-        for username, name, password, role in test_users:
-            exists = await conn.fetchval(
-                "SELECT 1 FROM users WHERE username = $1", username
-            )
-            if not exists:
-                await conn.execute("""
-                    INSERT INTO users (username, name, hashed_password, role)
-                    VALUES ($1, $2, $3, $4)
-                """, username, name, get_password_hash(password), role)
-        
-        print("All test users created!")
+        # No accounts are created here. Accounts with passwords written in this file
+        # used to be created. Add them with:  python create_admin.py
+        print("No accounts created. Run `python create_admin.py` to add the admin.")
         await conn.close()
         print("\n✅ PostgreSQL setup complete!")
         

@@ -250,8 +250,16 @@ async def resolve_api_key(
             )
             row = result.scalar_one_or_none()
             if row:
-                return decrypt_api_key(
-                    row.encrypted_key,
-                    settings_obj.SECRET_KEY or settings_obj.effective_secret_key,
-                )
+                from cryptography.fernet import InvalidToken
+                try:
+                    return decrypt_api_key(row.encrypted_key, settings_obj.SECRET_KEY)
+                except InvalidToken:
+                    # Encrypted under a different SECRET_KEY, for example after rotating it.
+                    # Fall back to the server key rather than failing the request.
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "Saved %s key for user %s cannot be decrypted with the current "
+                        "SECRET_KEY. Using the server key instead; the user should save it again.",
+                        provider, user_id,
+                    )
     return get_api_key(provider, settings_obj)

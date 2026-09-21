@@ -18,7 +18,7 @@ from ..core.mt5_service import fetch_latest_candles
 
 
 from ..core.config import settings
-from ..core.security import get_current_user
+from ..core.security import get_current_user, require_trader
 from ..core.database import AsyncSessionLocal
 from ..models.market_data import MarketData
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -424,7 +424,7 @@ async def get_providers(current_user: dict = Depends(get_current_user)):
 async def save_user_keys(
     keys: dict = Body(...), current_user: dict = Depends(get_current_user)
 ):
-    user_id = current_user["user_id"]
+    user_id = current_user["id"]
     async with AsyncSessionLocal() as db:
         await db.execute(delete(UserApiKey).where(UserApiKey.user_id == user_id))
         for provider, api_key in keys.items():
@@ -432,7 +432,7 @@ async def save_user_keys(
                 continue
             if not api_key:
                 continue
-            encrypted = encrypt_api_key(api_key, settings.SECRET_KEY or settings.effective_secret_key)
+            encrypted = encrypt_api_key(api_key, settings.SECRET_KEY)
             db.add(UserApiKey(user_id=user_id, provider=provider, encrypted_key=encrypted))
         await db.commit()
     return {"status": "ok"}
@@ -440,7 +440,7 @@ async def save_user_keys(
 
 @router.get("/user-keys")
 async def get_user_keys(current_user: dict = Depends(get_current_user)):
-    user_id = current_user["user_id"]
+    user_id = current_user["id"]
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(UserApiKey).where(UserApiKey.user_id == user_id))
         keys = result.scalars().all()
@@ -467,7 +467,7 @@ async def test_connection(
 
 @router.post("/chat", response_model=ChatResponse)
 @limiter.limit("10/minute")
-async def chat(request: Request, chat_req: ChatRequest, current_user: dict = Depends(get_current_user)):
+async def chat(request: Request, chat_req: ChatRequest, current_user: dict = Depends(require_trader)):
     if chat_req.provider not in PROVIDERS:
         raise HTTPException(status_code=400, detail="Invalid provider")
     api_key = await resolve_api_key(chat_req.provider, settings, current_user["id"], AsyncSessionLocal)

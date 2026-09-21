@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from app.core.historical_loader import load_data, add_indicators, get_available_years, AVAILABLE_SYMBOLS
 from app.core.backtest_engine import BacktestEngine, DeepAnalysisEngine
 from app.core.database import get_db, AsyncSessionLocal
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_trader
 from app.models.historical_lab import HistoricalBacktest
 from app.core.config import settings
 from app.core.utils import sanitize_for_json as _clean_for_json, get_robust_code_gen_prompt
@@ -670,7 +670,7 @@ async def run_lab(
     request: LabRequest, 
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(require_trader)
 ):
     if request.symbol not in AVAILABLE_SYMBOLS:
         raise HTTPException(status_code=400, detail="Invalid symbol.")
@@ -745,7 +745,7 @@ async def get_status(
 async def chat_followup(
     request: ChatMessageRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(require_trader)
 ):
     result = await db.execute(
         select(HistoricalBacktest).where(

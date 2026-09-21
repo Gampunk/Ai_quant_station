@@ -23,7 +23,7 @@ import ta
 import numpy as np
 
 from ..core.config import settings
-from ..core.security import get_current_user
+from ..core.security import get_current_user, require_trader
 from ..core.database import AsyncSessionLocal
 from ..core.providers import PROVIDERS, get_api_key as _get_api_key, get_base_url, resolve_api_key
 from ..models.ai_memory import AutopilotTrade, AutopilotSettings, UserPrompt, AutopilotLog, ModelUsage, AiCallLog
@@ -2015,7 +2015,7 @@ async def _start_autopilot_internal(user_id: int) -> bool:
 
 # Endpoints
 @router.post("/start")
-async def start_autopilot(current_user: dict = Depends(get_current_user)):
+async def start_autopilot(current_user: dict = Depends(require_trader)):
     user_id = current_user["id"]
     state = _get_state(user_id)
 
@@ -2044,7 +2044,7 @@ async def start_autopilot(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/stop")
-async def stop_autopilot(current_user: dict = Depends(get_current_user)):
+async def stop_autopilot(current_user: dict = Depends(require_trader)):
     user_id = current_user["id"]
     state = _get_state(user_id)
     async with AsyncSessionLocal() as db:
@@ -2093,7 +2093,7 @@ async def get_status(current_user: dict = Depends(get_current_user)):
 async def connect_mt5(
     terminal_path: Optional[str] = None,
     connector_url: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(require_trader)
 ):
     """Connect to MT5 terminal."""
     user_id = current_user["id"]
@@ -2145,7 +2145,7 @@ async def connect_mt5(
 @router.post("/settings")
 async def save_settings(
     config: AutopilotConfig,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(require_trader)
 ):
     """Save autopilot settings."""
     user_id = current_user["id"]
@@ -2232,7 +2232,7 @@ async def get_prompts(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/prompts")
-async def create_prompt(data: UserPromptCreate, current_user: dict = Depends(get_current_user)):
+async def create_prompt(data: UserPromptCreate, current_user: dict = Depends(require_trader)):
     """Create a personal prompt."""
     user_id = current_user["id"]
     async with AsyncSessionLocal() as db:
@@ -2244,7 +2244,7 @@ async def create_prompt(data: UserPromptCreate, current_user: dict = Depends(get
 
 
 @router.put("/prompts/{prompt_id}")
-async def update_prompt(prompt_id: str, data: UserPromptUpdate, current_user: dict = Depends(get_current_user)):
+async def update_prompt(prompt_id: str, data: UserPromptUpdate, current_user: dict = Depends(require_trader)):
     """Update a personal prompt."""
     user_id = current_user["id"]
     if not prompt_id.startswith("custom_"):
@@ -2265,7 +2265,7 @@ async def update_prompt(prompt_id: str, data: UserPromptUpdate, current_user: di
 
 
 @router.delete("/prompts/{prompt_id}")
-async def delete_prompt(prompt_id: str, current_user: dict = Depends(get_current_user)):
+async def delete_prompt(prompt_id: str, current_user: dict = Depends(require_trader)):
     """Delete a personal prompt."""
     user_id = current_user["id"]
     if not prompt_id.startswith("custom_"):

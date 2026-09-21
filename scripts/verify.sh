@@ -12,11 +12,6 @@ run() {
   if "$@"; then results+=("PASS  $name"); else results+=("FAIL  $name"); fi
 }
 
-# TEMPORARY: the app currently breaks all auth when SECRET_KEY is unset
-# (a new random key is generated on every use). Step 4 fixes that bug and
-# removes this line. Until then the test suite needs a key to get past login.
-export SECRET_KEY="${SECRET_KEY:-verify-only-test-key-not-for-production}"
-
 run "backend tests" \
   bash -c "cd '$ROOT/backend' && .venv/bin/python -m pytest tests -q -o timeout=120 -p no:cacheprovider -rs"
 

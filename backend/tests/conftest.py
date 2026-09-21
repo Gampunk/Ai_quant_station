@@ -17,6 +17,11 @@ from dotenv import load_dotenv
 load_dotenv(BACKEND_DIR / ".env")
 logging.disable(logging.CRITICAL)
 os.environ["APP_ENV"] = "test"
+# A test-only signing key, used unless the environment already provides one.
+os.environ.setdefault("SECRET_KEY", "test-only-signing-key-" + "x" * 40)
+
+# One password for every test account. Tests never use real or published passwords.
+TEST_PASSWORD = "test-password-not-real"
 
 # Use a temp file for the test database (in-memory SQLite creates separate DB
 # per connection, which breaks the blacklist module's sync engine approach)
@@ -55,13 +60,11 @@ async def setup_database():
         await conn.run_sync(Base.metadata.create_all)
     init_blacklist_table()
     async with TestSessionLocal() as session:
-        admin_pw = settings.DEFAULT_ADMIN_PASSWORD or "admin@2026"
+        pw = get_password_hash(TEST_PASSWORD)
         users = [
-            User(username="admin", name="Admin", hashed_password=get_password_hash(admin_pw), role="admin"),
-            User(username="keval_viradiya", name="Keval Viradiya", hashed_password=get_password_hash("Usdt@2026"), role="trader"),
-            User(username="sagar_barot", name="Sagar Barot", hashed_password=get_password_hash("Usdt@2026"), role="trader"),
-            User(username="meet_rao", name="Meet Rao", hashed_password=get_password_hash("Usdt@2026"), role="trader"),
-            User(username="guest", name="Guest", hashed_password=get_password_hash("Usdt@2026"), role="viewer"),
+            User(username="admin", name="Admin", hashed_password=pw, role="admin"),
+            User(username="test_trader", name="Test Trader", hashed_password=pw, role="trader"),
+            User(username="test_viewer", name="Test Viewer", hashed_password=pw, role="viewer"),
         ]
         for u in users:
             session.add(u)
@@ -115,8 +118,17 @@ async def _login(client: AsyncClient, username: str, password: str) -> str:
 
 @pytest_asyncio.fixture
 async def admin_token(client: AsyncClient) -> str:
-    pw = settings.DEFAULT_ADMIN_PASSWORD or "admin@2026"
-    return await _login(client, "admin", pw)
+    return await _login(client, "admin", TEST_PASSWORD)
+
+
+@pytest_asyncio.fixture
+async def trader_token(client: AsyncClient) -> str:
+    return await _login(client, "test_trader", TEST_PASSWORD)
+
+
+@pytest_asyncio.fixture
+async def viewer_token(client: AsyncClient) -> str:
+    return await _login(client, "test_viewer", TEST_PASSWORD)
 
 
 @pytest_asyncio.fixture
@@ -127,6 +139,11 @@ def auth_headers(admin_token: str) -> dict:
 @pytest_asyncio.fixture
 def trader_headers(trader_token: str) -> dict:
     return {"Authorization": f"Bearer {trader_token}"}
+
+
+@pytest_asyncio.fixture
+def viewer_headers(viewer_token: str) -> dict:
+    return {"Authorization": f"Bearer {viewer_token}"}
 
 
 @pytest.fixture(scope="session")

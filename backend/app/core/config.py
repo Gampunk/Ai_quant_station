@@ -21,13 +21,18 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    # ── Validate SECRET_KEY is set ───────────────────────────────────────────
+    # ── Validate SECRET_KEY ──────────────────────────────────────────────────
     def validate_secret_key(self) -> None:
-        """Raise ValueError if SECRET_KEY is not set in production."""
-        if self.is_production and not self.SECRET_KEY:
+        """Raise ValueError unless SECRET_KEY is set and strong. Runs in every environment.
+
+        An earlier version fell back to a fresh random key on every use when this was
+        unset, so tokens were signed with one key and checked with another.
+        """
+        problem = secret_key_problem(self.SECRET_KEY)
+        if problem:
             raise ValueError(
-                "SECRET_KEY must be explicitly set in .env when APP_ENV=production. "
-                "Randomly generated keys are lost on restart and invalidate all active sessions."
+                f"SECRET_KEY {problem}. Set it in backend/.env, for example with: "
+                'python -c "import secrets; print(secrets.token_hex(32))"'
             )
 
     # MT5 Settings
@@ -98,19 +103,44 @@ class Settings(BaseSettings):
     # Default admin credentials (MUST be set via .env in production!)
     DEFAULT_ADMIN_PASSWORD: str = ""
 
-    @property
-    def effective_secret_key(self) -> str:
-        """Return SECRET_KEY — validated by validate_secret_key() at startup."""
-        if not self.SECRET_KEY:
-            # Development fallback — will be caught by validate_secret_key() in prod
-            import secrets as _secrets
-            return _secrets.token_hex(32)
-        return self.SECRET_KEY
-
     class Config:
         env_file = env_file_path
         case_sensitive = True
         extra = "ignore"
+
+
+# Values published in docs or .env.example, which must never be used as real keys.
+_KNOWN_PLACEHOLDER_KEYS = {
+    "change-this-to-a-long-random-string-in-production",
+    "your-secret-key", "secret", "changeme",
+}
+MIN_SECRET_KEY_LENGTH = 32
+
+# Passwords that were once hardcoded in this repository.
+KNOWN_WEAK_PASSWORDS = {"admin@2026", "admin2026", "usdt@2026", "password", "admin"}
+MIN_ADMIN_PASSWORD_LENGTH = 12
+
+
+def secret_key_problem(key: str) -> str | None:
+    """Describe what is wrong with a signing key, or return None if it is usable."""
+    if not key:
+        return "is not set"
+    if key.strip().lower() in _KNOWN_PLACEHOLDER_KEYS:
+        return "is still the placeholder from the example file"
+    if len(key) < MIN_SECRET_KEY_LENGTH:
+        return f"is only {len(key)} characters, it needs at least {MIN_SECRET_KEY_LENGTH}"
+    return None
+
+
+def admin_password_problem(password: str) -> str | None:
+    """Describe what is wrong with an admin password, or return None if it is usable."""
+    if not password:
+        return "is not set"
+    if password.strip().lower() in KNOWN_WEAK_PASSWORDS:
+        return "is a password that was published in this repository"
+    if len(password) < MIN_ADMIN_PASSWORD_LENGTH:
+        return f"is only {len(password)} characters, it needs at least {MIN_ADMIN_PASSWORD_LENGTH}"
+    return None
 
 
 settings = Settings()

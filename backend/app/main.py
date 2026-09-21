@@ -98,28 +98,34 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 async def create_default_users():
-    """Create default users on first run."""
+    """Create the admin account on a fresh database, and nothing else.
+
+    The password comes only from DEFAULT_ADMIN_PASSWORD. No other accounts are
+    created: add people with `python create_admin.py` or the User Management page.
+    Earlier versions created four more accounts with passwords written in the code.
+    """
     from sqlalchemy import select
-    
+    from .core.config import admin_password_problem
+
+    log = logging.getLogger("startup")
     async with AsyncSessionLocal() as session:
-        try:
-            result = await session.execute(select(User).where(User.username == "admin"))
-            if result.scalar_one_or_none():
-                return
-            
-            default_users = [
-                User(username="admin", name="System Administrator", hashed_password=get_password_hash(settings.DEFAULT_ADMIN_PASSWORD or "admin@2026"), role="admin"),
-                User(username="keval_viradiya", name="Keval Viradiya", hashed_password=get_password_hash("Usdt@2026"), role="trader"),
-                User(username="sagar_barot", name="Sagar Barot", hashed_password=get_password_hash("Usdt@2026"), role="trader"),
-                User(username="meet_rao", name="Meet Rao", hashed_password=get_password_hash("Usdt@2026"), role="trader"),
-                User(username="guest", name="Guest Viewer", hashed_password=get_password_hash("Usdt@2026"), role="viewer"),
-            ]
-            for u in default_users:
-                session.add(u)
-            await session.commit()
-            print("Default users created!")
-        except Exception as e:
-            print(f"Error creating default users: {e}")
+        if (await session.execute(select(User).where(User.username == "admin"))).scalar_one_or_none():
+            return
+
+        problem = admin_password_problem(settings.DEFAULT_ADMIN_PASSWORD)
+        if problem:
+            log.warning(
+                "No admin account created: DEFAULT_ADMIN_PASSWORD %s. "
+                "Set it in backend/.env and restart, or run `python create_admin.py`.", problem,
+            )
+            return
+
+        session.add(User(
+            username="admin", name="System Administrator", role="admin",
+            hashed_password=get_password_hash(settings.DEFAULT_ADMIN_PASSWORD),
+        ))
+        await session.commit()
+        log.info("Admin account created from DEFAULT_ADMIN_PASSWORD.")
 
 
 def _run_alembic_migrations():
@@ -138,7 +144,7 @@ def _run_alembic_migrations():
 
 @app.on_event("startup")
 async def startup_event():
-    # Fail fast if secrets are not configured for production
+    # Refuse to start without a strong signing key, in every environment
     settings.validate_secret_key()
 
     # Refuse to start if the configured connector is not local or private

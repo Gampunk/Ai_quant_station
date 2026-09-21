@@ -15,7 +15,7 @@ import logging
 import traceback
 
 from ..core.config import settings
-from ..core.security import get_current_user
+from ..core.security import get_current_user, require_trader
 from ..core.database import AsyncSessionLocal
 from ..core.providers import PROVIDERS, get_api_key as _get_api_key, get_base_url
 from ..core.historical_loader import add_indicators
@@ -454,7 +454,7 @@ def run_vectorized_backtest(df, strategy_code, lot_size=0.01, contract_multiplie
         return {"error": str(e)}
 
 @router.post("/run", response_model=BacktestResponse)
-async def run_backtest(request: BacktestRequest, current_user: dict = Depends(get_current_user)):
+async def run_backtest(request: BacktestRequest, current_user: dict = Depends(require_trader)):
     user_id = current_user["id"]
     
     # 1. Get Prompt Text and Strategy Code (Cache)

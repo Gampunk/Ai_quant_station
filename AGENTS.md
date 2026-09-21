@@ -52,7 +52,7 @@ npm run dev
 
 On first startup with a fresh database, the backend auto-creates:
 - All 15 database tables
-- 5 default users (see below)
+- One `admin` account, only if `DEFAULT_ADMIN_PASSWORD` is set and strong
 
 **Delete old `finance_engine.db` if upgrading from an older version** (schema changed).
 
@@ -83,17 +83,18 @@ Optional:
 | `HUGGINGFACE_API_KEY` | — | For data archiving |
 | `CORS_ORIGINS` | `http://localhost:5173,http://localhost:3000` | Allowed CORS origins |
 
-## Default Users
+## Accounts and roles
 
-Auto-created on first startup by `main.py:create_default_users()`:
+`main.py:create_default_users()` creates only `admin`, from `DEFAULT_ADMIN_PASSWORD`,
+and only on a database with no admin. Nothing else is created automatically.
 
-| Username | Password | Role |
-|---|---|---|
-| admin | From `DEFAULT_ADMIN_PASSWORD` in .env | admin |
-| keval_viradiya | Usdt@2026 | trader |
-| sagar_barot | Usdt@2026 | trader |
-| meet_rao | Usdt@2026 | trader |
-| guest | Usdt@2026 | viewer |
+Add people or reset a password with `python create_admin.py`. It prompts for the password.
+
+| Role | Can do |
+|---|---|
+| admin | Everything, including user management |
+| trader | Trade, run the autopilot, run anything that executes AI-written code |
+| viewer | Read dashboards, history, reports and settings |
 
 ## Database Tables (15)
 
@@ -422,8 +423,9 @@ TRADING:
   POST   /api/trade/modify            Modify SL/TP
 
 CODE EXECUTION:
-  POST   /api/execute/code            Execute Python code in sandbox
   POST   /api/execute/calculate-indicator  Calculate technical indicator
+  (There is no endpoint that runs client-supplied code. AI-written code runs
+   only inside the AI Analyst, Autopilot, Historical Lab and Prompt Backtest.)
 
 ANALYTICS:
   GET    /api/analytics/test          Health check
