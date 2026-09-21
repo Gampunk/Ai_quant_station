@@ -147,7 +147,8 @@ git checkout -- mt5_connector/connector.py
 
 ## Step 4. Signing key, accounts, permissions
 
-**Status:** built, waiting for your verification
+**Status:** verified by you on 2026-09-21. Checks 1 to 4 passed. The negative controls in check 5 were skipped
+by you and run by Claude before handover: 14 failures with the permission check off, 1 with the random-key bug back.
 
 **What changed**
 - The server refuses to start unless `SECRET_KEY` is at least 32 characters and not the example placeholder. The old code fell back to a new random key on every call.
