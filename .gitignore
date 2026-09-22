@@ -39,6 +39,11 @@ Thumbs.db
 # Logs
 *.log
 logs/
+backend/e2e-logs/
+
+# Test artifacts
+frontend/test-results/
+frontend/playwright-report/
 
 # Temp
 *.tmp

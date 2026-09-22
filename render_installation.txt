@@ -1,8 +1,0 @@
- New → Web Service
-- Connect GitHub repo
-- Build: pip install -r backend/requirements.txt && cd frontend && npm install && npm run build
-- Start: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
-- Add your PostgreSQL connection string as DATABASE_URL
-The database connection string you gave: dpg-d825p91j2pic73b275v0-a - is this the full connection string? You'll need the full one like:
-postgres://finengine:password@host.dpg.com:5432/impulse_db
-Let me know when you're ready and I'll help verify it works!
