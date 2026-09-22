@@ -241,3 +241,50 @@ Paste the check blocks from the step 6 message into a second terminal. If you ev
 - In `logout`, drop the refresh token from `candidates`. Expect 2 failures from `-k logout`.
 - Make `_username_locked` return False. Expect 1 failure from `-k lock`.
 - Remove `"jti"` from both token functions. Expect 3 failures from `-k "back_in or one_session or straight_after"`.
+
+## Step 7. Cleanup
+
+**Status:** built, waiting for your verification
+
+**What changed**
+- 37 leftover files deleted, about 28,000 lines: the `_junk/` folder, two AI session transcripts totalling 390 KB, scratch scripts at the root and in `backend/`, error and output dumps, a loose SQL file already covered by a migration, and committed test artifacts. Test artifacts are now gitignored.
+- Five dead modules deleted: the bar-by-bar backtest engine, market storage, and the memory service with its two models.
+- `backfill_exit_prices.py` moved to `backend/scripts/`, and it now checks the connector address is local.
+- README, HOW_TO_RUN, QUICK_START, MT5_CONNECTOR and PROJECT_NOTES rewritten to match the code. AGENTS.md corrected in about fifteen places.
+- The browser tests read the admin password from `E2E_ADMIN_PASSWORD` instead of hardcoding the published one.
+- Kept, as you did not say otherwise: both `backtest-expert` folders.
+
+**Your checks**, from the repository root.
+
+1. Five PASS lines, and the backend count is unchanged at 120 passed, 9 skipped.
+   ```bash
+   ./scripts/verify.sh
+   ```
+
+2. The two cleanup commits only delete, move, or touch `.gitignore`. Every line should start with `D`, `R` or `M .gitignore`:
+   ```bash
+   git show --name-status --format= e94f8d6 8fa3dfe
+   ```
+
+3. The published passwords appear only in the rejection list and the tests that check it:
+   ```bash
+   git grep -n "Usdt@2026\|admin@2026"
+   ```
+   Expect matches only in `backend/app/core/config.py`, `backend/tests/` and `docs/refactor/`.
+
+4. The README's start command works. Start the backend, then in a second terminal check it:
+   ```bash
+   cd backend && .venv/bin/python run.py
+   ```
+   ```bash
+   curl localhost:8002/health
+   ```
+   Expect `{"status":"healthy"}`. Stop the backend with Ctrl+C.
+
+5. The moved backfill script refuses a public connector:
+   ```bash
+   cd backend && MT5_CONNECTOR_URL=http://8.8.8.8:5001 .venv/bin/python scripts/backfill_exit_prices.py
+   ```
+   Expect `ConnectorAddressBlocked`.
+
+6. Read the new README and MT5_CONNECTOR.md. They should match what you have seen the system do.
