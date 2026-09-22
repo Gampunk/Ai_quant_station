@@ -244,7 +244,7 @@ Paste the check blocks from the step 6 message into a second terminal. If you ev
 
 ## Step 7. Cleanup
 
-**Status:** built, waiting for your verification
+**Status:** verified by you on 2026-09-22. Checks 1 to 6 passed.
 
 **What changed**
 - 37 leftover files deleted, about 28,000 lines: the `_junk/` folder, two AI session transcripts totalling 390 KB, scratch scripts at the root and in `backend/`, error and output dumps, a loose SQL file already covered by a migration, and committed test artifacts. Test artifacts are now gitignored.
