@@ -212,7 +212,9 @@ rm -f ~/dev/Ai_quant_station/backend/finance_engine.db
 
 ## Steps 5 and 6. Sandbox isolation, logout, login limits, account state
 
-**Status:** built, waiting for your verification
+**Status:** verified by you on 2026-09-22. Checks 1 to 6 passed on a live server: logout revoked both tokens,
+disabling cut access immediately, and the lockout held against the correct password.
+Negative controls were run by Claude before handover.
 
 **What changed**
 - AI-written code always runs in a separate process. The in-process mode is gone, not just unused.
