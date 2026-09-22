@@ -1,12 +1,19 @@
 """
 Backfill exit_price for all historical trades from MT5 history.
-Run: python backfill_exit_prices.py
+Run from backend/: python scripts/backfill_exit_prices.py
 """
 import asyncio
-import httpx
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+import httpx
 from sqlalchemy import select
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from app.core.config import settings
+from app.core.connector_guard import check_connector_url
 from app.core.database import AsyncSessionLocal
 from app.models.ai_memory import AutopilotTrade
 
@@ -18,6 +25,7 @@ async def backfill():
     if not mt5_url:
         print("MT5_CONNECTOR_URL not set in .env")
         return
+    check_connector_url(mt5_url)
 
     headers = {}
     if settings.MT5_API_TOKEN:
