@@ -132,8 +132,8 @@ def secret_key_problem(key: str) -> str | None:
     return None
 
 
-def admin_password_problem(password: str) -> str | None:
-    """Describe what is wrong with an admin password, or return None if it is usable."""
+def password_problem(password: str) -> str | None:
+    """Describe what is wrong with a password, or return None if it is usable."""
     if not password:
         return "is not set"
     if password.strip().lower() in KNOWN_WEAK_PASSWORDS:
@@ -141,6 +141,10 @@ def admin_password_problem(password: str) -> str | None:
     if len(password) < MIN_ADMIN_PASSWORD_LENGTH:
         return f"is only {len(password)} characters, it needs at least {MIN_ADMIN_PASSWORD_LENGTH}"
     return None
+
+
+# The same rules apply to every account; the admin name is kept for existing callers.
+admin_password_problem = password_problem
 
 
 settings = Settings()

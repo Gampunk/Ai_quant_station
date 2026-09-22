@@ -61,42 +61,58 @@ def create_refresh_token(data: dict) -> str:
     return encoded_jwt
 
 
-async def decode_token(token: str) -> dict | None:
-    from .blacklist import is_token_blacklisted as _is_blacklisted
-    if await _is_blacklisted(token):
-        return None
+async def decode_token(token: str, check_revoked: bool = True) -> dict | None:
+    """Return the token's payload, or None if it is invalid, expired, or revoked.
+
+    The signature is checked first, so a forged or malformed token never costs a
+    database lookup. Pass check_revoked=False only where revocation cannot matter,
+    such as choosing a rate-limit bucket.
+    """
     try:
         payload = jwt.decode(token, _signing_key(), algorithms=[settings.ALGORITHM])
-        return payload
     except JWTError:
         return None
+    if check_revoked:
+        from .blacklist import is_token_blacklisted
+        if await is_token_blacklisted(token):
+            return None
+    return payload
+
+
+def _unauthorized(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    token = credentials.credentials
-    payload = await decode_token(token)
+    """The logged-in user, read fresh from the database on every request.
 
+    Role and active status come from the database, not the token, so demoting or
+    deactivating someone takes effect on their very next request rather than when
+    their token happens to expire.
+    """
+    payload = await decode_token(credentials.credentials)
     if payload is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
+        raise _unauthorized("Invalid authentication token")
     if payload.get("type") != "access":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token type",
-        )
+        raise _unauthorized("Invalid token type")
+    user_id = payload.get("user_id")
+    if user_id is None or payload.get("sub") is None:
+        raise _unauthorized("Invalid token payload")
 
-    username = payload.get("sub")
-    if username is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token payload",
-        )
+    from .database import AsyncSessionLocal
+    from ..models.user import User
+    async with AsyncSessionLocal() as db:
+        user = await db.get(User, user_id)
+    if user is None or user.username != payload.get("sub"):
+        raise _unauthorized("Account no longer exists")
+    if not user.is_active:
+        raise _unauthorized("Account is disabled")
 
-    return {"username": username, "id": payload.get("user_id"), "role": payload.get("role")}
+    return {"username": user.username, "id": user.id, "role": user.role}
 
 
 async def get_current_user_optional(credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False))):

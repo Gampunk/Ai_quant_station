@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, status, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -13,26 +13,64 @@ from ..core.security import (
     decode_token, get_current_user
 )
 from ..core.blacklist import blacklist_token
+from ..core.config import password_problem
 from ..models.user import User
 from ..models.schemas import UserLogin, Token, UserResponse, PasswordChange
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-# Simple in-memory rate limiter: {ip: [(timestamp, count)]}
-_login_attempts: dict[str, list[float]] = defaultdict(list)
-_LOGIN_RATE_LIMIT = 50  # max attempts
-_LOGIN_RATE_WINDOW = 60  # seconds
+# ── Login throttling ─────────────────────────────────────────────────────────
+# In memory, per worker. The app runs as a single worker (see deploy notes).
+_login_attempts: dict[str, list[float]] = defaultdict(list)   # address -> attempt times
+_LOGIN_RATE_LIMIT = 10          # attempts per address per window
+_LOGIN_RATE_WINDOW = 60         # seconds
+
+_failed_logins: dict[str, list[float]] = defaultdict(list)    # username -> failure times
+_MAX_FAILURES = 5               # failures per username before a lockout
+_FAILURE_WINDOW = 15 * 60       # seconds
+
+# Checked against when the username does not exist, so an unknown username takes
+# as long to reject as a wrong password and response time reveals nothing.
+_DUMMY_HASH = get_password_hash("dummy-password-for-timing-only")
+
+VALID_ROLES = ("admin", "trader", "viewer")
+
+
+def reset_login_limits() -> None:
+    """Clear all throttling state. Used by tests."""
+    _login_attempts.clear()
+    _failed_logins.clear()
+
+
+def _within(times: list[float], window: int, now: float) -> list[float]:
+    return [t for t in times if now - t < window]
+
 
 def _check_login_rate(ip: str) -> bool:
     now = time.time()
-    attempts = _login_attempts[ip]
-    # Remove entries outside the window
-    _login_attempts[ip] = [t for t in attempts if now - t < _LOGIN_RATE_WINDOW]
+    _login_attempts[ip] = _within(_login_attempts[ip], _LOGIN_RATE_WINDOW, now)
     if len(_login_attempts[ip]) >= _LOGIN_RATE_LIMIT:
         return False
     _login_attempts[ip].append(now)
     return True
+
+
+def _username_locked(username: str) -> bool:
+    now = time.time()
+    _failed_logins[username] = _within(_failed_logins[username], _FAILURE_WINDOW, now)
+    return len(_failed_logins[username]) >= _MAX_FAILURES
+
+
+def _validate_new_password(password: str) -> None:
+    problem = password_problem(password)
+    if problem:
+        raise HTTPException(status_code=400, detail=f"That password {problem}.")
+
+
+def _validate_role(role: str) -> None:
+    if role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail=f"Role must be one of: {', '.join(VALID_ROLES)}")
 
 
 @router.post("/login", response_model=Token)
@@ -43,36 +81,39 @@ async def login(request: Request, user_data: UserLogin, db: AsyncSession = Depen
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Too many login attempts. Try again in {_LOGIN_RATE_WINDOW} seconds."
         )
+    username = user_data.username
+    if _username_locked(username):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed attempts for this account. Try again in 15 minutes."
+        )
+
     try:
-        result = await db.execute(select(User).where(User.username == user_data.username))
-        user = result.scalar_one_or_none()
+        user = (await db.execute(select(User).where(User.username == username))).scalar_one_or_none()
     except Exception:
         raise HTTPException(status_code=500, detail="Internal authentication error")
 
-    if not user:
+    # Always run one password check, so unknown usernames and wrong passwords take the same time.
+    is_valid = verify_password(user_data.password, user.hashed_password if user else _DUMMY_HASH)
+    if not user or not is_valid:
+        _failed_logins[username].append(time.time())
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password"
         )
 
-    is_valid = verify_password(user_data.password, user.hashed_password)
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
 
-    if not is_valid:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password"
-        )
-
+    _failed_logins.pop(username, None)
     try:
         user.last_login = datetime.now(timezone.utc)
         await db.commit()
     except Exception:
         pass
 
-    access_token = create_access_token(data={"sub": user.username, "user_id": user.id, "role": user.role, "name": user.name})
-    refresh_token = create_refresh_token(data={"sub": user.username, "user_id": user.id, "role": user.role, "name": user.name})
-
-    return Token(access_token=access_token, refresh_token=refresh_token)
+    claims = {"sub": user.username, "user_id": user.id, "role": user.role, "name": user.name}
+    return Token(access_token=create_access_token(data=claims), refresh_token=create_refresh_token(data=claims))
 
 
 @router.post("/refresh", response_model=Token)
@@ -95,11 +136,13 @@ async def refresh_token(refresh_data: dict, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.username == username))
     user = result.scalar_one_or_none()
 
-    if not user:
+    if not user or user.id != payload.get("user_id"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found"
         )
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is disabled")
 
     # Blacklist the old refresh token so it can't be reused
     try:
@@ -114,13 +157,36 @@ async def refresh_token(refresh_data: dict, db: AsyncSession = Depends(get_db)):
     return Token(access_token=access_token, refresh_token=new_refresh_token)
 
 
+class LogoutRequest(BaseModel):
+    refresh_token: str | None = None
+
+
 @router.post("/logout")
 async def logout(
-    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
-    current_user: dict = Depends(get_current_user)
+    body: LogoutRequest | None = Body(default=None),
+    credentials: HTTPAuthorizationCredentials | None = Depends(HTTPBearer(auto_error=False)),
 ):
-    await blacklist_token(credentials.credentials)
-    return {"message": "Successfully logged out"}
+    """Revoke the access token and the refresh token, so neither works again.
+
+    Needs no valid login: the access token may already have expired, and holding
+    a refresh token is enough to be allowed to throw it away. Always answers 200.
+    An earlier version revoked only the access token, so the seven-day refresh
+    token could keep minting new logins after logout.
+    """
+    revoked = 0
+    candidates = [
+        (credentials.credentials if credentials else None, "access"),
+        (body.refresh_token if body else None, "refresh"),
+    ]
+    for token, expected_type in candidates:
+        if not token:
+            continue
+        payload = await decode_token(token, check_revoked=False)
+        if not payload or payload.get("type") != expected_type:
+            continue
+        await blacklist_token(token, expires_at=datetime.fromtimestamp(payload["exp"], tz=timezone.utc))
+        revoked += 1
+    return {"message": "Logged out", "revoked": revoked}
 
 
 @router.get("/me")
@@ -158,6 +224,7 @@ async def change_password(
             detail="Current password is incorrect"
         )
 
+    _validate_new_password(password_data.new_password)
     user.hashed_password = get_password_hash(password_data.new_password)
     await db.commit()
 
@@ -211,7 +278,9 @@ async def create_user(
     
     if existing:
         raise HTTPException(status_code=400, detail="Username already exists")
-    
+    _validate_role(user_data.role)
+    _validate_new_password(user_data.password)
+
     new_user = User(
         username=user_data.username,
         name=user_data.name,
@@ -238,12 +307,22 @@ async def update_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    if user.username == "admin" and (
+        (user_data.role is not None and user_data.role != "admin") or user_data.is_active is False
+    ):
+        raise HTTPException(status_code=400, detail="The admin account cannot be demoted or disabled")
+
     if user_data.name is not None:
         user.name = user_data.name
     if user_data.role is not None:
+        _validate_role(user_data.role)
         user.role = user_data.role
     if user_data.password is not None:
+        _validate_new_password(user_data.password)
         user.hashed_password = get_password_hash(user_data.password)
+    # Used to be accepted and silently ignored, so "deactivate" did nothing.
+    if user_data.is_active is not None:
+        user.is_active = user_data.is_active
     
     await db.commit()
     await db.refresh(user)

@@ -70,6 +70,7 @@ export const useAuthStore = create<AuthState>()(
       },
 
       logout: () => {
+        revokeOnServer(get().accessToken, get().storedRefreshToken)
         set({
           user: null,
           accessToken: null,
@@ -135,6 +136,32 @@ export const useAuthStore = create<AuthState>()(
     }
   )
 )
+
+// Ask the server to revoke both tokens, so they stop working immediately rather
+// than when they expire. Best effort: logout always completes locally.
+// Uses fetch, not axios, so the 401-refresh interceptor can never fire on logout.
+function revokeOnServer(stateAccess: string | null, stateRefresh: string | null) {
+  // The dashboard's API client writes refreshed tokens straight to storage, so
+  // storage can be newer than this store's memory. Prefer it.
+  let access = stateAccess
+  let refresh = stateRefresh
+  try {
+    const stored = JSON.parse(sessionStorage.getItem('auth-storage') || '{}').state || {}
+    access = stored.accessToken || access
+    refresh = stored.storedRefreshToken || refresh
+  } catch {
+    // ignore unreadable storage
+  }
+  if (!access && !refresh) return
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (access) headers.Authorization = `Bearer ${access}`
+  fetch('/api/auth/logout', {
+    method: 'POST',
+    keepalive: true,
+    headers,
+    body: JSON.stringify({ refresh_token: refresh }),
+  }).catch(() => {})
+}
 
 function decodeBase64Url(str: string): string {
   try {

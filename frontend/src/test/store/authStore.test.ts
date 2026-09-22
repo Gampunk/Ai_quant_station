@@ -155,6 +155,50 @@ describe('authStore', () => {
       expect(state.storedRefreshToken).toBeNull()
       expect(state.isAuthenticated).toBe(false)
     })
+
+    it('asks the server to revoke both tokens', () => {
+      const fetchMock = vi.mocked(fetch)
+      fetchMock.mockClear()
+      sessionStorage.clear()
+      useAuthStore.setState({ accessToken: 'the-access', storedRefreshToken: 'the-refresh', isAuthenticated: true })
+
+      useAuthStore.getState().logout()
+
+      expect(fetchMock).toHaveBeenCalledOnce()
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe('/api/auth/logout')
+      expect(init.method).toBe('POST')
+      expect((init.headers as Record<string, string>).Authorization).toBe('Bearer the-access')
+      expect(JSON.parse(init.body as string)).toEqual({ refresh_token: 'the-refresh' })
+    })
+
+    it('prefers newer tokens written straight to storage', () => {
+      const fetchMock = vi.mocked(fetch)
+      fetchMock.mockClear()
+      // Login fills the store, which persists itself. Later the dashboard's API
+      // client refreshes and writes newer tokens straight to storage.
+      useAuthStore.setState({ accessToken: 'stale-access', storedRefreshToken: 'stale-refresh' })
+      sessionStorage.setItem('auth-storage', JSON.stringify({
+        state: { accessToken: 'newer-access', storedRefreshToken: 'newer-refresh' },
+      }))
+
+      useAuthStore.getState().logout()
+
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(JSON.parse(init.body as string)).toEqual({ refresh_token: 'newer-refresh' })
+      sessionStorage.clear()
+    })
+
+    it('makes no request when there is nothing to revoke', () => {
+      const fetchMock = vi.mocked(fetch)
+      fetchMock.mockClear()
+      sessionStorage.clear()
+      useAuthStore.setState({ accessToken: null, storedRefreshToken: null })
+
+      useAuthStore.getState().logout()
+
+      expect(fetchMock).not.toHaveBeenCalled()
+    })
   })
 
   describe('refreshAccessToken', () => {

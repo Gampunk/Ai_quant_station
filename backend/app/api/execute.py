@@ -442,10 +442,11 @@ async def run_python_code(
     inject_df: Optional[Any] = None,
     user_id: int = 0,
 ):
-    """Execute Python code safely with market data.
+    """Execute AI-written Python with market data, always in a separate process.
 
-    When user_id > 0, execution runs in an isolated subprocess.
-    Session state is keyed by user_id:symbol to prevent cross-user data leaks.
+    There is no in-process mode. An earlier version ran code inside the server
+    whenever user_id was 0, and a caller passing the wrong key made that the
+    default without anyone noticing. Session state is keyed by user_id:symbol.
     """
     # ── Session key (user-isolated) ─────────────────────────────────────────
     if session_id:
@@ -486,56 +487,50 @@ async def run_python_code(
         except Exception:
             pass
 
-    # ── Decide execution mode ───────────────────────────────────────────────
-    use_subprocess = user_id > 0
+    # ── Always a separate process ───────────────────────────────────────────
+    worker_path = _get_worker_path()
+    request_data = {
+        "code": code,
+        "market_data": md,
+        "symbol": symbol,
+        "session_state": session_state,
+    }
 
-    if use_subprocess:
-        worker_path = _get_worker_path()
-        request_data = {
-            "code": code,
-            "market_data": md,
-            "symbol": symbol,
-            "session_state": session_state,
+    try:
+        proc = subprocess.run(
+            [sys.executable, worker_path],
+            input=json.dumps(request_data),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            encoding='utf-8',
+        )
+        if proc.returncode != 0:
+            stderr = proc.stderr or ""
+            return {
+                "success": False,
+                "error": f"Sandbox worker crashed (exit {proc.returncode}): {stderr[:500]}",
+                "output": "",
+            }
+        result = json.loads(proc.stdout)
+    except subprocess.TimeoutExpired:
+        result = {
+            "success": False,
+            "error": "Execution timed out (25s limit). Simplify your code or reduce loop iterations.",
+            "output": "",
         }
-
-        try:
-            proc = subprocess.run(
-                [sys.executable, worker_path],
-                input=json.dumps(request_data),
-                capture_output=True,
-                text=True,
-                timeout=60,
-                encoding='utf-8',
-            )
-            if proc.returncode != 0:
-                stderr = proc.stderr or ""
-                return {
-                    "success": False,
-                    "error": f"Sandbox worker crashed (exit {proc.returncode}): {stderr[:500]}",
-                    "output": "",
-                }
-            result = json.loads(proc.stdout)
-        except subprocess.TimeoutExpired:
-            result = {
-                "success": False,
-                "error": "Execution timed out (25s limit). Simplify your code or reduce loop iterations.",
-                "output": "",
-            }
-        except json.JSONDecodeError as e:
-            result = {
-                "success": False,
-                "error": f"Sandbox response parse error: {e}",
-                "output": proc.stdout[:500] if proc.stdout else "",
-            }
-        except Exception as e:
-            result = {
-                "success": False,
-                "error": f"Subprocess error: {str(e)}",
-                "output": "",
-            }
-    else:
-        # Inline mode (same process) — backward compat for anonymous calls
-        result = _execute_sandbox_sync(code, md, symbol, session_state)
+    except json.JSONDecodeError as e:
+        result = {
+            "success": False,
+            "error": f"Sandbox response parse error: {e}",
+            "output": proc.stdout[:500] if proc.stdout else "",
+        }
+    except Exception as e:
+        result = {
+            "success": False,
+            "error": f"Subprocess error: {str(e)}",
+            "output": "",
+        }
 
     # ── Update session state ────────────────────────────────────────────────
     new_state = result.get("session_state", {})

@@ -20,8 +20,7 @@ os.environ["APP_ENV"] = "test"
 # A test-only signing key, used unless the environment already provides one.
 os.environ.setdefault("SECRET_KEY", "test-only-signing-key-" + "x" * 40)
 
-# One password for every test account. Tests never use real or published passwords.
-TEST_PASSWORD = "test-password-not-real"
+from tests.credentials import TEST_PASSWORD  # noqa: E402
 
 # Use a temp file for the test database (in-memory SQLite creates separate DB
 # per connection, which breaks the blacklist module's sync engine approach)
@@ -54,8 +53,8 @@ TestSessionLocal = async_sessionmaker(test_engine, expire_on_commit=False)
 @pytest_asyncio.fixture(autouse=True)
 async def setup_database():
     # Clear login rate limiter so tests don't get 429
-    from app.api.auth import _login_attempts
-    _login_attempts.clear()
+    from app.api.auth import reset_login_limits
+    reset_login_limits()
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     init_blacklist_table()

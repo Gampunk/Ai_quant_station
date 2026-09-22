@@ -80,7 +80,8 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Bearer "):
             try:
-                payload = await decode_token(auth[7:])
+                # Only picks a rate-limit bucket, so skip the revocation lookup.
+                payload = await decode_token(auth[7:], check_revoked=False)
                 if payload:
                     request.state.user = {
                         "id": payload.get("user_id"),
