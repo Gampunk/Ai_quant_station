@@ -209,3 +209,33 @@ rm -f ~/dev/Ai_quant_station/backend/finance_engine.db
 
 - In `app/core/security.py`, add `return current_user` as the first line inside `checker`. Run `.venv/bin/python -m pytest tests/test_access_control.py -q -k viewer_is_refused`. Expect 14 failures.
 - In `app/core/security.py`, replace the two lines inside `_signing_key` with `return settings.SECRET_KEY or "x" * 40`. Run `.venv/bin/python -m pytest tests/test_access_control.py -q -k no_key_means_no_tokens`. Expect 1 failure.
+
+## Steps 5 and 6. Sandbox isolation, logout, login limits, account state
+
+**Status:** built, waiting for your verification
+
+**What changed**
+- AI-written code always runs in a separate process. The in-process mode is gone, not just unused.
+- Logout revokes both tokens. The seven-day refresh token used to survive logout and could mint new logins. The frontend now calls logout.
+- Every token has a unique ID. Rehearsing these checks showed two logins in the same second produced identical tokens, so revoking one revoked both, and a refresh right after login returned an already-revoked token.
+- One revocation lookup per request instead of two, and forged tokens cost no database lookup at all.
+- Role and active status are read from the database on every request. Demoting, disabling or deleting someone takes effect on their next request.
+- Disabled accounts cannot log in. Disabling used to be accepted and silently ignored.
+- Roles are validated, and the admin account cannot be demoted or disabled.
+- Every account follows the same password rule.
+- Logins are limited to 10 a minute per address, and 5 failures lock an account for 15 minutes. Unknown usernames take as long to reject as wrong passwords.
+
+**Your checks** use the `viewer_test` account you made in step 4. Run the verify script, then start the server in one terminal:
+
+```bash
+cd ~/dev/Ai_quant_station/backend
+.venv/bin/python -m uvicorn app.main:app --port 8765
+```
+
+Paste the check blocks from the step 6 message into a second terminal. If you ever see `Too many login attempts`, wait one minute. Restarting the server clears an account lockout.
+
+**Negative controls**
+- In `get_current_user`, return the role from the token instead of reading the database. Expect 3 failures from `-k "immediately or deleted_user"`.
+- In `logout`, drop the refresh token from `candidates`. Expect 2 failures from `-k logout`.
+- Make `_username_locked` return False. Expect 1 failure from `-k lock`.
+- Remove `"jti"` from both token functions. Expect 3 failures from `-k "back_in or one_session or straight_after"`.
