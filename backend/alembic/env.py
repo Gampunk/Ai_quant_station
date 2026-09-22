@@ -30,7 +30,9 @@ target_metadata = Base.metadata
 
 
 def get_database_url() -> str:
-    """Build the sync-compatible database URL from settings."""
+    """The database URL: from the caller when core/schema.py runs migrations, else settings."""
+    if config.attributes.get("database_url"):
+        return config.attributes["database_url"]
     from app.core.config import settings
     url = str(settings.DATABASE_URL)
     # Alembic needs a synchronous driver — strip the +async suffix
@@ -58,7 +60,8 @@ def run_migrations_online() -> None:
     is_sqlite = url.startswith("sqlite")
 
     # Build a sync engine for Alembic from the async URL
-    configuration = config.get_section(config.config_ini_section)
+    # No ini section when core/schema.py calls in without a config file.
+    configuration = config.get_section(config.config_ini_section) or {}
     configuration["sqlalchemy.url"] = url
 
     connectable = engine_from_config(

@@ -17,7 +17,6 @@ from .core.rate_limit import limiter
 from .core.config import settings
 from .core.database import AsyncSessionLocal
 from .core.security import get_password_hash
-from .core.blacklist import init_blacklist_table
 from .core.blacklist import cleanup_expired_tokens
 from .api import auth, mt5, trade, ai, yahoo, execute, analytics, autopilot, historical_lab, backtest
 from .core.mt5_sync import start_sync_scheduler
@@ -129,20 +128,6 @@ async def create_default_users():
         log.info("Admin account created from DEFAULT_ADMIN_PASSWORD.")
 
 
-def _run_alembic_migrations():
-    """Run Alembic migrations synchronously during startup to bring schema to head."""
-    import subprocess, sys
-    result = subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "head"],
-        cwd=os.path.dirname(os.path.abspath(__file__)),
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        print(f"Alembic upgrade failed:\n{result.stderr}")
-    else:
-        print("Alembic migrations applied successfully.")
-
 @app.on_event("startup")
 async def startup_event():
     # Refuse to start without a strong signing key, in every environment
@@ -152,18 +137,11 @@ async def startup_event():
     from .core.connector_guard import check_connector_url
     check_connector_url(settings.MT5_CONNECTOR_URL)
 
-    # Create all database tables directly (works with both SQLite and PostgreSQL)
+    # Create, upgrade or adopt the database, and refuse to start if it does not
+    # match the models. See core/schema.py.
     from .core.database import init_db
     await init_db()
 
-    # Run Alembic migrations (optional — may fail on first deploy, tables already exist)
-    try:
-        _run_alembic_migrations()
-    except Exception as e:
-        print(f"Alembic migration note: {e}")
-
-    # Ensure revoked-token table exists
-    init_blacklist_table()
     # Initial cleanup of stale revoked tokens
     removed = await cleanup_expired_tokens()
     if removed:
