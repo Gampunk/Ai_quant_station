@@ -1,6 +1,7 @@
 import { test, expect, Page } from '@playwright/test'
+import { adminPassword } from './credentials'
 
-const ADMIN_PW = 'admin@2026'
+const ADMIN_PW = adminPassword()
 const NAV_TIMEOUT = 20000
 
 async function login(page: Page) {

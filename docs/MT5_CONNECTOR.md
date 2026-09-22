@@ -1,144 +1,113 @@
-# MT5 Connector - Setup Guide
+# MT5 connector
 
-## Overview
-
-The MT5 Connector is a standalone Windows service that connects to MetaTrader 5 and exposes a REST API. This allows the main backend to run on a different server (Linux/Docker) while MT5 runs on a Windows server.
-
-## Architecture
+A small service that runs on Windows next to the MetaTrader 5 terminal and
+exposes it over HTTP. It lets the backend run on Linux or in Docker. It is the
+only component that talks to the broker.
 
 ```
-┌─────────────────────┐     HTTP API      ┌─────────────────────┐
-│  Main Backend       │ ◄─────────────────► │  MT5 Connector      │
-│  (Linux/Docker)     │                    │  (Windows Server)   │
-│  Port: 8000         │                    │  Port: 5001         │
-└─────────────────────┘                    └──────────┬──────────┘
-                                                       │
-                                                       ▼
-                                            ┌─────────────────────┐
-                                            │  MetaTrader 5        │
-                                            │  (Trading Terminal) │
-                                            └─────────────────────┘
+┌──────────────────────┐   HTTP + token   ┌──────────────────────┐
+│  Backend             │ ───────────────► │  MT5 connector       │
+│  Linux, Docker, WSL  │                  │  Windows, port 5001  │
+└──────────────────────┘                  └──────────┬───────────┘
+                                                      │
+                                                      ▼
+                                           ┌──────────────────────┐
+                                           │  MetaTrader 5        │
+                                           └──────────────────────┘
 ```
 
-## Setup Steps
+## Install, on Windows
 
-### Step 1: Windows Server (MT5 Connector)
+Python 3.11 to 3.14. MetaTrader 5 installed, logged in, with **Algo Trading** switched on.
 
-1. **Install Python 3.11+** on Windows server
-   - Download from: https://www.python.org/downloads/
+```powershell
+py -m venv mt5-venv
+mt5-venv\Scripts\python.exe -m pip install -r mt5_connector\requirements.txt
+```
 
-2. **Install MetaTrader 5**
-   - Download from your broker
-   - Login with your trading account
-   - Keep MT5 running (can minimize)
+## Settings
 
-3. **Install MT5 Connector dependencies**
-   ```cmd
-   cd mt5_connector
-   pip install -r requirements.txt
-   ```
+All settings are environment variables. There are no command-line options.
 
-4. **Run the MT5 Connector**
-   ```cmd
-   python connector.py
-   ```
-   
-   The service will start on `http://localhost:5001`
+| Variable | Default | What it does |
+|---|---|---|
+| `MT5_CONNECTOR_PORT` | asks at startup | Port to listen on. Set it to skip the prompt, for example `5001` |
+| `MT5_CONNECTOR_HOST` | `127.0.0.1` | Address to listen on. The default accepts connections from this machine only |
+| `MT5_API_TOKEN` | none | **Required.** Every request must send it as `Authorization: Bearer <token>`. Without one, every request is refused with 503 |
+| `MT5_ALLOW_NO_TOKEN` | `false` | Run without a token. Only for an instance nothing else can reach |
+| `MT5_REQUIRE_DEMO` | `true` | Refuse order, close and modify unless the account is a demo account. Set `false` only for a deliberate live deployment |
+| `MT5_ENABLE_DOCS` | `false` | Serve the interactive `/docs` page, which can place orders. Keep it off anywhere reachable |
+| `MT5_TERMINAL_PATH` | none | Path to `terminal64.exe` when several terminals are installed |
+| `CORS_ORIGINS` | local dev ports | Browser origins allowed to call it |
 
-### Step 2: Main Backend Configuration
+## Start
 
-Edit `backend/.env`:
+```powershell
+$env:MT5_CONNECTOR_PORT = "5001"
+$env:MT5_API_TOKEN = [guid]::NewGuid().ToString("N")
+$env:MT5_API_TOKEN          # copy this value for the backend
+mt5-venv\Scripts\python.exe mt5_connector\connector.py
+```
+
+Expect the account, `Demo-only trading guard: ON`, `API token: required` and `Docs page: disabled`.
+
+## Point the backend at it
+
+In `backend/.env`:
+
 ```env
-# Use external connector
+MT5_CONNECTOR_URL=http://127.0.0.1:5001
+MT5_API_TOKEN=<the same token>
 MT5_USE_EXTERNAL_CONNECTOR=True
-MT5_CONNECTOR_URL=http://YOUR_WINDOWS_SERVER_IP:5001
 ```
 
-### Step 3: Start Everything
+The backend refuses a connector address outside local and private networks,
+at startup and on every request. For a connector on another network, set
+`ALLOW_REMOTE_CONNECTOR=true` in `backend/.env` deliberately.
 
-1. Start MT5 Connector on Windows server
-2. Start main backend (on Linux/Docker/Windows)
-3. Open browser and login
+## Separate servers
 
-## Deployment Options
+When the backend and connector are on different machines:
 
-### Option A: Both on Same Windows Server
-- Run both MT5 Connector and backend on same Windows machine
-- Set `MT5_CONNECTOR_URL=http://localhost:5001`
+1. Put both on a private network or tunnel, such as Tailscale or WireGuard. The connector speaks plain HTTP, so the token is readable on an open network.
+2. Set `MT5_CONNECTOR_HOST` to the connector machine's private address, not `0.0.0.0`.
+3. Allow the port in the Windows firewall for the backend's address only.
+4. Set `ALLOW_REMOTE_CONNECTOR=true` in `backend/.env` if the address is not in a private range.
 
-### Option B: Separate Servers
-- MT5 Connector on Windows server (with MT5 terminal)
-- Main backend on Linux server/Docker
-- Set `MT5_CONNECTOR_URL=http://192.168.1.100:5001` (Windows server IP)
+## Test it
 
-### Option C: Docker (Backend Only)
+On the connector machine:
+
+```powershell
+curl.exe -H "Authorization: Bearer <token>" http://127.0.0.1:5001/health
+```
+
+Expect `{"status":"healthy","mt5_connected":true,...}`. Without the header, expect 401.
+
+From the backend side, `scripts/demo_check.py` runs a read-only check, and with
+`--trade` places and closes one 0.01 lot position on a demo account.
+
+## Without a broker
+
+The real `connector.py` can run against a fake terminal on any OS, with no MT5:
+
 ```bash
-docker-compose up --build
+mt5_connector/.venv/bin/python mt5_connector/testing/run_fake_connector.py --port 5001
 ```
-- MT5 Connector still runs on Windows (not containerized due to MT5)
+
+It needs no token unless you pass `--token`. The connector's own tests use it:
+
+```bash
+mt5_connector/.venv/bin/python -m pytest mt5_connector/tests -q
+```
 
 ## Troubleshooting
 
-### "MT5 not initialized" error
-1. Check MT5 terminal is running on Windows server
-2. Check Windows Firewall allows port 5001
-3. Verify connector URL is correct
-
-### "Connection refused" error
-1. Check MT5 Connector is running: `http://connector_ip:5001`
-2. Check firewall rules on Windows server
-3. Verify IP address is accessible
-
-### MT5 Login Issues
-1. Ensure MT5 terminal is logged in to broker
-2. Check account is not demo/expired
-3. Try restarting MT5 terminal
-
-## Security Notes
-
-- Change default port 5001 if needed
-- Use firewall to restrict access to MT5 Connector
-- Use HTTPS in production (can add nginx in front)
-- Keep MT5_API_TOKEN secure
-
-## Port Configuration
-
-The MT5 Connector port is **fully configurable**. Default is `5001`.
-
-### Method 1: Environment Variable (Recommended)
-```cmd
-set MT5_CONNECTOR_PORT=5002
-python connector.py
-```
-
-### Method 2: Command Line Argument
-```cmd
-python connector.py --port 5002
-```
-
-### Method 3: Both
-```cmd
-set MT5_CONNECTOR_PORT=5003
-python connector.py --port 5003
-```
-
-### Configure Backend to Use Different Port
-
-Edit `backend/.env`:
-```env
-MT5_CONNECTOR_URL=http://192.168.1.100:5002
-```
-
----
-
-## Quick Test
-
-Test MT5 Connector separately:
-```cmd
-# On Windows server
-curl http://localhost:5001/health
-# Should return: {"status": "healthy", "mt5_connected": true}
-
-curl http://localhost:5001/account
-# Should return account info
-```
+| What you see | Cause and fix |
+|---|---|
+| 503, no `MT5_API_TOKEN` | The connector started without a token. Set one and restart |
+| 401 | The backend's token differs from the connector's, or the header is missing |
+| 403, not a demo account | MT5 is logged into a real account. Log into demo. Do not disable the guard for testing |
+| Order fails mentioning AutoTrading | Switch on Algo Trading in the MT5 toolbar |
+| 404 for a symbol | The broker names it differently. Check Market Watch |
+| `MT5 not initialized` | The terminal is closed, or several are installed and `MT5_TERMINAL_PATH` is unset |

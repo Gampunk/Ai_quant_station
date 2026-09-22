@@ -29,15 +29,16 @@ backend/  (FastAPI)
 
 ```bash
 cd backend
-python -m venv venv
-.\venv\Scripts\activate
-pip install -r requirements.txt
-# Copy and edit .env
-copy .env.example .env
-# Set SECRET_KEY, DEFAULT_ADMIN_PASSWORD in .env
-python run.py
+uv venv --python 3.11 .venv
+uv pip install --python .venv/bin/python -r requirements.txt
+cp .env.example .env
+# Set SECRET_KEY (32+ characters) and DEFAULT_ADMIN_PASSWORD (12+) in .env.
+# The server refuses to start without a strong SECRET_KEY.
+.venv/bin/python run.py
 # Starts on http://localhost:8002
 ```
+
+Full instructions: README.md and docs/HOW_TO_RUN.md.
 
 ### Frontend
 
@@ -51,7 +52,7 @@ npm run dev
 ### First Run
 
 On first startup with a fresh database, the backend auto-creates:
-- All 15 database tables
+- All 22 database tables
 - One `admin` account, only if `DEFAULT_ADMIN_PASSWORD` is set and strong
 
 **Delete old `finance_engine.db` if upgrading from an older version** (schema changed).
@@ -96,7 +97,7 @@ Add people or reset a password with `python create_admin.py`. It prompts for the
 | trader | Trade, run the autopilot, run anything that executes AI-written code |
 | viewer | Read dashboards, history, reports and settings |
 
-## Database Tables (15)
+## Database Tables (22)
 
 | Table | Purpose |
 |---|---|
@@ -115,6 +116,13 @@ Add people or reset a password with `python create_admin.py`. It prompts for the
 | `default_prompt_strategies` | Cached AI-generated strategy code |
 | `autopilot_settings` | Autopilot configuration per user |
 | `historical_backtests` | Historical lab backtest/analysis results |
+| `user_api_keys` | Per-user AI provider keys, encrypted with `SECRET_KEY` |
+| `revoked_tokens` | Tokens revoked by logout or refresh, until they expire |
+| `position_audits` | Record of every close and stop/target change |
+| `autopilot_logs` | Autopilot log lines per cycle |
+| `ai_call_logs` | Every AI call: provider, model, tokens, outcome |
+| `strategy_scores` | Win rate, profit factor and cost per prompt, updated hourly |
+| `chat_embeddings` | Vectors of past AI Analyst answers, used for retrieval |
 
 ## Authentication Flow
 
@@ -124,7 +132,7 @@ LoginPage.tsx
   → POST /api/auth/login
   → Backend verifies bcrypt password
   → Returns JWT access_token (15min) + refresh_token (7 days)
-  → Tokens stored in localStorage via zustand persist
+  → Tokens stored in sessionStorage via zustand persist
   → Every API request: axios interceptor adds Authorization: Bearer {token}
 
 On 401 response:
@@ -136,7 +144,7 @@ On 401 response:
 
 On page refresh:
   → App.tsx useEffect calls checkAuth()
-  → Reads tokens from localStorage
+  → Reads tokens from sessionStorage
   → Decodes JWT, checks exp
   → If expired → refreshAccessToken()
   → If valid → set isAuthenticated = true
@@ -144,6 +152,20 @@ On page refresh:
 ProtectedRoute:
   → Wraps all dashboard routes
   → If !isAuthenticated → redirect to /login
+
+On logout:
+  → authStore.logout() calls POST /api/auth/logout with both tokens
+  → Backend revokes the access and the refresh token
+  → Local state is cleared either way
+
+On every request, the backend:
+  → Verifies the token signature, then checks it is not revoked
+  → Reads the user's role and active status from the database
+  → So demoting or disabling someone applies on their next request
+
+Login throttling (in memory, single worker):
+  → 10 attempts per address per minute
+  → 5 failures lock an account for 15 minutes
 ```
 
 ## All Pages & Their Flows
@@ -162,7 +184,7 @@ Flow:
   → Returns { access_token, refresh_token }
   → JWT payload: { sub: username, user_id, role, name, exp, type }
   → Frontend decodes JWT with decodeBase64Url() (handles base64url encoding)
-  → Stores in localStorage, redirects to /
+  → Stores in sessionStorage, redirects to /
 ```
 
 ### 2. Dashboard Page (`/`)
@@ -192,6 +214,8 @@ Flow:
   User selects symbol, direction (BUY/SELL), volume, SL/TP
   → POST /api/trade/order with { symbol, action, volume, sl, tp }
   → Backend validates, sends to MT5 via mt5.order_send()
+    (the local MetaTrader5 package, so this only works when the backend runs on
+     Windows with MT5 installed; refactor step 8 routes it through the connector)
   → Saves to trade_records with full details
   → Returns ticket number
   → Positions list refreshes
@@ -204,7 +228,7 @@ Flow:
 Frontend: AIAnalystPage.tsx
 Backend:  ai.py → POST /chat, POST /feedback, GET /providers
           yahoo.py → GET /yahoo/{symbol}, GET /yahoo/symbols
-          execute.py → POST /code (sandbox)
+          execute.py → run_python_code() (sandbox, called internally)
 Model:    ChatMemory, GlobalInsights, ModelUsage, UserFeedback, TradeRecord
 
 Flow:
@@ -310,7 +334,8 @@ Flow:
   → Background loop (asyncio.create_task, per-user):
     1. Sync results of previous trades
     2. Fetch market data via async httpx
-    3. Pick random prompt (or selected prompt)
+    3. Classify the market regime (trend, volatility) from 15m candles, then pick
+       a prompt at random weighted by regime fit and past win rate
     4. Call AI to analyze market + detect TRADE_SETUP JSON
     5. If setup found → execute trade via MT5 connector
     6. Sleep (configurable interval, default 300s)
@@ -354,9 +379,10 @@ Backend:  auth.py → PUT /password
 
 Sections:
   → Account: Change password (requires current password)
-  → AI Providers: Configure API keys (stored in localStorage)
-    NVIDIA, Groq, OpenRouter keys + Test Connection button
-  → MT5 Connection: External connector config (stored in localStorage)
+  → AI Providers: personal API keys, saved on the server encrypted per user
+    (GET/POST /api/ai/user-keys), plus a Test Connection button
+  → MT5 Connection: saved in the browser only. The backend ignores the header it
+    sends, so this has no effect today (finding 21, refactor step 8)
   → Autopilot: Lot size + interval defaults (saved via API)
   → Data Sync: HuggingFace (UI stub, functional via manual scripts)
 ```
@@ -396,6 +422,8 @@ AI:
   POST   /api/ai/test                 Test AI provider connection
   POST   /api/ai/feedback             Save feedback on AI response
   GET    /api/ai/memory               Get user conversation memory
+  GET    /api/ai/user-keys            Which providers have a saved personal key
+  POST   /api/ai/user-keys            Save personal provider keys (encrypted)
 
 MARKET DATA:
   GET    /api/data/yahoo/{symbol}     Fetch Yahoo Finance data
@@ -434,6 +462,11 @@ ANALYTICS:
   GET    /api/analytics/calculations  Get calculation history
   GET    /api/analytics/indicator-stats  Indicator usage stats
   GET    /api/analytics/feedback-stats   User feedback stats
+  GET    /api/analytics/reports          Autopilot performance report
+  GET    /api/analytics/reports/export   Report as CSV
+  GET    /api/analytics/journal          Trade journal for a date range
+  GET    /api/analytics/journal/export   Journal as CSV
+  GET    /api/analytics/strategy-scores  Per-prompt scoreboard
 
 AUTOPILOT:
   POST   /api/autopilot/start         Start autopilot
@@ -446,6 +479,13 @@ AUTOPILOT:
   PUT    /api/autopilot/prompts/{id}  Update prompt
   DELETE /api/autopilot/prompts/{id}  Delete prompt
   GET    /api/autopilot/results       Get trade results
+  GET    /api/autopilot/results/export  Trade results as CSV
+  GET    /api/autopilot/logs          Autopilot log lines
+  GET    /api/autopilot/prompt-stats  Per-prompt statistics
+
+Routes that trade, change autopilot settings, or run AI-written code
+(AI chat, prompt backtest, historical lab run and chat) need the admin or
+trader role. Everything else needs any logged-in user.
 
 BACKTEST:
   POST   /api/backtest/run            Run prompt backtest
@@ -514,7 +554,13 @@ show_table(data, title="Data")
 print()  # Output captured and returned
 ```
 
-**Security:** All builtins are restricted. No `__import__`, `open`, `exec`, `eval`, `os`, `subprocess`, `requests`, or network access.
+**Security, honestly:** builtins are restricted and code containing dangerous
+double-underscore names is rejected, and the code always runs in a separate
+process. That is **not** a security boundary. The process has the server's
+file and network access, and libraries such as pandas and yfinance can read
+files and reach the network without any restricted builtin. Proper containment
+is refactor step B1. Separately, the Prompt Backtest runs its generated code
+through its own weaker runner in `backtest.py`, not through this sandbox.
 
 ## MT5 Broker Timezone Handling
 
@@ -534,19 +580,21 @@ Brokers often return timestamps in their local timezone (UTC+2, UTC+3), not UTC.
 | `httpx.AsyncClient` shared | Reused HTTP client for autopilot connector calls, not per-request |
 | Per-user autopilot state | `_user_states[user_id]` dict instead of global singleton |
 | Restricted `__builtins__` in `exec()` | Prevents AI-generated code from running OS commands |
-| `execute.py` sandbox | All AI code execution goes through this single module with safe_globals |
+| `execute.py` sandbox | AI Analyst, Autopilot and Historical Lab code runs through this module, always in a subprocess. Prompt Backtest still has its own runner (to be merged in step B1) |
 | `chat_memory_id` in trade link | Enables win-rate tracking per strategy prompt (RAG pipeline) |
 | `PRAGMA foreign_keys=ON` for SQLite | Required for CASCADE deletes to work on SQLite |
 | Prompt refinement before AI call | `_refine_query()` rewrites vague user queries into structured analysis requests using a fast/cheap model (`mistralai/mistral-7b-instruct-v0.3`), falls back to the user's main model if unavailable. Controlled by `refine_prompt: bool` on `ChatRequest` (default: True). Adds ~300ms latency per query. |
 
 ## Known Limitations
 
-1. **No HTTPS** in nginx config — add certbot/Let's Encrypt for production
-2. **No rate limiting** on `/login` — brute force protection needed
-3. **Autopilot uses global Python objects** — fine for single-server, breaks with multiple workers
-4. **Scratch scripts** (`data_factory.py`, etc.) — have some hardcoded paths, run only on dev machine
-5. **`pandas_ta` replaced with `ta`** — different API (see above), AI prompts updated accordingly
-6. **No vector embeddings yet** — RAG is basic (keyword-based retrieval). See `docs/RAG_ARCHITECTURE.md` for planned implementation.
+1. **No HTTPS** in the nginx config. Needed before anything is exposed.
+2. **Single worker only.** Autopilot state and login throttling live in process memory.
+3. **The sandbox is not a security boundary.** See the sandbox section above.
+4. **Terminal trading needs a Windows backend.** It uses the local MT5 package, not the connector, until refactor step 8.
+5. **`pandas_ta` replaced with `ta`**: different API, AI prompts updated accordingly.
+6. **Retrieval runs only in the AI Analyst chat.** The autopilot does not use past analyses.
+
+Every known problem, with the step that fixes it, is in `docs/refactor/FINDINGS.md`.
 
 ## Data Files
 
@@ -582,4 +630,7 @@ See `docs/RAG_ARCHITECTURE.md` for the full 5-phase plan:
 4. **Autopilot Smart Selection** — Pick best-performing prompts, not random
 5. **Feedback Dashboard** — Visualize strategy performance
 
-Currently implemented: trade → chat link via `chat_memory_id`. All data ready for Phase 1.
+Status: phases 1 to 4 exist. The scoreboard updates hourly (`strategy_scorer.py`),
+embeddings and retrieval run in the AI Analyst chat (`rag_service.py`), and the
+autopilot weights prompts by regime fit and scoreboard results. Phase 5 is partly
+covered by the Reports page. The autopilot does not use retrieval.

@@ -1,106 +1,88 @@
-# The Finance Engine v2
+# Impulse Analyst v2
 
-A professional quantitative trading platform built with React + FastAPI.
-
-## Project Structure
+A quantitative trading platform: a React frontend, a FastAPI backend, and a
+separate connector that talks to MetaTrader 5 on Windows.
 
 ```
-impulse_analyst_v2/
-├── frontend/                 # React frontend (Vite + TypeScript)
-├── backend/                  # FastAPI backend
-└── docs/                     # Documentation including PRD
+frontend/       React + TypeScript + Vite
+backend/        FastAPI, SQLAlchemy, AI providers, autopilot, backtesting
+mt5_connector/  Small Windows service wrapping the MetaTrader5 Python package
+docs/           Guides. Refactor progress and findings live in docs/refactor/
+scripts/        verify.sh runs every check; demo_check.py tests a demo connector
 ```
 
-## Getting Started
+## Run it locally
 
-### Prerequisites
-- Node.js 18+ 
-- Python 3.9+
-- MetaTrader 5 (for live trading)
-- HuggingFace account (for data storage)
+Needs Python 3.11 and Node 20 or later. [`uv`](https://docs.astral.sh/uv/) is the easiest way to get Python 3.11.
 
-### Backend Setup
+**Backend**
 
-1. Navigate to backend directory:
-   ```bash
-   cd backend
-   ```
+```bash
+cd backend
+uv venv --python 3.11 .venv
+uv pip install --python .venv/bin/python -r requirements.txt
+cp .env.example .env
+```
 
-2. Create virtual environment:
-   ```bash
-   python -m venv venv
-   venv\Scripts\activate  # Windows
-   source venv/bin/activate  # Linux/Mac
-   ```
+Edit `backend/.env` and set two values. The server refuses to start without them.
 
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+# a random signing key, at least 32 characters
+python3 -c "import secrets; print(secrets.token_hex(32))"
+```
 
-4. Create `.env` file from `.env.example`:
-   ```bash
-   copy .env.example .env  # Windows
-   cp .env.example .env    # Linux/Mac
-   ```
+- `SECRET_KEY`: paste the value printed above.
+- `DEFAULT_ADMIN_PASSWORD`: at least 12 characters. Creates the `admin` account on first start.
 
-5. Edit `.env` with your configuration:
-   - MT5_SERVER_PORT
-   - MT5_API_TOKEN
-   - HF_REPO_ID and HuggingFace_API_KEY
-   - AI provider API keys (NVIDIA, Groq, etc.)
+Then start it:
 
-6. Start the server:
-   ```bash
-   cd app
-   python main.py
-   ```
-   
-   The API will be available at http://localhost:8000
-   API docs at http://localhost:8000/docs
+```bash
+.venv/bin/python run.py
+```
 
-### Frontend Setup
+It listens on http://localhost:8002. Check it with `curl localhost:8002/health`.
 
-1. Navigate to frontend directory:
-   ```bash
-   cd frontend
-   ```
+**Frontend**, in a second terminal:
 
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
+```bash
+cd frontend
+npm ci
+npm run dev
+```
 
-3. Start the development server:
-   ```bash
-   npm run dev
-   ```
-   
-   The app will be available at http://localhost:5173
+Open http://localhost:5173 and log in as `admin` with the password you set.
 
-## Features Implemented
+**More people.** Only `admin` is created automatically. Add others from `backend/`:
 
-✅ Authentication (login/logout with JWT)
-✅ MT5 data fetching (symbols, OHLC data, account info)
-✅ Trade execution (market/pending orders, SL/TP)
-✅ Position management
-✅ AI chat integration (multiple providers)
-✅ Basic UI components
-✅ Dashboard with metrics
-✅ Trading terminal
-✅ AI analyst
-✅ Trade history
-✅ Settings page
+```bash
+.venv/bin/python create_admin.py --username someone --name "Some One" --role trader
+```
 
-## Next Steps
+Roles are `admin`, `trader` and `viewer`. Only admin and trader can trade or run the autopilot.
 
-1. Implement real-time price updates via WebSocket
-2. Add charting with candlesticks
-3. Enhance autopilot system
-4. Implement proper data persistence
-5. Add comprehensive testing
-6. Production deployment setup
+## Trading
 
-## License
+Trading goes through the MT5 connector. See [docs/MT5_CONNECTOR.md](docs/MT5_CONNECTOR.md).
+To try everything without a broker, run the connector against a fake terminal:
 
-MIT
+```bash
+mt5_connector/.venv/bin/python mt5_connector/testing/run_fake_connector.py --port 5001
+```
+
+Its test environment is set up as described in [docs/refactor/BASELINE.md](docs/refactor/BASELINE.md).
+
+## Checks
+
+```bash
+./scripts/verify.sh
+```
+
+Runs the backend, connector and frontend tests, the type check and a production build.
+Install the test tools first with `requirements-dev.txt` instead of `requirements.txt`.
+
+## More
+
+- [docs/HOW_TO_RUN.md](docs/HOW_TO_RUN.md): detailed run guide and troubleshooting
+- [docs/MT5_CONNECTOR.md](docs/MT5_CONNECTOR.md): connector setup and security settings
+- [docs/refactor/](docs/refactor/): what has changed, what was found, and what is next
+- [AGENTS.md](AGENTS.md): architecture, pages and API routes in detail

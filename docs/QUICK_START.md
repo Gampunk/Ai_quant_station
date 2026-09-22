@@ -1,82 +1,10 @@
-# To Run The Finance Engine
+# Quick start
 
-## Quick Start
+The short version lives in the [README](../README.md). In brief:
 
-### Step 1: Start Backend
-```bash
-cd backend
-python run.py
-```
+1. Create `backend/.env` from `backend/.env.example` and set `SECRET_KEY` and `DEFAULT_ADMIN_PASSWORD`.
+2. Start the backend from `backend/` with `.venv/bin/python run.py`. It listens on port 8002.
+3. Start the frontend from `frontend/` with `npm run dev`, then open http://localhost:5173.
+4. Log in as `admin` with the password from step 1.
 
-### Step 2: Open Browser
-```
-http://localhost:8000
-```
-
-### Step 3: Login
-- **Username:** admin
-- **Password:** admin@2026
-
----
-
-## For MT5 Trading (Windows with MT5 Terminal)
-
-### Step 1: Install MT5 Connector
-```cmd
-cd mt5_connector
-pip install -r requirements.txt
-```
-
-### Step 2: Run MT5 Connector
-```cmd
-python connector.py --port 5001
-```
-
-### Step 3: Update backend .env
-```env
-MT5_USE_EXTERNAL_CONNECTOR=True
-MT5_CONNECTOR_URL=http://localhost:5001
-```
-
-### Step 4: Restart Backend
-```bash
-python run.py
-```
-
----
-
-## If You Get Import Errors
-
-Run these commands to fix:
-
-```bash
-pip install --upgrade --force-reinstall pydantic fastapi uvicorn sqlalchemy pydantic-settings
-```
-
-Then run backend again:
-```bash
-python run.py
-```
-
----
-
-## Check Services
-
-| Service | URL | Test Command |
-|---------|-----|--------------|
-| Backend | http://localhost:8000 | curl http://localhost:8000/health |
-| MT5 Connector | http://localhost:5001 | curl http://localhost:5001/health |
-
----
-
-## Port Already in Use?
-
-If port 5001 is busy:
-```cmd
-python connector.py --port 5002
-```
-
-Then update .env:
-```env
-MT5_CONNECTOR_URL=http://localhost:5002
-```
+There is no default password. For trading, see [MT5_CONNECTOR.md](MT5_CONNECTOR.md).

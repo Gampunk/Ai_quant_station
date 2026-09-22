@@ -1,4 +1,5 @@
 import { test, expect, Page } from '@playwright/test'
+import { adminPassword } from './credentials'
 
 const NAV_TIMEOUT = 20000
 let _cachedToken: string | null = null
@@ -10,7 +11,7 @@ async function getToken(): Promise<string> {
     const resp = await fetch('http://localhost:8002/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: 'admin', password: 'admin@2026' }),
+      body: JSON.stringify({ username: 'admin', password: adminPassword() }),
     })
     if (resp.ok) {
       const data: any = await resp.json()

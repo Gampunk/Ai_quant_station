@@ -1,170 +1,95 @@
-# How to Run - Step by Step
+# How to run
 
-## Prerequisites
+Three parts: the backend and frontend, which run anywhere, and the MT5 connector,
+which runs on Windows next to the MetaTrader 5 terminal.
 
-1. **Python 3.11+** installed
-2. **PostgreSQL** running
-3. **MetaTrader 5** installed and logged in (for Windows)
+## 1. Backend
 
----
-
-## Step 1: Install Backend Dependencies
+Needs Python 3.11, the version production uses.
 
 ```bash
 cd backend
-pip install -r requirements.txt
+uv venv --python 3.11 .venv
+uv pip install --python .venv/bin/python -r requirements.txt
+cp .env.example .env
 ```
 
----
+Without `uv`, `python3.11 -m venv .venv` then `.venv/bin/pip install -r requirements.txt` works too.
 
-## Step 2: Install MT5 Connector Dependencies (Windows)
+Set these in `backend/.env`:
 
-```cmd
-cd mt5_connector
-pip install -r requirements.txt
-```
+| Setting | Required | Notes |
+|---|---|---|
+| `SECRET_KEY` | yes | At least 32 characters. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"` |
+| `DEFAULT_ADMIN_PASSWORD` | yes, first start | At least 12 characters. Creates `admin` on an empty database |
+| `DATABASE_URL` | no | Defaults to a SQLite file, `backend/finance_engine.db` |
+| `MT5_CONNECTOR_URL` | for trading | For example `http://127.0.0.1:5001` |
+| `MT5_API_TOKEN` | for trading | Must match the connector's token |
+| `MT5_USE_EXTERNAL_CONNECTOR` | for trading | `True` routes the MT5 pages through the connector |
+| AI provider keys | no | `NVIDIA_API_KEY`, `GROQ_API_KEY` and others. Users can also save their own on the Settings page |
 
----
-
-## Step 3: Start MT5 Connector (Windows with MT5)
-
-```cmd
-cd mt5_connector
-python connector.py --port 5001
-```
-
-**Expected Output:**
-```
-============================================================
-MT5 Connector Service
-============================================================
-This service connects to MetaTrader 5 and exposes
-REST API for the main backend to use.
-
-To configure port:
-  - Environment variable: MT5_CONNECTOR_PORT=5002
-  - Command line: python connector.py --port 5002
-
-Starting service on http://0.0.0.0:5001...
-============================================================
-```
-
----
-
-## Step 4: Start Main Backend
-
-**Option A: Using External MT5 Connector** (recommended)
-
-Edit `backend/.env`:
-```env
-MT5_USE_EXTERNAL_CONNECTOR=True
-MT5_CONNECTOR_URL=http://localhost:5001
-```
-
-Then run:
-```bash
-cd backend
-python run.py
-```
-
-**Option B: Direct MT5 (Same Windows Server)**
-
-Edit `backend/.env`:
-```env
-MT5_USE_EXTERNAL_CONNECTOR=False
-```
-
-Then run:
-```bash
-cd backend
-python run.py
-```
-
-**Expected Output:**
-```
-INFO:     Uvicorn running on http://0.0.0.0:8000
-```
-
----
-
-## Step 5: Test Everything
-
-### Test 1: Health Check
-
-Open browser or use curl:
-```bash
-curl http://localhost:8000/health
-```
-
-**Response:**
-```json
-{"status": "healthy"}
-```
-
-### Test 2: Login
+Start it:
 
 ```bash
-curl -X POST http://localhost:8000/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username": "admin", "password": "admin@2026"}'
+.venv/bin/python run.py
 ```
 
-**Response:**
-```json
-{
-  "access_token": "eyJ...",
-  "refresh_token": "eyJ...",
-  "token_type": "bearer"
-}
-```
-
-### Test 3: MT5 Connection (if using connector)
+Expect `Application startup complete` and, on a new database,
+`Admin account created from DEFAULT_ADMIN_PASSWORD`. It listens on port 8002.
 
 ```bash
-curl http://localhost:8000/api/mt5/health \
-  -H "X-MT5-Token: impulse_secure_2026"
+curl localhost:8002/health
 ```
 
-**Response:**
-```json
-{
-  "status": "running",
-  "mt5_initialized": true,
-  "server": "your-broker-server"
-}
+Expect `{"status":"healthy"}`.
+
+## 2. Frontend
+
+```bash
+cd frontend
+npm ci
+npm run dev
 ```
 
----
+Open http://localhost:5173. The dev server forwards `/api` to the backend on port 8002.
 
-## Quick Commands Summary
+## 3. Accounts
 
-| Action | Command |
-|--------|---------|
-| **Start MT5 Connector** | `python connector.py --port 5001` |
-| **Start Backend** | `python run.py` |
-| **Test Backend Health** | `curl http://localhost:8000/health` |
-| **Test Login** | `curl -X POST http://localhost:8000/api/auth/login -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"admin@2026\"}"` |
-| **Test MT5** | `curl http://localhost:8000/api/mt5/positions -H "X-MT5-Token: impulse_secure_2026"` |
+Only `admin` is created automatically. Add or reset accounts from `backend/`. The tool asks for the password:
 
----
+```bash
+.venv/bin/python create_admin.py --username someone --name "Some One" --role trader
+.venv/bin/python create_admin.py --username someone --reset
+```
 
-## If MT5 Not Available (Testing Without MT5)
+| Role | Can |
+|---|---|
+| admin | everything, including managing users |
+| trader | trade, run the autopilot, and use anything that runs AI-written code |
+| viewer | read dashboards, history and reports |
 
-The backend and login will still work! Just MT5 endpoints will show errors.
+Five wrong passwords lock an account for 15 minutes. Restarting the backend clears it.
 
-To test login flow:
-1. Start backend: `python run.py`
-2. Open browser: `http://localhost:8000`
-3. Login with: `admin` / `admin@2026`
-4. Dashboard will show "MT5 not initialized" - that's normal without MT5
+## 4. MT5 connector
 
----
+See [MT5_CONNECTOR.md](MT5_CONNECTOR.md). For a step-by-step setup on your own
+Windows machine against a demo account, see [refactor/LOCAL_DEMO_SETUP.md](refactor/LOCAL_DEMO_SETUP.md).
+
+## Checks
+
+From the repository root, after installing `backend/requirements-dev.txt`:
+
+```bash
+./scripts/verify.sh
+```
 
 ## Troubleshooting
 
-| Issue | Solution |
-|-------|----------|
-| Port 5001 busy | `python connector.py --port 5002` |
-| PostgreSQL not running | Start PostgreSQL service |
-| MT5 not connected | Open MT5 terminal and login |
-| Login fails | Check PostgreSQL has users (run setup_postgres.py) |
+| What you see | Fix |
+|---|---|
+| `SECRET_KEY is not set` or `is only N characters` | Set a strong `SECRET_KEY` in `backend/.env` |
+| `No admin account created` in the log | `DEFAULT_ADMIN_PASSWORD` is missing, short, or a published one. Fix it, delete the database file if it has no data you need, and restart. Or run `create_admin.py` |
+| Login answers 429 | Too many attempts. Wait a minute, or 15 minutes for a locked account, or restart the backend |
+| Trading answers 403 | The account is a viewer. Trading needs admin or trader |
+| `ConnectorAddressBlocked` | `MT5_CONNECTOR_URL` is not a local or private address. Set `ALLOW_REMOTE_CONNECTOR=true` only if that is intended |
+| Connector answers 401 or 503 | The tokens do not match, or the connector has none. See MT5_CONNECTOR.md |
