@@ -66,6 +66,32 @@ async def test_logout_ignores_a_token_of_the_wrong_type(client: AsyncClient):
     assert (await client.get("/api/auth/me", headers=_bearer(access))).status_code == 200
 
 
+async def test_logging_back_in_immediately_gives_a_working_token(client: AsyncClient):
+    """Found by rehearsing the manual checks: identical tokens within one second."""
+    access, refresh = await _login_pair(client, "test_trader")
+    await client.post("/api/auth/logout", headers=_bearer(access), json={"refresh_token": refresh})
+    fresh, _ = await _login_pair(client, "test_trader")
+    assert fresh != access
+    assert (await client.get("/api/auth/me", headers=_bearer(fresh))).status_code == 200
+
+
+async def test_logging_out_one_session_leaves_another(client: AsyncClient):
+    a_access, a_refresh = await _login_pair(client, "test_trader")
+    b_access, _ = await _login_pair(client, "test_trader")
+    await client.post("/api/auth/logout", headers=_bearer(a_access), json={"refresh_token": a_refresh})
+    assert (await client.get("/api/auth/me", headers=_bearer(b_access))).status_code == 200
+
+
+async def test_refresh_straight_after_login_works(client: AsyncClient):
+    _, refresh = await _login_pair(client, "test_trader")
+    renewed = await client.post("/api/auth/refresh", json={"refresh_token": refresh})
+    assert renewed.status_code == 200, renewed.text
+    new_access = renewed.json()["access_token"]
+    assert (await client.get("/api/auth/me", headers=_bearer(new_access))).status_code == 200
+    again = await client.post("/api/auth/refresh", json={"refresh_token": renewed.json()["refresh_token"]})
+    assert again.status_code == 200, "the refresh token issued by a refresh was already revoked"
+
+
 # ── Token checks ─────────────────────────────────────────────────────────────
 async def test_one_revocation_lookup_per_request(client: AsyncClient, monkeypatch):
     access, _ = await _login_pair(client, "test_trader")
