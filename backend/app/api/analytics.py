@@ -6,13 +6,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime, timezone, timedelta
-import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, text, case
 
 from ..core.database import get_db, AsyncSessionLocal
 from ..core.security import get_current_user
 from ..core.config import settings
+from ..core.mt5_connector import connector_client
 from ..models.strategy_score import StrategyScore
 from ..models.ai_memory import AutopilotTrade
 
@@ -69,93 +69,80 @@ async def get_reports(current_user: dict = Depends(get_current_user)):
 
     trades: list[dict] = []
 
-    mt5_url = settings.MT5_CONNECTOR_URL
-    if mt5_url:
-        mt5_base = mt5_url.rstrip("/")
-        headers = {}
-        if settings.MT5_API_TOKEN:
-            headers["Authorization"] = f"Bearer {settings.MT5_API_TOKEN}"
+    if connector_client.configured:
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    f"{mt5_base}/history",
-                    params={"hours": 720},
-                    headers=headers,
-                    timeout=30,
-                )
-                if resp.status_code == 200:
-                    mt5_deals = resp.json().get("deals", [])
+            mt5_deals = (await connector_client.get_history(hours=720)).get("deals", [])
 
-                    autopilot_pids = {
-                        d.get("position_id")
-                        for d in mt5_deals
-                        if d.get("position_id") and (d.get("comment") or "").strip().startswith("[AUTOPILOT]")
-                    }
-                    auto_deals = [d for d in mt5_deals if d.get("position_id") in autopilot_pids]
+            autopilot_pids = {
+                d.get("position_id")
+                for d in mt5_deals
+                if d.get("position_id") and (d.get("comment") or "").strip().startswith("[AUTOPILOT]")
+            }
+            auto_deals = [d for d in mt5_deals if d.get("position_id") in autopilot_pids]
 
-                    pos_map: dict = {}
-                    for deal in auto_deals:
-                        pid = deal.get("position_id")
-                        if not pid:
-                            continue
-                        if pid not in pos_map:
-                            pos_map[pid] = {"open": None, "close": None}
-                        if deal.get("entry") == "OPEN":
-                            pos_map[pid]["open"] = deal
-                        else:
-                            pos_map[pid]["close"] = deal
+            pos_map: dict = {}
+            for deal in auto_deals:
+                pid = deal.get("position_id")
+                if not pid:
+                    continue
+                if pid not in pos_map:
+                    pos_map[pid] = {"open": None, "close": None}
+                if deal.get("entry") == "OPEN":
+                    pos_map[pid]["open"] = deal
+                else:
+                    pos_map[pid]["close"] = deal
 
-                    for pid, pair in pos_map.items():
-                        open_deal = pair["open"]
-                        close_deal = pair["close"]
-                        if not open_deal:
-                            continue
+            for pid, pair in pos_map.items():
+                open_deal = pair["open"]
+                close_deal = pair["close"]
+                if not open_deal:
+                    continue
 
-                        deal_time = open_deal.get("time", "")
-                        try:
-                            deal_dt = datetime.strptime(deal_time, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                        except (ValueError, TypeError):
-                            continue
-                        if deal_dt < thirty_days_ago:
-                            continue
+                deal_time = open_deal.get("time", "")
+                try:
+                    deal_dt = datetime.strptime(deal_time, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    continue
+                if deal_dt < thirty_days_ago:
+                    continue
 
-                        direction = open_deal.get("direction", "")
-                        profit = close_deal.get("profit", 0) if close_deal else 0
-                        comment = open_deal.get("comment", "") or ""
-                        prompt_match = __import__("re").search(r"P(\d+)", comment)
-                        prompt_number = int(prompt_match.group(1)) if prompt_match else None
+                direction = open_deal.get("direction", "")
+                profit = close_deal.get("profit", 0) if close_deal else 0
+                comment = open_deal.get("comment", "") or ""
+                prompt_match = __import__("re").search(r"P(\d+)", comment)
+                prompt_number = int(prompt_match.group(1)) if prompt_match else None
 
-                        close_comment = (close_deal.get("comment", "") or "").lower() if close_deal else ""
-                        if close_deal:
-                            if "sl" in close_comment:
-                                res_type = "SL_HIT"
-                            elif "tp" in close_comment:
-                                res_type = "TP_HIT"
-                            elif profit > 0:
-                                res_type = "PROFIT"
-                            else:
-                                res_type = "LOSS"
-                        else:
-                            res_type = "OPEN"
+                close_comment = (close_deal.get("comment", "") or "").lower() if close_deal else ""
+                if close_deal:
+                    if "sl" in close_comment:
+                        res_type = "SL_HIT"
+                    elif "tp" in close_comment:
+                        res_type = "TP_HIT"
+                    elif profit > 0:
+                        res_type = "PROFIT"
+                    else:
+                        res_type = "LOSS"
+                else:
+                    res_type = "OPEN"
 
-                        trades.append({
-                            "id": -pid,
-                            "prompt_number": prompt_number,
-                            "prompt_text": f"Prompt #{prompt_number}" if prompt_number else "Autopilot",
-                            "symbol": open_deal.get("symbol", ""),
-                            "direction": direction,
-                            "entry_price": open_deal.get("price"),
-                            "stop_loss": None,
-                            "take_profit": None,
-                            "lot_size": open_deal.get("volume", 0),
-                            "mt5_ticket": pid,
-                            "executed_at": open_deal.get("time", "").replace(" ", "T"),
-                            "result": res_type,
-                            "profit": float(profit) if profit else 0.0,
-                            "closed_at": close_deal.get("time", "").replace(" ", "T") if close_deal else None,
-                            "reasoning": comment,
-                            "confidence": None,
-                        })
+                trades.append({
+                    "id": -pid,
+                    "prompt_number": prompt_number,
+                    "prompt_text": f"Prompt #{prompt_number}" if prompt_number else "Autopilot",
+                    "symbol": open_deal.get("symbol", ""),
+                    "direction": direction,
+                    "entry_price": open_deal.get("price"),
+                    "stop_loss": None,
+                    "take_profit": None,
+                    "lot_size": open_deal.get("volume", 0),
+                    "mt5_ticket": pid,
+                    "executed_at": open_deal.get("time", "").replace(" ", "T"),
+                    "result": res_type,
+                    "profit": float(profit) if profit else 0.0,
+                    "closed_at": close_deal.get("time", "").replace(" ", "T") if close_deal else None,
+                    "reasoning": comment,
+                    "confidence": None,
+                })
         except Exception:
             pass
 
@@ -264,93 +251,80 @@ async def export_reports(current_user: dict = Depends(get_current_user)):
 
     trades: list[dict] = []
 
-    mt5_url = settings.MT5_CONNECTOR_URL
-    if mt5_url:
-        mt5_base = mt5_url.rstrip("/")
-        headers = {}
-        if settings.MT5_API_TOKEN:
-            headers["Authorization"] = f"Bearer {settings.MT5_API_TOKEN}"
+    if connector_client.configured:
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    f"{mt5_base}/history",
-                    params={"hours": 720},
-                    headers=headers,
-                    timeout=30,
-                )
-                if resp.status_code == 200:
-                    mt5_deals = resp.json().get("deals", [])
+            mt5_deals = (await connector_client.get_history(hours=720)).get("deals", [])
 
-                    autopilot_pids = {
-                        d.get("position_id")
-                        for d in mt5_deals
-                        if d.get("position_id") and (d.get("comment") or "").strip().startswith("[AUTOPILOT]")
-                    }
-                    auto_deals = [d for d in mt5_deals if d.get("position_id") in autopilot_pids]
+            autopilot_pids = {
+                d.get("position_id")
+                for d in mt5_deals
+                if d.get("position_id") and (d.get("comment") or "").strip().startswith("[AUTOPILOT]")
+            }
+            auto_deals = [d for d in mt5_deals if d.get("position_id") in autopilot_pids]
 
-                    pos_map: dict = {}
-                    for deal in auto_deals:
-                        pid = deal.get("position_id")
-                        if not pid:
-                            continue
-                        if pid not in pos_map:
-                            pos_map[pid] = {"open": None, "close": None}
-                        if deal.get("entry") == "OPEN":
-                            pos_map[pid]["open"] = deal
-                        else:
-                            pos_map[pid]["close"] = deal
+            pos_map: dict = {}
+            for deal in auto_deals:
+                pid = deal.get("position_id")
+                if not pid:
+                    continue
+                if pid not in pos_map:
+                    pos_map[pid] = {"open": None, "close": None}
+                if deal.get("entry") == "OPEN":
+                    pos_map[pid]["open"] = deal
+                else:
+                    pos_map[pid]["close"] = deal
 
-                    for pid, pair in pos_map.items():
-                        open_deal = pair["open"]
-                        close_deal = pair["close"]
-                        if not open_deal:
-                            continue
+            for pid, pair in pos_map.items():
+                open_deal = pair["open"]
+                close_deal = pair["close"]
+                if not open_deal:
+                    continue
 
-                        deal_time = open_deal.get("time", "")
-                        try:
-                            deal_dt = datetime.strptime(deal_time, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                        except (ValueError, TypeError):
-                            continue
-                        if deal_dt < thirty_days_ago:
-                            continue
+                deal_time = open_deal.get("time", "")
+                try:
+                    deal_dt = datetime.strptime(deal_time, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    continue
+                if deal_dt < thirty_days_ago:
+                    continue
 
-                        direction = open_deal.get("direction", "")
-                        profit = close_deal.get("profit", 0) if close_deal else 0
-                        comment = open_deal.get("comment", "") or ""
-                        prompt_match = __import__("re").search(r"P(\d+)", comment)
-                        prompt_number = int(prompt_match.group(1)) if prompt_match else None
+                direction = open_deal.get("direction", "")
+                profit = close_deal.get("profit", 0) if close_deal else 0
+                comment = open_deal.get("comment", "") or ""
+                prompt_match = __import__("re").search(r"P(\d+)", comment)
+                prompt_number = int(prompt_match.group(1)) if prompt_match else None
 
-                        close_comment = (close_deal.get("comment", "") or "").lower() if close_deal else ""
-                        if close_deal:
-                            if "sl" in close_comment:
-                                res_type = "SL_HIT"
-                            elif "tp" in close_comment:
-                                res_type = "TP_HIT"
-                            elif profit > 0:
-                                res_type = "PROFIT"
-                            else:
-                                res_type = "LOSS"
-                        else:
-                            res_type = "OPEN"
+                close_comment = (close_deal.get("comment", "") or "").lower() if close_deal else ""
+                if close_deal:
+                    if "sl" in close_comment:
+                        res_type = "SL_HIT"
+                    elif "tp" in close_comment:
+                        res_type = "TP_HIT"
+                    elif profit > 0:
+                        res_type = "PROFIT"
+                    else:
+                        res_type = "LOSS"
+                else:
+                    res_type = "OPEN"
 
-                        trades.append({
-                            "id": -pid,
-                            "prompt_number": prompt_number,
-                            "prompt_text": f"Prompt #{prompt_number}" if prompt_number else "Autopilot",
-                            "symbol": open_deal.get("symbol", ""),
-                            "direction": direction,
-                            "entry_price": open_deal.get("price"),
-                            "stop_loss": None,
-                            "take_profit": None,
-                            "lot_size": open_deal.get("volume", 0),
-                            "mt5_ticket": pid,
-                            "executed_at": open_deal.get("time", "").replace(" ", "T"),
-                            "result": res_type,
-                            "profit": float(profit) if profit else 0.0,
-                            "closed_at": close_deal.get("time", "").replace(" ", "T") if close_deal else None,
-                            "reasoning": comment,
-                            "confidence": None,
-                        })
+                trades.append({
+                    "id": -pid,
+                    "prompt_number": prompt_number,
+                    "prompt_text": f"Prompt #{prompt_number}" if prompt_number else "Autopilot",
+                    "symbol": open_deal.get("symbol", ""),
+                    "direction": direction,
+                    "entry_price": open_deal.get("price"),
+                    "stop_loss": None,
+                    "take_profit": None,
+                    "lot_size": open_deal.get("volume", 0),
+                    "mt5_ticket": pid,
+                    "executed_at": open_deal.get("time", "").replace(" ", "T"),
+                    "result": res_type,
+                    "profit": float(profit) if profit else 0.0,
+                    "closed_at": close_deal.get("time", "").replace(" ", "T") if close_deal else None,
+                    "reasoning": comment,
+                    "confidence": None,
+                })
         except Exception:
             pass
 
@@ -405,98 +379,84 @@ async def _fetch_mt5_trades(from_date: str, to_date: Optional[str] = None) -> tu
     trades: list[dict] = []
     mt5_available = False
 
-    mt5_url = settings.MT5_CONNECTOR_URL
-    if mt5_url:
-        mt5_base = mt5_url.rstrip("/")
+    if connector_client.configured:
         hours = int((day_end - day_start).total_seconds() / 3600) + 1
-        params = {"hours": max(hours, 24)}
-        headers = {}
-        if settings.MT5_API_TOKEN:
-            headers["Authorization"] = f"Bearer {settings.MT5_API_TOKEN}"
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(
-                    f"{mt5_base}/history",
-                    params=params,
-                    headers=headers,
-                    timeout=15,
-                )
-                if resp.status_code == 200:
-                    mt5_available = True
-                    mt5_deals = resp.json().get("deals", [])
+            mt5_deals = (await connector_client.get_history(hours=max(hours, 24))).get("deals", [])
+            mt5_available = True
 
-                    autopilot_pids = {
-                        d.get("position_id")
-                        for d in mt5_deals
-                        if d.get("position_id") and (d.get("comment") or "").strip().startswith("[AUTOPILOT]")
-                    }
-                    auto_deals = [d for d in mt5_deals if d.get("position_id") in autopilot_pids]
+            autopilot_pids = {
+                d.get("position_id")
+                for d in mt5_deals
+                if d.get("position_id") and (d.get("comment") or "").strip().startswith("[AUTOPILOT]")
+            }
+            auto_deals = [d for d in mt5_deals if d.get("position_id") in autopilot_pids]
 
-                    pos_map: dict = {}
-                    for deal in auto_deals:
-                        pid = deal.get("position_id")
-                        if not pid:
-                            continue
-                        if pid not in pos_map:
-                            pos_map[pid] = {"open": None, "close": None}
-                        if deal.get("entry") == "OPEN":
-                            pos_map[pid]["open"] = deal
-                        else:
-                            pos_map[pid]["close"] = deal
+            pos_map: dict = {}
+            for deal in auto_deals:
+                pid = deal.get("position_id")
+                if not pid:
+                    continue
+                if pid not in pos_map:
+                    pos_map[pid] = {"open": None, "close": None}
+                if deal.get("entry") == "OPEN":
+                    pos_map[pid]["open"] = deal
+                else:
+                    pos_map[pid]["close"] = deal
 
-                    for pid, pair in pos_map.items():
-                        open_deal = pair["open"]
-                        close_deal = pair["close"]
-                        if not open_deal:
-                            continue
+            for pid, pair in pos_map.items():
+                open_deal = pair["open"]
+                close_deal = pair["close"]
+                if not open_deal:
+                    continue
 
-                        deal_time = open_deal.get("time", "")
-                        try:
-                            deal_dt = datetime.strptime(deal_time, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                        except (ValueError, TypeError):
-                            continue
-                        if deal_dt < day_start or deal_dt >= day_end:
-                            continue
+                deal_time = open_deal.get("time", "")
+                try:
+                    deal_dt = datetime.strptime(deal_time, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    continue
+                if deal_dt < day_start or deal_dt >= day_end:
+                    continue
 
-                        direction = open_deal.get("direction", "")
-                        profit = close_deal.get("profit", 0) if close_deal else 0
-                        comment = open_deal.get("comment", "") or ""
-                        prompt_match = __import__("re").search(r"P(\d+)", comment)
-                        prompt_number = int(prompt_match.group(1)) if prompt_match else None
+                direction = open_deal.get("direction", "")
+                profit = close_deal.get("profit", 0) if close_deal else 0
+                comment = open_deal.get("comment", "") or ""
+                prompt_match = __import__("re").search(r"P(\d+)", comment)
+                prompt_number = int(prompt_match.group(1)) if prompt_match else None
 
-                        close_comment = (close_deal.get("comment", "") or "").lower() if close_deal else ""
-                        if close_deal:
-                            if "sl" in close_comment:
-                                res_type = "SL_HIT"
-                            elif "tp" in close_comment:
-                                res_type = "TP_HIT"
-                            elif profit > 0:
-                                res_type = "PROFIT"
-                            else:
-                                res_type = "LOSS"
-                        else:
-                            res_type = "OPEN"
+                close_comment = (close_deal.get("comment", "") or "").lower() if close_deal else ""
+                if close_deal:
+                    if "sl" in close_comment:
+                        res_type = "SL_HIT"
+                    elif "tp" in close_comment:
+                        res_type = "TP_HIT"
+                    elif profit > 0:
+                        res_type = "PROFIT"
+                    else:
+                        res_type = "LOSS"
+                else:
+                    res_type = "OPEN"
 
-                        trades.append({
-                            "id": -pid,
-                            "source": "mt5_connector",
-                            "symbol": open_deal.get("symbol", ""),
-                            "direction": direction,
-                            "entry_price": open_deal.get("price"),
-                            "exit_price": close_deal.get("price") if close_deal else None,
-                            "stop_loss": None,
-                            "take_profit": None,
-                            "lot_size": open_deal.get("volume", 0),
-                            "profit": float(profit) if profit else 0.0,
-                            "result": res_type,
-                            "executed_at": open_deal.get("time", "").replace(" ", "T"),
-                            "closed_at": close_deal.get("time", "").replace(" ", "T") if close_deal else None,
-                            "prompt_number": prompt_number,
-                            "prompt_text": f"Prompt #{prompt_number}" if prompt_number else "Autopilot",
-                            "confidence": None,
-                            "reasoning": comment,
-                            "mt5_ticket": pid,
-                        })
+                trades.append({
+                    "id": -pid,
+                    "source": "mt5_connector",
+                    "symbol": open_deal.get("symbol", ""),
+                    "direction": direction,
+                    "entry_price": open_deal.get("price"),
+                    "exit_price": close_deal.get("price") if close_deal else None,
+                    "stop_loss": None,
+                    "take_profit": None,
+                    "lot_size": open_deal.get("volume", 0),
+                    "profit": float(profit) if profit else 0.0,
+                    "result": res_type,
+                    "executed_at": open_deal.get("time", "").replace(" ", "T"),
+                    "closed_at": close_deal.get("time", "").replace(" ", "T") if close_deal else None,
+                    "prompt_number": prompt_number,
+                    "prompt_text": f"Prompt #{prompt_number}" if prompt_number else "Autopilot",
+                    "confidence": None,
+                    "reasoning": comment,
+                    "mt5_ticket": pid,
+                })
         except Exception:
             pass
 

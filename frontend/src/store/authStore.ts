@@ -192,14 +192,9 @@ axios.interceptors.request.use((config) => {
   const state = useAuthStore.getState()
   let { accessToken } = state
   
-  // Fallback to localStorage if not in state (for initial load)
+  // Fall back to sessionStorage if not in state (for initial load)
   if (!accessToken) {
     accessToken = getTokenFromStorage()
-  }
-  
-  // Debug: log the request
-  if (config.url?.includes('/mt5')) {
-    console.log('MT5 request:', config.url, 'Token exists:', !!accessToken)
   }
   
   // Add JWT token for ALL API calls
@@ -207,27 +202,6 @@ axios.interceptors.request.use((config) => {
     config.headers.Authorization = `Bearer ${accessToken}`
   }
   
-  // Add connector URL if configured for MT5 endpoints
-  if (config.url?.includes('/mt5')) {
-    try {
-      const savedSettings = localStorage.getItem('mt5ConnectorSettings')
-      if (savedSettings) {
-        const mt5Settings = JSON.parse(savedSettings)
-        if (mt5Settings.useExternal === 'true' && mt5Settings.port) {
-          let ip = (mt5Settings.serverIp || '').trim()
-          // Remove protocol if entered
-          ip = ip.replace(/^https?:\/\//, '').replace(/\/$/, '')
-          
-          const serverUrl = ip 
-            ? `http://${ip}:${mt5Settings.port}`
-            : `http://localhost:${mt5Settings.port}`
-          config.headers['x-mt5-connector-url'] = serverUrl
-        }
-      }
-    } catch (e) {
-      console.error('Error reading MT5 settings:', e)
-    }
-  }
   return config
 })
 

@@ -7,8 +7,6 @@ interface AutopilotState {
   symbol: string
   provider: string
   model: string
-  terminalPath: string
-  connectorUrl: string
   selectedPromptIds: string[]
   maxTradesPerDay: string
   maxDailyLoss: string
@@ -18,8 +16,6 @@ interface AutopilotState {
   setSymbol: (v: string) => void
   setProvider: (v: string) => void
   setModel: (v: string) => void
-  setTerminalPath: (v: string) => void
-  setConnectorUrl: (v: string) => void
   setSelectedPromptIds: (v: string[]) => void
   setMaxTradesPerDay: (v: string) => void
   setMaxDailyLoss: (v: string) => void
@@ -33,8 +29,6 @@ export const useAutopilotStore = create<AutopilotState>()(
       symbol: 'XAUUSD',
       provider: 'nvidia',
       model: 'qwen/qwen3.5-122b-a10b',
-      terminalPath: '',
-      connectorUrl: '',
       selectedPromptIds: [],
       maxTradesPerDay: '10',
       maxDailyLoss: '-50',
@@ -44,8 +38,6 @@ export const useAutopilotStore = create<AutopilotState>()(
       setSymbol: (v) => set({ symbol: v }),
       setProvider: (v) => set({ provider: v }),
       setModel: (v) => set({ model: v }),
-      setTerminalPath: (v) => set({ terminalPath: v }),
-      setConnectorUrl: (v) => set({ connectorUrl: v }),
       setSelectedPromptIds: (v) => set({ selectedPromptIds: v }),
       setMaxTradesPerDay: (v) => set({ maxTradesPerDay: v }),
       setMaxDailyLoss: (v) => set({ maxDailyLoss: v }),
@@ -58,8 +50,6 @@ export const useAutopilotStore = create<AutopilotState>()(
         symbol: state.symbol,
         provider: state.provider,
         model: state.model,
-        terminalPath: state.terminalPath,
-        connectorUrl: state.connectorUrl,
         selectedPromptIds: state.selectedPromptIds,
         maxTradesPerDay: state.maxTradesPerDay,
         maxDailyLoss: state.maxDailyLoss,

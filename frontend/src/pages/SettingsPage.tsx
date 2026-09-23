@@ -7,8 +7,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useToast } from '@/hooks/use-toast'
 import axios from 'axios'
 
-interface MT5ConnectorSettings { useExternal: string; serverIp: string; port: string }
-
 export default function SettingsPage() {
   const { toast } = useToast()
   const [mt5Testing, setMt5Testing] = useState(false)
@@ -18,19 +16,13 @@ export default function SettingsPage() {
   const [testProvider, setTestProvider] = useState('nvidia')
   const [testModel, setTestModel] = useState('qwen/qwen3.5-122b-a10b')
 
-  const [mt5Connector, setMt5Connector] = useState<MT5ConnectorSettings>({ useExternal: 'false', serverIp: '', port: '5000' })
-  useEffect(() => {
-    const saved = localStorage.getItem('mt5ConnectorSettings')
-    if (saved) try { setMt5Connector(JSON.parse(saved)) } catch {}
-  }, [])
-
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [passwordLoading, setPasswordLoading] = useState(false)
 
   const handleChangePassword = async () => {
     if (!currentPassword) { toast({ title: 'Error', description: 'Current password is required', variant: 'destructive' }); return }
-    if (!newPassword || newPassword.length < 6) { toast({ title: 'Error', description: 'New password must be at least 6 characters', variant: 'destructive' }); return }
+    if (!newPassword || newPassword.length < 12) { toast({ title: 'Error', description: 'New password must be at least 12 characters', variant: 'destructive' }); return }
     setPasswordLoading(true)
     try {
       await axios.put('/api/auth/password', { current_password: currentPassword, new_password: newPassword })
@@ -41,26 +33,15 @@ export default function SettingsPage() {
     } finally { setPasswordLoading(false) }
   }
 
-  const saveMt5ConnectorSettings = () => {
-    localStorage.setItem('mt5ConnectorSettings', JSON.stringify(mt5Connector))
-    toast({ title: 'MT5 Connector Settings Saved', description: mt5Connector.useExternal === 'true' ? `Using external: ${mt5Connector.serverIp || 'localhost'}:${mt5Connector.port}` : 'Using direct MT5' })
-  }
-
+  // The connector is configured on the server. This only checks whether it answers.
   const testMt5Connection = async () => {
     setMt5Testing(true); setMt5TestResult(null)
     try {
-      const headers: Record<string, string> = {}
-      if (mt5Connector.useExternal === 'true') {
-        const ip = mt5Connector.serverIp.trim().replace(/^https?:\/\//, '').replace(/\/$/, '')
-        headers['x-mt5-connector-url'] = ip ? `http://${ip}:${mt5Connector.port}` : `http://localhost:${mt5Connector.port}`
-      }
-      await axios.get('/api/mt5/health', { headers })
-      setMt5TestResult({ success: true, message: 'MT5 connection successful!' })
-      toast({ title: 'Success', description: 'MT5 connected successfully' })
+      const res = await axios.get('/api/mt5/health')
+      const ok = !!res.data?.mt5_initialized
+      setMt5TestResult({ success: ok, message: ok ? 'Connector reachable and MT5 terminal connected.' : 'Connector reachable, but the MT5 terminal is not connected.' })
     } catch (error: any) {
-      const msg = error.response?.data?.detail || 'MT5 connection failed'
-      setMt5TestResult({ success: false, message: msg })
-      toast({ title: 'Error', description: msg, variant: 'destructive' })
+      setMt5TestResult({ success: false, message: error.response?.data?.detail || 'MT5 connector unreachable' })
     } finally { setMt5Testing(false) }
   }
 
@@ -196,35 +177,12 @@ export default function SettingsPage() {
         <Card>
           <CardHeader className="px-3 sm:px-4 md:px-6 pt-3 sm:pt-4 md:pt-6 pb-2 sm:pb-3">
             <CardTitle className="text-sm sm:text-base md:text-lg">MT5 Connection</CardTitle>
-            <CardDescription className="text-xs sm:text-sm">Configure MT5 Terminal connection</CardDescription>
+            <CardDescription className="text-xs sm:text-sm">
+              Every trade goes through the server's MT5 connector. Its address, token and terminal are set on the server, not here.
+            </CardDescription>
           </CardHeader>
           <CardContent className="px-3 sm:px-4 md:px-6 pb-3 sm:pb-4 md:pb-6 space-y-3 sm:space-y-4">
-            <div className="w-full sm:w-64">
-              <Label className="text-xs sm:text-sm">Use External Connector</Label>
-              <Select value={mt5Connector.useExternal} onValueChange={(v) => setMt5Connector({...mt5Connector, useExternal: v})}>
-                <SelectTrigger className="text-sm"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="false">No - Direct MT5</SelectItem>
-                  <SelectItem value="true">Yes - External Connector</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            {mt5Connector.useExternal === 'true' && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4 p-3 sm:p-4 bg-muted rounded-lg">
-                <div>
-                  <Label className="text-xs sm:text-sm">Server IP</Label>
-                  <Input placeholder="IP or leave empty for localhost" value={mt5Connector.serverIp} onChange={(e) => setMt5Connector({...mt5Connector, serverIp: e.target.value})} className="text-sm h-9 sm:h-10" />
-                </div>
-                <div>
-                  <Label className="text-xs sm:text-sm">Port</Label>
-                  <Input placeholder="5000" value={mt5Connector.port} onChange={(e) => setMt5Connector({...mt5Connector, port: e.target.value})} className="text-sm h-9 sm:h-10" />
-                </div>
-              </div>
-            )}
-            <div className="flex flex-col sm:flex-row gap-2">
-              <Button onClick={saveMt5ConnectorSettings} size="sm" className="text-xs sm:text-sm">Save MT5 Settings</Button>
-              <Button variant="outline" onClick={testMt5Connection} disabled={mt5Testing} size="sm" className="text-xs sm:text-sm">{mt5Testing ? 'Testing...' : 'Test Connection'}</Button>
-            </div>
+            <Button variant="outline" onClick={testMt5Connection} disabled={mt5Testing} size="sm" className="text-xs sm:text-sm">{mt5Testing ? 'Checking...' : 'Check Connection'}</Button>
             {mt5TestResult && (
               <div className={`p-2 sm:p-3 rounded text-xs sm:text-sm ${mt5TestResult.success ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}>
                 {mt5TestResult.message}

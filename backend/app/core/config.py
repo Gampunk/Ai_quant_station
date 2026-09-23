@@ -35,14 +35,10 @@ class Settings(BaseSettings):
                 'python -c "import secrets; print(secrets.token_hex(32))"'
             )
 
-    # MT5 Settings
-    MT5_SERVER_PORT: int = 5001
-    MT5_API_TOKEN: str = ""
-    MT5_TERMINAL_PATH: str | None = None
-    
-    # MT5 Connector (External Windows Server)
+    # MT5 connector: the only route to the broker. The terminal to use is chosen
+    # on the connector with its own MT5_TERMINAL_PATH, not here.
     MT5_CONNECTOR_URL: str = ""
-    MT5_USE_EXTERNAL_CONNECTOR: bool = False
+    MT5_API_TOKEN: str = ""
     # Connector traffic is limited to local and private networks unless this is true.
     # See core/connector_guard.py.
     ALLOW_REMOTE_CONNECTOR: bool = False

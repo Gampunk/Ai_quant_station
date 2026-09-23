@@ -85,41 +85,31 @@ def test_explicit_override_allows_remote(monkeypatch):
     check_connector_url("http://8.8.8.8:5001")
 
 
-async def test_autopilot_request_is_blocked_before_any_network_call(monkeypatch):
-    from app.api import autopilot
+async def test_connector_client_is_blocked_before_any_network_call(monkeypatch):
+    """Every connector call goes through connector_client, so the guard covers all of them."""
+    import httpx
+    from app.core.mt5_connector import connector_client
 
-    def no_network():
-        raise AssertionError("the HTTP client was used, so the guard did not run first")
-    monkeypatch.setattr(autopilot, "get_http_client", no_network)
+    class NoNetwork:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("an HTTP client was created, so the guard did not run first")
+    monkeypatch.setattr(httpx, "AsyncClient", NoNetwork)
+    monkeypatch.setattr(settings, "MT5_CONNECTOR_URL", "http://8.8.8.8:5001")
 
     with pytest.raises(ConnectorAddressBlocked):
-        await autopilot.async_request("POST", "http://8.8.8.8:5001/order", json={"symbol": "XAUUSD"})
+        await connector_client.place_order({"symbol": "XAUUSD", "action": "BUY", "volume": 0.01})
 
 
-async def test_saving_a_public_connector_url_is_rejected(client: AsyncClient, auth_headers: dict):
+async def test_users_cannot_set_their_own_connector_address(client: AsyncClient, auth_headers: dict):
+    """The connector address is a server setting. A per-user address sent by an
+    older frontend is ignored rather than stored."""
     resp = await client.post("/api/autopilot/settings", headers=auth_headers, json={
         "symbol": "XAUUSD", "provider": "nvidia", "model": "x",
         "mt5_connector_url": "http://8.8.8.8:5001",
     })
-    assert resp.status_code == 400, resp.text
-    assert "non-local" in resp.json()["detail"]
-
-
-async def test_connecting_to_a_public_connector_url_is_rejected(client: AsyncClient, auth_headers: dict):
-    resp = await client.post(
-        "/api/autopilot/connect-mt5",
-        headers=auth_headers,
-        params={"connector_url": "http://8.8.8.8:5001"},
-    )
-    assert resp.status_code == 400, resp.text
-
-
-async def test_saving_a_local_connector_url_still_works(client: AsyncClient, auth_headers: dict):
-    resp = await client.post("/api/autopilot/settings", headers=auth_headers, json={
-        "symbol": "XAUUSD", "provider": "nvidia", "model": "x",
-        "mt5_connector_url": "http://127.0.0.1:5001",
-    })
     assert resp.status_code == 200, resp.text
+    status = (await client.get("/api/autopilot/status", headers=auth_headers)).json()
+    assert "mt5_connector_url" not in (status.get("settings") or {})
 
 
 async def test_mt5_connector_client_blocks_public_base_url(monkeypatch):

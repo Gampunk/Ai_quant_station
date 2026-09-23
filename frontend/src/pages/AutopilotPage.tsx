@@ -33,8 +33,6 @@ interface AutopilotStatus {
     max_trades_per_day: number
     cooldown_minutes: number
     max_daily_loss: number
-    mt5_terminal_path: string | null
-    mt5_connector_url: string | null
     symbol: string
     provider: string
     model: string
@@ -117,10 +115,6 @@ export default function AutopilotPage() {
   const setProvider = useAutopilotStore((s) => s.setProvider)
   const model = useAutopilotStore((s) => s.model)
   const setModel = useAutopilotStore((s) => s.setModel)
-  const terminalPath = useAutopilotStore((s) => s.terminalPath)
-  const setTerminalPath = useAutopilotStore((s) => s.setTerminalPath)
-  const connectorUrl = useAutopilotStore((s) => s.connectorUrl)
-  const setConnectorUrl = useAutopilotStore((s) => s.setConnectorUrl)
   const selectedPromptIds = useAutopilotStore((s) => s.selectedPromptIds)
   const setSelectedPromptIds = useAutopilotStore((s) => s.setSelectedPromptIds)
   const maxTradesPerDay = useAutopilotStore((s) => s.maxTradesPerDay)
@@ -201,8 +195,6 @@ export default function AutopilotPage() {
         setSymbol(res.data.settings.symbol)
         setProvider(res.data.settings.provider)
         setModel(res.data.settings.model)
-        setTerminalPath(res.data.settings.mt5_terminal_path || '')
-        setConnectorUrl(res.data.settings.mt5_connector_url || '')
         setMt5Connected(res.data.settings.mt5_connected || false)
         setMaxTradesPerDay(String(res.data.settings.max_trades_per_day ?? 10))
         setMaxDailyLoss(String(res.data.settings.max_daily_loss ?? -50))
@@ -253,8 +245,6 @@ export default function AutopilotPage() {
         max_trades_per_day: parseInt(maxTradesPerDay) || 10,
         cooldown_minutes: 5,
         max_daily_loss: parseFloat(maxDailyLoss) || -50,
-        mt5_terminal_path: terminalPath,
-        mt5_connector_url: connectorUrl || null,
         symbol: symbol,
         provider: provider,
         model: model,
@@ -267,12 +257,7 @@ export default function AutopilotPage() {
 
   const connectMT5 = async () => {
     try {
-      const res = await axios.post('/api/autopilot/connect-mt5', null, {
-        params: {
-          terminal_path: terminalPath || null,
-          connector_url: connectorUrl || null
-        }
-      })
+      const res = await axios.post('/api/autopilot/connect-mt5')
       if (res.data.success) {
         setMt5Connected(true)
         toast({ title: 'MT5 Connected', description: 'Connected successfully' })
@@ -428,27 +413,8 @@ export default function AutopilotPage() {
                   {mt5Connected ? 'Reconnect' : 'Connect'}
                 </Button>
               </div>
-              <Input
-                placeholder="C:\Program Files\MetaTrader 5\terminal64.exe"
-                value={terminalPath}
-                onChange={(e) => setTerminalPath(e.target.value)}
-                disabled={status?.enabled}
-                className="text-xs"
-              />
               <p className="text-xs text-muted-foreground mt-1">
-                Leave empty for default MT5 terminal
-              </p>
-              {/* MT5 Connector URL */}
-              <label className="text-sm text-muted-foreground mt-3 block">MT5 Connector URL</label>
-              <Input
-                placeholder="http://192.168.1.100:5001"
-                value={connectorUrl}
-                onChange={(e) => setConnectorUrl(e.target.value)}
-                disabled={status?.enabled}
-                className="text-xs"
-              />
-              <p className="text-xs text-muted-foreground mt-1">
-                IP:Port of MT5 Connector service (leave empty for localhost)
+                Uses the server's MT5 connector. Its address, token and terminal are set on the server.
               </p>
             </div>
 

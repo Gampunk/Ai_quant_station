@@ -26,6 +26,7 @@ import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from ..core.config import settings
+from ..core.mt5_connector import connector_client
 
 logger = logging.getLogger(__name__)
 
@@ -68,27 +69,11 @@ def _week_str() -> str:
 async def _fetch_mt5_trades() -> list[dict] | None:
     """Fetch today's [AUTOPILOT] trades from MT5 connector.
     Returns list of trade dicts, or None if MT5 unreachable."""
-    mt5_url = settings.MT5_CONNECTOR_URL
-    if not mt5_url:
+    if not connector_client.configured:
         return None
 
-    mt5_base = mt5_url.rstrip("/")
-    headers = {}
-    if settings.MT5_API_TOKEN:
-        headers["Authorization"] = f"Bearer {settings.MT5_API_TOKEN}"
-
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                f"{mt5_base}/history",
-                params={"hours": 48},
-                headers=headers,
-                timeout=15,
-            )
-        if resp.status_code != 200:
-            return None
-
-        mt5_deals = resp.json().get("deals", [])
+        mt5_deals = (await connector_client.get_history(hours=48)).get("deals", [])
     except Exception:
         return None
 
@@ -166,27 +151,11 @@ async def _fetch_mt5_trades() -> list[dict] | None:
 
 async def _fetch_weekly_mt5_trades() -> list[dict] | None:
     """Fetch last 7 days of [AUTOPILOT] trades from MT5 connector."""
-    mt5_url = settings.MT5_CONNECTOR_URL
-    if not mt5_url:
+    if not connector_client.configured:
         return None
 
-    mt5_base = mt5_url.rstrip("/")
-    headers = {}
-    if settings.MT5_API_TOKEN:
-        headers["Authorization"] = f"Bearer {settings.MT5_API_TOKEN}"
-
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                f"{mt5_base}/history",
-                params={"hours": 168},
-                headers=headers,
-                timeout=15,
-            )
-        if resp.status_code != 200:
-            return None
-
-        mt5_deals = resp.json().get("deals", [])
+        mt5_deals = (await connector_client.get_history(hours=168)).get("deals", [])
     except Exception:
         return None
 

@@ -17,7 +17,6 @@ import json
 import re
 from sqlalchemy import select, func
 from openai import AsyncOpenAI
-import httpx
 import pandas as pd
 import ta
 import numpy as np
@@ -29,7 +28,7 @@ from ..core.providers import PROVIDERS, get_api_key as _get_api_key, get_base_ur
 from ..models.ai_memory import AutopilotTrade, AutopilotSettings, UserPrompt, AutopilotLog, ModelUsage, AiCallLog
 from ..models.strategy_score import StrategyScore
 from ..core.providers import estimate_cost
-from ..core.connector_guard import check_connector_url, ConnectorAddressBlocked
+from ..core.mt5_connector import ConnectorError, connector_client
 
 router = APIRouter(prefix="/autopilot", tags=["Autopilot"])
 
@@ -43,20 +42,6 @@ def _capture_raw_response(response) -> dict | None:
             return response.dict()
         except Exception:
             return None
-
-_http_client: httpx.AsyncClient | None = None
-
-def get_http_client() -> httpx.AsyncClient:
-    global _http_client
-    if _http_client is None:
-        _http_client = httpx.AsyncClient(timeout=30.0)
-    return _http_client
-
-async def shutdown_http_client():
-    global _http_client
-    if _http_client:
-        await _http_client.aclose()
-        _http_client = None
 
 _user_states: Dict[int, dict] = {}
 _user_locks: Dict[int, asyncio.Lock] = {}
@@ -281,27 +266,14 @@ async def _persist_log(user_id: int, level: str, message: str, cycle_number: int
         pass  # Log persistence should never crash the calling code
 
 
-async def async_request(method: str, url: str, **kwargs) -> dict:
-    check_connector_url(url)
-    client = get_http_client()
-    headers = kwargs.pop("headers", {})
-    if settings.MT5_API_TOKEN:
-        headers["Authorization"] = f"Bearer {settings.MT5_API_TOKEN}"
-    kwargs["headers"] = headers
-    response = await client.request(method, url, **kwargs)
-    if not response.is_success:
-        body = response.text[:500]
-        raise Exception(f"HTTP {response.status_code}: {body}")
-    return response.json()
+# All connector traffic goes through connector_client, which holds the one
+# connector address from the server settings. Autopilot used to keep its own
+# HTTP client and let each user set a different connector address.
 
 
-async def initialize_mt5_connector(user_id: int, terminal_path: str = None, connector_url: str = None) -> bool:
+async def initialize_mt5_connector(user_id: int) -> bool:
     try:
-        connector_url = (connector_url or settings.MT5_CONNECTOR_URL or "").strip() or None
-        payload = {}
-        if terminal_path:
-            payload["terminal_path"] = terminal_path
-        data = await async_request("POST", f"{connector_url}/initialize", json=payload)
+        data = await connector_client.initialize()
         if data.get("success"):
             account = data.get("account", {})
             add_log(user_id, f"MT5 Connected: {account.get('server')} | Balance: ${account.get('balance', 0):.2f}", "SUCCESS")
@@ -312,10 +284,9 @@ async def initialize_mt5_connector(user_id: int, terminal_path: str = None, conn
     return False
 
 
-async def get_market_data(user_id: int, symbol: str, timeframe: str = "1m", count: int = 500, connector_url: str = None):
+async def get_market_data(user_id: int, symbol: str, timeframe: str = "1m", count: int = 500):
     try:
-        connector_url = (connector_url or settings.MT5_CONNECTOR_URL or "").strip() or None
-        data = await async_request("GET", f"{connector_url}/data/latest/{symbol}", params={"timeframe": timeframe, "count": count})
+        data = await connector_client.get_latest_data(symbol, timeframe, count)
         if data.get("success"):
             return data.get("data", [])
     except Exception as e:
@@ -338,9 +309,8 @@ def _build_order_action(direction: str, order_type: str) -> str:
 
 async def execute_trade(user_id: int, symbol: str, direction: str, volume: float, entry_price: float = None,
                        sl: float = None, tp: float = None, comment: str = "[AUTOPILOT]", prompt_num: int = None,
-                       connector_url: str = None, order_type: str = "market"):
+                       order_type: str = "market"):
     try:
-        connector_url = (connector_url or settings.MT5_CONNECTOR_URL or "").strip() or None
         if prompt_num:
             if isinstance(prompt_num, int) and prompt_num < 0:
                 trade_comment = f"[AUTOPILOT] Custom-{abs(prompt_num)}"
@@ -357,7 +327,7 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
         min_dist = None
         digits = None
         try:
-            sym_data = await async_request("GET", f"{connector_url}/symbol/{symbol}")
+            sym_data = await connector_client.get_symbol(symbol)
             price = sym_data.get("bid") or sym_data.get("ask")
             stops_level = sym_data.get("trade_stops_level") or sym_data.get("stops_level")
             point = sym_data.get("point")
@@ -408,10 +378,13 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
         if tp and tp > 0:
             payload["tp"] = tp
 
-        data = await async_request("POST", f"{connector_url}/order", json=payload)
+        data = await connector_client.place_order(payload)
         if data.get("success"):
             return {"success": True, "ticket": data.get("ticket"), "price": data.get("price")}
         return {"success": False, "error": "Order failed"}
+    except ConnectorError as e:
+        add_log(user_id, f"Trade execution failed: {e.detail}", "ERROR")
+        return {"success": False, "error": e.detail}
     except Exception as e:
         add_log(user_id, f"Trade execution failed: {str(e)}", "ERROR")
         return {"success": False, "error": str(e)}
@@ -486,10 +459,9 @@ async def _log_ai_call(
         return None
 
 
-async def check_open_positions(connector_url: str = None, user_id: int = 0):
+async def check_open_positions(user_id: int = 0):
     try:
-        connector_url = (connector_url or settings.MT5_CONNECTOR_URL or "").strip() or None
-        data = await async_request("GET", f"{connector_url}/positions")
+        data = await connector_client.get_positions()
         if data.get("success"):
             return data.get("positions", [])
     except Exception as e:
@@ -856,8 +828,6 @@ async def run_autopilot_cycle(user_id: int):
         provider = settings_obj.provider
         model = settings_obj.model
         lot_size = settings_obj.default_lot
-        terminal_path = settings_obj.mt5_terminal_path
-        connector_url = settings_obj.mt5_connector_url
         mt5_connected = settings_obj.mt5_connected
         selected_ids = settings_obj.selected_prompts or []
         max_trades = settings_obj.max_trades_per_day
@@ -883,11 +853,10 @@ async def run_autopilot_cycle(user_id: int):
         return
 
     if not mt5_connected:
-        add_log(user_id, f"Initializing MT5 connection to {connector_url or 'default'}...")
-        conn_ok = await initialize_mt5_connector(user_id, terminal_path, connector_url)
+        add_log(user_id, "Initializing MT5 connection...")
+        conn_ok = await initialize_mt5_connector(user_id)
         if not conn_ok:
-            hint = "Check connector URL." if connector_url else "Check terminal path."
-            add_log(user_id, f"Failed to connect to MT5. {hint}", "ERROR")
+            add_log(user_id, "Failed to connect to MT5. Check MT5_CONNECTOR_URL and MT5_API_TOKEN on the server.", "ERROR")
             return
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
@@ -930,7 +899,6 @@ async def run_autopilot_cycle(user_id: int):
         symbol,
         timeframe="15m",
         count=300,
-        connector_url=connector_url,
     )
     market_regime = _classify_market_regime(baseline_market_data or [])
     add_log(
@@ -1076,7 +1044,7 @@ async def run_autopilot_cycle(user_id: int):
         return ("4h", 200)  # default: 4H for swing trading
 
     tf, count = _detect_timeframe(prompt_text)
-    market_data = await get_market_data(user_id, symbol, timeframe=tf, count=count, connector_url=connector_url)
+    market_data = await get_market_data(user_id, symbol, timeframe=tf, count=count)
     if not market_data or len(market_data) == 0:
         add_log(user_id, "No market data available", "ERROR")
         state["stats"]["error_count"] += 1
@@ -1545,7 +1513,7 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
 
     add_log(user_id, f"TRADE SETUP - {direction} ({order_type}) | Entry: {entry_price} SL: {sl} TP: {tp} Lot: {lot} Confidence: {confidence}%")
 
-    result = await execute_trade(user_id, symbol, direction, lot, entry_price, sl, tp, prompt_num=prompt_num, connector_url=connector_url, order_type=order_type)
+    result = await execute_trade(user_id, symbol, direction, lot, entry_price, sl, tp, prompt_num=prompt_num, order_type=order_type)
     state["last_trade_time"] = datetime.now(timezone.utc)
 
     if result.get("success"):
@@ -1607,7 +1575,7 @@ async def _is_market_open() -> bool:
     return True
 
 
-async def sync_all_trades_from_mt5(user_id: int, connector_url: str = None, hours: int = 720):
+async def sync_all_trades_from_mt5(user_id: int, hours: int = 720):
     """Full back-sync: fetch ALL MT5 history, match by comment, create missing local records."""
     try:
         async with AsyncSessionLocal() as db:
@@ -1615,11 +1583,10 @@ async def sync_all_trades_from_mt5(user_id: int, connector_url: str = None, hour
             settings_obj = result.scalar_one_or_none()
             if not settings_obj:
                 return
-            connector_url = (connector_url or settings_obj.mt5_connector_url or settings.MT5_CONNECTOR_URL or "").strip() or None
-            if not connector_url:
+            if not connector_client.configured:
                 return
 
-            history_data = await async_request("GET", f"{connector_url}/history", params={"hours": hours})
+            history_data = await connector_client.get_history(hours=hours)
             if not history_data or not history_data.get("success"):
                 add_log(user_id, "Full sync: history fetch failed", "WARNING")
                 return
@@ -1734,15 +1701,13 @@ async def sync_all_trades_from_mt5(user_id: int, connector_url: str = None, hour
         add_log(user_id, f"Full sync failed: {str(e)}", "ERROR")
 
 
-async def sync_trade_results(user_id: int, connector_url: str = None):
+async def sync_trade_results(user_id: int):
     try:
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
             settings_obj = result.scalar_one_or_none()
             if not settings_obj:
                 return
-            connector_url = (connector_url or settings_obj.mt5_connector_url or settings.MT5_CONNECTOR_URL or "").strip() or None
-
             result = await db.execute(
                 select(AutopilotTrade).where(AutopilotTrade.user_id == user_id)
                 .where(AutopilotTrade.execution_status == "executed").where(AutopilotTrade.result == None)
@@ -1762,7 +1727,7 @@ async def sync_trade_results(user_id: int, connector_url: str = None):
                 sync_hours = 24
 
             try:
-                history_data = await async_request("GET", f"{connector_url}/history", params={"hours": sync_hours})
+                history_data = await connector_client.get_history(hours=sync_hours)
             except Exception as e:
                 add_log(user_id, f"History fetch failed: {str(e)}", "ERROR")
                 return
@@ -1826,10 +1791,8 @@ async def autopilot_loop(user_id: int):
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
             s = result.scalar_one_or_none()
-            if s:
-                connector_url = (s.mt5_connector_url or settings.MT5_CONNECTOR_URL or "").strip() or None
-                if connector_url:
-                    await sync_all_trades_from_mt5(user_id, connector_url)
+            if s and connector_client.configured:
+                await sync_all_trades_from_mt5(user_id)
     except Exception:
         pass
     try:
@@ -1898,8 +1861,6 @@ class AutopilotConfig(BaseModel):
     max_trades_per_day: int = 10
     cooldown_minutes: int = 5
     max_daily_loss: float = -50.0
-    mt5_terminal_path: Optional[str] = None
-    mt5_connector_url: Optional[str] = None
     symbol: str = "XAUUSD"
     provider: str = "nvidia"
     model: str = "qwen/qwen3.5-122b-a10b"
@@ -2081,7 +2042,6 @@ async def get_status(current_user: dict = Depends(get_current_user)):
                 "enabled": settings_obj.enabled, "interval_seconds": settings_obj.interval_seconds,
                 "default_lot": settings_obj.default_lot, "max_trades_per_day": settings_obj.max_trades_per_day,
                 "cooldown_minutes": settings_obj.cooldown_minutes, "max_daily_loss": settings_obj.max_daily_loss,
-                "mt5_connector_url": settings_obj.mt5_connector_url,
                 "symbol": settings_obj.symbol, "provider": settings_obj.provider, "model": settings_obj.model,
                 "mt5_connected": settings_obj.mt5_connected,
                 "selected_prompts": settings_obj.selected_prompts or []
@@ -2090,56 +2050,23 @@ async def get_status(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/connect-mt5")
-async def connect_mt5(
-    terminal_path: Optional[str] = None,
-    connector_url: Optional[str] = None,
-    current_user: dict = Depends(require_trader)
-):
-    """Connect to MT5 terminal."""
+async def connect_mt5(current_user: dict = Depends(require_trader)):
+    """Connect to MT5 through the server's connector."""
     user_id = current_user["id"]
-    try:
-        check_connector_url(connector_url)
-    except ConnectorAddressBlocked as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-    # Use URL from request param, or fall back to DB settings, or fall back to .env
-    if not connector_url:
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(AutopilotSettings).where(AutopilotSettings.user_id == user_id)
-            )
-            settings_obj = result.scalar_one_or_none()
-            if settings_obj:
-                connector_url = (settings_obj.mt5_connector_url or "").strip() or None
-                selected = settings_obj.selected_prompts or []
-                if selected:
-                    add_log(user_id, f"Active prompts: {len(selected)} selected ({', '.join(str(s) for s in selected)})")
-
-    add_log(user_id, f"Connecting to MT5 at {connector_url or 'default'}...")
-
-    success = await initialize_mt5_connector(user_id, terminal_path, connector_url)
-
-    if success:
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(AutopilotSettings).where(AutopilotSettings.user_id == user_id)
-            )
-            settings_obj = result.scalar_one_or_none()
-
-            if not settings_obj:
-                settings_obj = AutopilotSettings(user_id=user_id)
-                db.add(settings_obj)
-
-            if terminal_path:
-                settings_obj.mt5_terminal_path = terminal_path
-            if connector_url:
-                settings_obj.mt5_connector_url = connector_url
-            settings_obj.mt5_connected = True
-            await db.commit()
-
-        return {"success": True, "message": "Connected to MT5 successfully"}
-    else:
+    add_log(user_id, "Connecting to MT5...")
+    if not await initialize_mt5_connector(user_id):
         return {"success": False, "message": "Failed to connect to MT5"}
+
+    async with AsyncSessionLocal() as db:
+        settings_obj = (await db.execute(
+            select(AutopilotSettings).where(AutopilotSettings.user_id == user_id)
+        )).scalar_one_or_none()
+        if not settings_obj:
+            settings_obj = AutopilotSettings(user_id=user_id)
+            db.add(settings_obj)
+        settings_obj.mt5_connected = True
+        await db.commit()
+    return {"success": True, "message": "Connected to MT5 successfully"}
 
 
 @router.post("/settings")
@@ -2149,10 +2076,6 @@ async def save_settings(
 ):
     """Save autopilot settings."""
     user_id = current_user["id"]
-    try:
-        check_connector_url(config.mt5_connector_url)
-    except ConnectorAddressBlocked as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -2164,21 +2087,15 @@ async def save_settings(
             settings_obj = AutopilotSettings(user_id=user_id)
             db.add(settings_obj)
 
-        url_changed = config.mt5_connector_url is not None and config.mt5_connector_url != settings_obj.mt5_connector_url
         settings_obj.interval_seconds = config.interval_seconds
         settings_obj.default_lot = config.default_lot
         settings_obj.max_trades_per_day = config.max_trades_per_day
         settings_obj.cooldown_minutes = config.cooldown_minutes
         settings_obj.max_daily_loss = config.max_daily_loss
-        settings_obj.mt5_terminal_path = config.mt5_terminal_path
-        settings_obj.mt5_connector_url = config.mt5_connector_url
         settings_obj.symbol = config.symbol
         settings_obj.provider = config.provider
         settings_obj.model = config.model
         settings_obj.selected_prompts = config.selected_prompts
-        if url_changed:
-            settings_obj.mt5_connected = False
-            add_log(user_id, "Connector URL changed — MT5 connection reset. Please reconnect.", "WARNING")
 
         await db.commit()
 
