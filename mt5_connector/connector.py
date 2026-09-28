@@ -45,6 +45,44 @@ ALLOW_NO_TOKEN = os.getenv("MT5_ALLOW_NO_TOKEN", "").strip().lower() in ("1", "t
 REQUIRE_DEMO = os.getenv("MT5_REQUIRE_DEMO", "true").strip().lower() not in ("0", "false", "no")
 
 
+def _max_volume() -> float:
+    try:
+        value = float(os.getenv("MT5_MAX_VOLUME", "1.0"))
+    except ValueError:
+        value = 1.0
+    return value if value > 0 else 1.0
+
+
+# The largest order this connector sends, in lots, whatever the backend asks for.
+# A last lock behind the backend's risk checks. Raise it here, on this machine, only.
+MAX_VOLUME = _max_volume()
+
+
+def min_stop_distance(symbol_info) -> float:
+    """The closest a stop or target may sit to the price: the broker's stops level, at least 10 points."""
+    return max(symbol_info.trade_stops_level, 10) * symbol_info.point
+
+
+def check_stops(action: str, price: float, sl, tp, min_dist: float, digits: int) -> None:
+    """Refuse a stop or target on the wrong side of the price, or closer than the broker allows.
+
+    An earlier version moved such a stop to the nearest allowed level without saying so,
+    which changed the trade's risk behind the caller's back.
+    """
+    buy = action.startswith("BUY")
+    gap = round(min_dist, digits)
+    if sl is not None:
+        if buy and sl > price - min_dist:
+            raise HTTPException(status_code=400, detail=f"Stop loss {sl} must be at least {gap} below the price {price}")
+        if not buy and sl < price + min_dist:
+            raise HTTPException(status_code=400, detail=f"Stop loss {sl} must be at least {gap} above the price {price}")
+    if tp is not None:
+        if buy and tp < price + min_dist:
+            raise HTTPException(status_code=400, detail=f"Take profit {tp} must be at least {gap} above the price {price}")
+        if not buy and tp > price - min_dist:
+            raise HTTPException(status_code=400, detail=f"Take profit {tp} must be at least {gap} below the price {price}")
+
+
 def require_demo_account():
     """Raise unless trading is allowed on the connected account."""
     if not REQUIRE_DEMO:
@@ -327,7 +365,15 @@ async def get_symbol(symbol: str, _auth: bool = Depends(verify_auth)):
         "point": info.point,
         "digits": info.digits,
         "volume_min": info.volume_min,
-        "volume_max": info.volume_max
+        "volume_max": info.volume_max,
+        "volume_step": info.volume_step,
+        "trade_stops_level": info.trade_stops_level,
+        "min_stop_distance": min_stop_distance(info),
+        "trade_contract_size": info.trade_contract_size,
+        # Money per tick per lot, in the account currency. Position sizing needs both.
+        "trade_tick_size": info.trade_tick_size,
+        "trade_tick_value": info.trade_tick_value,
+        "max_volume": MAX_VOLUME,
     }
 
 
@@ -352,6 +398,10 @@ async def place_order(order: OrderRequest, _auth: bool = Depends(verify_auth)):
     
     volume = round(order.volume / symbol_info.volume_step) * symbol_info.volume_step
     volume = round(volume, 2)
+    if volume > symbol_info.volume_max:
+        raise HTTPException(status_code=400, detail=f"Volume {volume} above the broker's maximum {symbol_info.volume_max}")
+    if volume > MAX_VOLUME:
+        raise HTTPException(status_code=403, detail=f"Volume {volume} above this connector's cap of {MAX_VOLUME} lots (MT5_MAX_VOLUME)")
     
     digits = symbol_info.digits
     point = symbol_info.point
@@ -386,27 +436,9 @@ async def place_order(order: OrderRequest, _auth: bool = Depends(verify_auth)):
     
     price = round(price, digits)
     
-    min_dist = max(symbol_info.trade_stops_level, 10) * point
-    
-    sl = None
-    if order.sl is not None:
-        sl = round(order.sl, digits)
-        if "BUY" in order.action:
-            if sl >= price - min_dist:
-                sl = round(price - min_dist, digits)
-        else:
-            if sl <= price + min_dist:
-                sl = round(price + min_dist, digits)
-    
-    tp = None
-    if order.tp is not None:
-        tp = round(order.tp, digits)
-        if "BUY" in order.action:
-            if tp <= price + min_dist:
-                tp = round(price + min_dist, digits)
-        else:
-            if tp >= price - min_dist:
-                tp = round(price - min_dist, digits)
+    sl = round(order.sl, digits) if order.sl is not None else None
+    tp = round(order.tp, digits) if order.tp is not None else None
+    check_stops(order.action, price, sl, tp, min_stop_distance(symbol_info), digits)
     
     filling_mode = symbol_info.filling_mode
     if filling_mode & 1:
@@ -781,6 +813,7 @@ if __name__ == "__main__":
     print(f"\nAPI Server starting on http://{shown}:{PORT}")
     print(f"Docs (Swagger UI): http://{shown}:{PORT}/docs")
     print(f"Demo-only trading guard: {'ON' if REQUIRE_DEMO else 'OFF'}")
+    print(f"Largest order accepted: {MAX_VOLUME} lots (MT5_MAX_VOLUME)")
     if CONNECTOR_API_TOKEN:
         print("API token: required")
     elif ALLOW_NO_TOKEN:

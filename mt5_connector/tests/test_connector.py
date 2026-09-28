@@ -253,3 +253,51 @@ def test_initialize_ignores_a_caller_supplied_terminal_path(client, mt5, monkeyp
 def test_data_range_rejects_a_bad_date(client):
     resp = client.get("/data/range/XAUUSD", params={"timeframe": "1h", "start": "yesterday"})
     assert resp.status_code == 400
+
+
+# ── Order limits and stop placement ──────────────────────────────────────────
+def test_symbol_reports_what_position_sizing_needs(client):
+    body = client.get("/symbol/XAUUSD").json()
+    assert body["trade_contract_size"] == 100.0
+    assert body["trade_tick_size"] == 0.01 and body["trade_tick_value"] == 1.0
+    assert body["volume_step"] == 0.01
+    assert body["trade_stops_level"] == 0 and body["min_stop_distance"] == 0.1
+    assert body["max_volume"] == connector.MAX_VOLUME
+
+
+def test_volume_above_the_connector_cap_is_refused(client, mt5):
+    resp = buy(client, volume=connector.MAX_VOLUME + 0.01)
+    assert resp.status_code == 403
+    assert "MT5_MAX_VOLUME" in resp.json()["detail"]
+    assert mt5.positions_get() == ()
+
+
+def test_volume_at_the_cap_is_accepted(client):
+    assert buy(client, volume=connector.MAX_VOLUME, sl=None, tp=None).status_code == 200
+
+
+def test_volume_above_the_broker_maximum_is_refused(client, monkeypatch):
+    monkeypatch.setattr(connector, "MAX_VOLUME", 1000.0)
+    resp = buy(client, volume=150)
+    assert resp.status_code == 400 and "broker's maximum" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("side, sl_offset, tp_offset, word", [
+    ("BUY", +1.0, None, "Stop loss"),     # stop above the entry of a buy
+    ("BUY", -0.05, None, "Stop loss"),    # closer than the 0.10 minimum
+    ("BUY", None, -1.0, "Take profit"),   # target below the entry of a buy
+    ("SELL", -1.0, None, "Stop loss"),    # stop below the entry of a sell
+    ("SELL", None, +1.0, "Take profit"),  # target above the entry of a sell
+])
+def test_misplaced_stops_are_refused_not_moved(client, mt5, side, sl_offset, tp_offset, word):
+    quote = client.get("/symbol/XAUUSD").json()
+    price = quote["ask"] if side == "BUY" else quote["bid"]
+    body = {"action": side}
+    if sl_offset is not None:
+        body["sl"] = round(price + sl_offset, 2)
+    if tp_offset is not None:
+        body["tp"] = round(price + tp_offset, 2)
+    resp = buy(client, **body)
+    assert resp.status_code == 400, resp.text
+    assert word in resp.json()["detail"]
+    assert mt5.positions_get() == ()

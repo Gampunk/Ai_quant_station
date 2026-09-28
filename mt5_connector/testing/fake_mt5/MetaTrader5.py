@@ -49,7 +49,7 @@ TRADE_RETCODE_INVALID = 10013
 
 # ── Record types, named like the real package ────────────────────────────────
 AccountInfo = namedtuple("AccountInfo", "login server name balance equity margin margin_free profit currency leverage trade_mode")
-SymbolInfo = namedtuple("SymbolInfo", "name description visible point digits volume_min volume_max volume_step trade_stops_level filling_mode trade_contract_size")
+SymbolInfo = namedtuple("SymbolInfo", "name description visible point digits volume_min volume_max volume_step trade_stops_level filling_mode trade_contract_size trade_tick_size trade_tick_value")
 Tick = namedtuple("Tick", "time bid ask last volume")
 OrderSendResult = namedtuple("OrderSendResult", "retcode deal order volume price bid ask comment request_id")
 TradePosition = namedtuple("TradePosition", "ticket time type volume price_open sl tp price_current profit symbol comment magic")
@@ -178,9 +178,14 @@ def account_info():
 
 def _symbol(name):
     desc, point, digits, _, _, contract, stops = _SYMBOLS[name]
+    # A USD account: one tick is worth point * contract dollars, converted when USD is the base.
+    tick_value = point * contract
+    if name.startswith("USD") and _S.get("ticks"):
+        tick_value /= _S["ticks"][name][0]
     return SymbolInfo(name=name, description=desc, visible=True, point=point, digits=digits,
                       volume_min=0.01, volume_max=100.0, volume_step=0.01,
-                      trade_stops_level=stops, filling_mode=1, trade_contract_size=contract)
+                      trade_stops_level=stops, filling_mode=1, trade_contract_size=contract,
+                      trade_tick_size=point, trade_tick_value=tick_value)
 
 
 def symbols_get(group: str | None = None):
