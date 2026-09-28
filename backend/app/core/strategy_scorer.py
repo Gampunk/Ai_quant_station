@@ -220,6 +220,7 @@ async def get_best_model_for_symbol(symbol: str, min_trades: int = MIN_TRADES_FO
     """
     if not symbol:
         return None
+    base_symbol = symbol.split(".")[0]
     async with AsyncSessionLocal() as db:
         try:
             result = await db.execute(
@@ -237,7 +238,7 @@ async def get_best_model_for_symbol(symbol: str, min_trades: int = MIN_TRADES_FO
                     ORDER BY win_rate DESC, trades DESC
                     LIMIT 1
                 """),
-                {"symbol": symbol, "min_trades": min_trades},
+                {"symbol": base_symbol, "min_trades": min_trades},
             )
             row = result.fetchone()
             if not row:

@@ -62,6 +62,9 @@ async def generate_embedding(chat_memory_id: int, text: str):
 
 async def find_similar_analyses(query_embedding: list[float], symbol: str, limit: int = SIMILAR_COUNT):
     query_np = np.array(query_embedding, dtype=np.float32)
+    # Match both plain and broker-suffixed variants in either direction:
+    # query "XAUUSD" finds XAUUSD.p; query "XAUUSD.p" finds plain XAUUSD.
+    base_symbol = symbol.split(".")[0] if symbol else symbol
     async with AsyncSessionLocal() as db:
         try:
             result = await db.execute(
@@ -78,7 +81,7 @@ async def find_similar_analyses(query_embedding: list[float], symbol: str, limit
                     ORDER BY c.created_at DESC
                     LIMIT 100
                 """),
-                {"symbol": symbol}
+                {"symbol": base_symbol}
             )
             rows = result.fetchall()
         except Exception as e:
@@ -102,14 +105,15 @@ async def find_similar_analyses(query_embedding: list[float], symbol: str, limit
 
 
 async def get_strategy_scores(symbol: str, limit: int = TOP_COUNT):
+    base_symbol = symbol.split(".")[0] if symbol else symbol
     async with AsyncSessionLocal() as db:
         try:
             from ..models.strategy_score import StrategyScore
             result = await db.execute(
                 select(StrategyScore)
                 .where(
-                    or_(StrategyScore.symbol == symbol,
-                        StrategyScore.symbol.like(f"{symbol}.%")),
+                    or_(StrategyScore.symbol == base_symbol,
+                        StrategyScore.symbol.like(f"{base_symbol}.%")),
                     StrategyScore.total_trades >= MIN_TRADES_FOR_BEST,
                 )
                 .order_by(StrategyScore.win_rate.desc())
@@ -123,14 +127,15 @@ async def get_strategy_scores(symbol: str, limit: int = TOP_COUNT):
 
 async def get_underperforming_strategies(symbol: str, limit: int = LOSERS_COUNT):
     """Prompts with a meaningful sample and a poor win rate for this symbol."""
+    base_symbol = symbol.split(".")[0] if symbol else symbol
     async with AsyncSessionLocal() as db:
         try:
             from ..models.strategy_score import StrategyScore
             result = await db.execute(
                 select(StrategyScore)
                 .where(
-                    or_(StrategyScore.symbol == symbol,
-                        StrategyScore.symbol.like(f"{symbol}.%")),
+                    or_(StrategyScore.symbol == base_symbol,
+                        StrategyScore.symbol.like(f"{base_symbol}.%")),
                     StrategyScore.total_trades >= MIN_TRADES_FOR_FLAG,
                     StrategyScore.win_rate < FLAG_THRESHOLD * 100,
                 )

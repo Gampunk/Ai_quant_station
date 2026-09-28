@@ -122,6 +122,11 @@ class TestRagQueries:
         assert len(results) == 1
         assert "gold breakout" in results[0][1].content
 
+        # reverse direction: suffixed query finds plain-symbol chats too
+        results_rev = await find_similar_analyses([1.0, 0.5, 0.1], "XAUUSD.p")
+        assert len(results_rev) == 1
+        assert "gold breakout" in results_rev[0][1].content
+
     async def test_get_strategy_scores_requires_min_trades(self, db_session):
         db_session.add_all([
             StrategyScore(prompt_text="fluke", symbol="XAUUSD", direction="buy",
