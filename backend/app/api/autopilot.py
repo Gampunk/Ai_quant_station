@@ -380,7 +380,8 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
 
         data = await connector_client.place_order(payload)
         if data.get("success"):
-            return {"success": True, "ticket": data.get("ticket"), "price": data.get("price")}
+            return {"success": True, "ticket": data.get("ticket"), "price": data.get("price"),
+                    "requested_price": None if is_pending else data.get("requested_price")}
         return {"success": False, "error": "Order failed"}
     except ConnectorError as e:
         add_log(user_id, f"Trade execution failed: {e.detail}", "ERROR")
@@ -1530,6 +1531,7 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
                 symbol=symbol, direction=direction, order_type=order_type, entry_price=entry_price,
                 stop_loss=sl, take_profit=tp, lot_size=lot,
                 mt5_ticket=ticket, execution_price=exec_price, execution_status="executed",
+                requested_price=result.get("requested_price"),
                 reasoning=reasoning, confidence=confidence, ai_response=ai_response,
                 raw_thinking=full_raw_response,
                 market_regime=market_regime.get("regime"),

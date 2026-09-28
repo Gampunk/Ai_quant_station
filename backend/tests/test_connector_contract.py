@@ -112,6 +112,9 @@ async def test_autopilot_records_the_filled_price_not_the_quote():
     opened = _deal((await connector_client.get_history(hours=24))["deals"], placed["ticket"], "OPEN")
     assert placed["price"] == opened["price"], "stored the quote instead of the fill"
     assert placed["price"] != quote["ask"], "fill and quote are identical, so this proves nothing"
+    # The quote at send time travels with the fill, so slippage can be measured.
+    assert placed["requested_price"] is not None
+    assert placed["requested_price"] != placed["price"]
     await connector_client.close_position(placed["ticket"])
 
 
@@ -128,6 +131,10 @@ async def test_terminal_order_close_and_modify(client: AsyncClient, trader_heade
     record = (await db_session.execute(select(TradeRecord).where(TradeRecord.mt5_ticket == ticket))).scalar_one()
     opened = _deal((await connector_client.get_history(hours=24))["deals"], ticket, "OPEN")
     assert record.entry_price == opened["price"] and record.status == "open"
+    # The fake fills a couple of points away from the quote, like a real broker.
+    assert record.requested_price is not None, "quoted price not recorded"
+    assert record.requested_price != record.entry_price
+    assert abs(record.requested_price - record.entry_price) < 1.0
 
     modified = await client.post("/api/trade/modify", headers=trader_headers,
                                  json={"ticket": ticket, "sl": round(bid - 20, 2)})
@@ -141,8 +148,27 @@ async def test_terminal_order_close_and_modify(client: AsyncClient, trader_heade
     record = (await db_session.execute(select(TradeRecord).where(TradeRecord.mt5_ticket == ticket))).scalar_one()
     assert record.status == "closed"
     assert record.exit_price == shut["price"] and record.profit_loss == shut["profit"]
-    audits = (await db_session.execute(select(PositionAudit.action).where(PositionAudit.mt5_ticket == ticket))).scalars().all()
+    assert record.requested_exit_price is not None, "quoted close price not recorded"
+    assert record.requested_exit_price != record.exit_price
+    audits = {a.action: a for a in (await db_session.execute(
+        select(PositionAudit).where(PositionAudit.mt5_ticket == ticket))).scalars().all()}
     assert sorted(audits) == ["close", "modify"]
+    # The audits read the position's stop from the connector, which used to leave it out.
+    assert audits["modify"].original_sl == round(bid - 15, 2)
+    assert audits["close"].original_sl == round(bid - 20, 2)
+
+
+async def test_pending_order_records_no_requested_price(client: AsyncClient, trader_headers, db_session):
+    """A pending order has not filled, so there is no quote to compare against yet."""
+    bid = (await connector_client.get_symbol("XAUUSD"))["bid"]
+    order = await client.post("/api/trade/order", headers=trader_headers, json={
+        "symbol": "XAUUSD", "action": "BUY_LIMIT", "volume": 0.05, "price": round(bid - 50, 2),
+    })
+    assert order.status_code == 200, order.text
+    record = (await db_session.execute(
+        select(TradeRecord).where(TradeRecord.mt5_ticket == order.json()["ticket"]))).scalar_one()
+    assert record.order_type == "pending"
+    assert record.requested_price is None
 
 
 async def test_terminal_passes_on_the_connectors_refusal(client: AsyncClient, trader_headers):

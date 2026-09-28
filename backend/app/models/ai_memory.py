@@ -73,6 +73,9 @@ class TradeRecord(Base):
     symbol = Column(String, nullable=False)
     direction = Column(String, nullable=False)
     entry_price = Column(Float, nullable=False)
+    # The quote when a market order was sent. entry_price is the broker's fill;
+    # the difference is the slippage. Empty for pending orders.
+    requested_price = Column(Float, nullable=True)
     stop_loss = Column(Float, nullable=True)
     take_profit = Column(Float, nullable=True)
     volume = Column(Float, nullable=False)
@@ -82,6 +85,8 @@ class TradeRecord(Base):
     executed_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     closed_at = Column(DateTime(timezone=True), nullable=True)
     exit_price = Column(Float, nullable=True)
+    # The quote when a close was sent from the Terminal page. Empty for stops and targets.
+    requested_exit_price = Column(Float, nullable=True)
     profit_loss = Column(Float, nullable=True)
     
     magic_number = Column(Integer, nullable=True, index=True)
@@ -177,6 +182,9 @@ class AutopilotTrade(Base):
     mt5_ticket = Column(BigInteger, nullable=True)
     executed_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     execution_price = Column(Float, nullable=True)
+    # The quote when a market order was sent; execution_price is the fill.
+    # entry_price is what the AI proposed, which is neither.
+    requested_price = Column(Float, nullable=True)
     execution_status = Column(String, default="pending")
 
     result = Column(String, nullable=True)

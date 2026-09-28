@@ -62,6 +62,7 @@ async def place_order(order: OrderRequest, user_id: Optional[int]) -> dict:
                 symbol=order.symbol,
                 direction="BUY" if "BUY" in order.action else "SELL",
                 entry_price=result.get("price"),
+                requested_price=None if is_pending else result.get("requested_price"),
                 stop_loss=result.get("sl"),
                 take_profit=result.get("tp"),
                 volume=result.get("volume"),
@@ -121,6 +122,7 @@ async def close_position(ticket: int, close_volume: Optional[float], user_id: Op
                 rec.status = "closed"
                 rec.closed_at = datetime.now(timezone.utc)
                 rec.exit_price = close_price
+                rec.requested_exit_price = result.get("requested_price")
                 rec.profit_loss = deal.get("profit") if deal else None
             db.add(PositionAudit(
                 user_id=user_id, mt5_ticket=ticket, action="close",

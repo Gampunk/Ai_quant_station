@@ -5,7 +5,7 @@ Negative controls:
 - In ensure_schema (app/core/schema.py), delete the final schema_problems check.
   test_recorded_but_drifted_database_is_refused must fail.
 - Replace `command.upgrade(cfg, "head")` with `pass`.
-  test_database_one_migration_behind_is_upgraded must fail.
+  test_database_migrations_behind_is_upgraded must fail.
 """
 import logging
 import os
@@ -61,14 +61,16 @@ def test_second_start_does_nothing(db):
     assert ensure_schema(url) == "up to date"
 
 
-def test_database_one_migration_behind_is_upgraded(db):
+def test_database_migrations_behind_is_upgraded(db):
     path, url = db
     ensure_schema(url)
-    command.downgrade(_alembic_config(url), "-1")
-    assert "market_regime" not in _columns(path, "autopilot_trades")
+    command.downgrade(_alembic_config(url), "-2")
+    assert not {"market_regime", "requested_price"} & _columns(path, "autopilot_trades")
+    assert not {"requested_price", "requested_exit_price"} & _columns(path, "trade_records")
 
     assert ensure_schema(url) == "upgraded"
-    assert "market_regime" in _columns(path, "autopilot_trades")
+    assert {"market_regime", "requested_price"} <= _columns(path, "autopilot_trades")
+    assert {"requested_price", "requested_exit_price"} <= _columns(path, "trade_records")
     assert _revision(path) == _head()
 
 
