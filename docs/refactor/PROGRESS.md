@@ -291,7 +291,11 @@ Paste the check blocks from the step 6 message into a second terminal. If you ev
 
 ## Step 8. One route to the broker
 
-**Status:** built. Waiting for your checks.
+**Status:** approved by you on 2026-09-28. Checks 1 to 5 passed, including the database refusal, stamp and upgrade,
+and slippage recorded on the Terminal trade (quoted 2668.01, filled 2668.03; exit quoted 2667.81, filled 2667.79).
+In check 6 the placeholder password was used, so only `no login: 401` was shown on the live server; the viewer
+refusal is covered by `test_only_traders_can_initialize_the_terminal` in check 1. Check 7, the real demo account,
+is deferred.
 
 **Commits:** `14d8cf6` migrations, `1b67794` one connector route, `52f924e` connector data fixes, `8c8198b` slippage recording
 
