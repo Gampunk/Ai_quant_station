@@ -315,10 +315,10 @@ Paste the check blocks from the step 6 message into a second terminal. If you ev
    ./scripts/verify.sh
    ```
 
-2. No second route to the broker. Both should print nothing:
+2. No second route to the broker. Both should print nothing. The patterns match real imports and settings only, not the test that guards against them or comments explaining the history:
    ```bash
-   git grep -n "import MetaTrader5" backend/
-   git grep -n "MT5_USE_EXTERNAL_CONNECTOR\|MT5_SERVER_PORT" backend/ frontend/src
+   git grep -nE "^\s*(import|from) MetaTrader5" backend/app
+   git grep -n "MT5_USE_EXTERNAL_CONNECTOR\|MT5_SERVER_PORT" backend/app/core/config.py backend/.env.example frontend/src
    ```
 
 3. Your local database. It was made before migrations worked, so it has no recorded version. Start the backend:
