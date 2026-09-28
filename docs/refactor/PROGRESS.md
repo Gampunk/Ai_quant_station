@@ -288,3 +288,100 @@ Paste the check blocks from the step 6 message into a second terminal. If you ev
    Expect `ConnectorAddressBlocked`.
 
 6. Read the new README and MT5_CONNECTOR.md. They should match what you have seen the system do.
+
+## Step 8. One route to the broker
+
+**Status:** built. Waiting for your checks.
+
+**Commits:** `14d8cf6` migrations, `1b67794` one connector route, `52f924e` connector data fixes, `8c8198b` slippage recording
+
+**What changed**
+- Database migrations run. They never did: startup ran them from the wrong folder and ignored the error, and they could not build a fresh database anyway. Startup now creates, upgrades or adopts the database, then refuses to start if a table or column the code needs is missing.
+- Every order, close, modify and market data request goes through one client, `backend/app/core/mt5_connector.py`. The backend no longer uses the Windows-only MetaTrader5 package, so manual trading on the Terminal page now works on Linux. Tests fail if a second route to the broker is added.
+- The connector address and token are set once, in the server's `.env`. The per-user connector address and the Settings page's dead MT5 options are gone. Settings now has a Check Connection button.
+- Market data needs a personal login. The shared connector token no longer reads it. Starting the terminal needs the trader or admin role.
+- Price sync goes through the connector instead of crashing on Linux.
+- `/mt5/health` reports the terminal as connected. It read a field the connector never sends.
+- Positions report their stop loss, so the close and modify audits now record it too.
+- Every connector time is broker server time, formatted the same way on any machine. Positions used to show the Windows machine's local time.
+- The connector no longer lets a caller choose which terminal program to start.
+- Trades record the quoted price next to the filled price: `requested_price`, and `requested_exit_price` for Terminal closes. Pending orders record none.
+- Removed settings: `MT5_USE_EXTERNAL_CONNECTOR`, `MT5_SERVER_PORT` and the backend's `MT5_TERMINAL_PATH`. The connector's own `MT5_TERMINAL_PATH` stays.
+
+**Your checks.** Run them from the repository root unless a check says otherwise.
+
+1. Five PASS lines: backend 146 passed and 9 skipped, connector 59 passed, frontend 109 passed.
+   ```bash
+   ./scripts/verify.sh
+   ```
+
+2. No second route to the broker. Both should print nothing:
+   ```bash
+   git grep -n "import MetaTrader5" backend/
+   git grep -n "MT5_USE_EXTERNAL_CONNECTOR\|MT5_SERVER_PORT" backend/ frontend/src
+   ```
+
+3. Your local database. It was made before migrations worked, so it has no recorded version. Start the backend:
+   ```bash
+   cd backend && .venv/bin/python -m uvicorn app.main:app --port 8765
+   ```
+   Expect startup to fail with `This database was made by older code`, naming three missing columns: `autopilot_trades.requested_price`, `trade_records.requested_exit_price` and `trade_records.requested_price`. This is the guard working. Make a backup, then record the database's last migration and start again:
+   ```bash
+   cp finance_engine.db finance_engine.db.bak
+   .venv/bin/alembic stamp e4a7b9c2d1f3
+   .venv/bin/python -m uvicorn app.main:app --port 8765
+   ```
+   Expect `Upgrading database from e4a7b9c2d1f3 to f1c3a5e7b9d2` and then `Database schema upgraded`. Stop it with Ctrl+C, start it again, and expect `Database schema up to date`. Stop it again.
+
+4. The fake connector, including the new stop loss, open time and fill checks. Start it in one terminal:
+   ```bash
+   mt5_connector/.venv/bin/python mt5_connector/testing/run_fake_connector.py --port 5001 --token mytoken
+   ```
+   In a second terminal:
+   ```bash
+   backend/.venv/bin/python scripts/demo_check.py --token mytoken --trade
+   ```
+   Expect `All stages passed`, including `position reports its stop loss`, `reported fill matches the OPEN deal` and `position open time matches the OPEN deal`.
+
+5. Manual trading through the backend, and slippage in the database. Leave the fake connector running. In the second terminal, start the backend pointed at it:
+   ```bash
+   cd backend
+   MT5_CONNECTOR_URL=http://127.0.0.1:5001 MT5_API_TOKEN=mytoken .venv/bin/python -m uvicorn app.main:app --port 8765
+   ```
+   In a third terminal:
+   ```bash
+   cd ~/dev/Ai_quant_station/backend
+   B=localhost:8765; ADMIN_PW=$(grep ^DEFAULT_ADMIN_PASSWORD .env | cut -d= -f2-)
+   TOKEN=$(curl -s -X POST $B/api/auth/login -H "content-type: application/json" -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PW\"}" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+   curl -s -X POST $B/api/mt5/initialize -H "Authorization: Bearer $TOKEN" -o /dev/null -w "initialize: %{http_code}\n"
+   T=$(curl -s -X POST $B/api/trade/order -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" -d '{"symbol":"XAUUSD","action":"BUY","volume":0.01}' | python3 -c "import sys,json; print(json.load(sys.stdin)['ticket'])")
+   curl -s -X POST $B/api/trade/close -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" -d "{\"ticket\":$T}"; echo
+   python3 -c "
+   import sqlite3; r = sqlite3.connect('finance_engine.db').execute('select requested_price, entry_price, requested_exit_price, exit_price from trade_records where mt5_ticket=$T').fetchone()
+   print('entry: quoted %s, filled %s | exit: quoted %s, filled %s' % r)"
+   ```
+   Expect `initialize: 200`, then a line where each quoted price differs from its filled price by a couple of cents. The fake terminal slips every fill by 2 points.
+
+6. A viewer cannot start the terminal. Still in the third terminal, using your `viewer_test` password:
+   ```bash
+   VT=$(curl -s -X POST $B/api/auth/login -H "content-type: application/json" -d '{"username":"viewer_test","password":"THE_PASSWORD_YOU_CHOSE"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+   curl -s -o /dev/null -w "viewer initialize: %{http_code}\n" -X POST $B/api/mt5/initialize -H "Authorization: Bearer $VT"
+   curl -s -o /dev/null -w "viewer positions: %{http_code}\n" $B/api/mt5/positions -H "Authorization: Bearer $VT"
+   curl -s -o /dev/null -w "no login: %{http_code}\n" $B/api/mt5/positions
+   ```
+   Expect 403, 200, 401. Stop the backend and the fake connector.
+
+7. Your real demo account. This includes the fill price check deferred from step 3. Follow `LOCAL_DEMO_SETUP.md`, then:
+   ```bash
+   backend/.venv/bin/python scripts/demo_check.py --trade
+   ```
+   Expect `All stages passed`. Note the times printed: they are OctaFX server time, not UTC. That is finding 22.
+
+**Negative controls.** Claude ran these before handover. Each failed exactly where stated. Restore with `git checkout -- <file>` afterwards, and commit any work of your own first.
+
+- In `mt5_connector/connector.py`, format `open_time` with `datetime.fromtimestamp(pos.time)` again: `test_times_do_not_depend_on_the_machine_time_zone` fails.
+- Remove the `"sl"` line from `/positions`: 2 failures.
+- Put back `terminal_path_input` on `/initialize`: `test_initialize_ignores_a_caller_supplied_terminal_path` fails.
+- In `backend/app/services/trade_service.py`, remove `requested_price=` or `rec.requested_exit_price =`: `test_terminal_order_close_and_modify` fails. Recording a quote for pending orders fails `test_pending_order_records_no_requested_price`.
+- In `backend/app/api/autopilot.py`, drop `requested_price` from `execute_trade`'s result: `test_autopilot_records_the_filled_price_not_the_quote` fails.
+- In `backend/app/core/schema.py`, replace `command.upgrade(cfg, "head")` with `pass`: `test_database_migrations_behind_is_upgraded` fails.

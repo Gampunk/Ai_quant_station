@@ -100,7 +100,11 @@ def main():
 
     time.sleep(1)
     pos = c.get("/positions").json()
-    stage("position visible", any(p["ticket"] == ticket for p in pos.get("positions", [])))
+    mine = next((p for p in pos.get("positions", []) if p["ticket"] == ticket), None)
+    stage("position visible", mine is not None)
+    if mine:
+        stage("position reports its stop loss", mine.get("sl") == body["sl"], f"sl {mine.get('sl')}")
+        print(f"      opened {mine['open_time']}")
 
     new_sl = round(q["bid"] * 0.994, d)
     mod = c.post("/modify", json={"ticket": ticket, "sl": new_sl, "tp": tp})
@@ -118,6 +122,13 @@ def main():
     stage("history shows OPEN and CLOSE", "OPEN" in entries and "CLOSE" in entries, str(entries))
     for x in deals:
         print(f"      {x['entry']:<5} {x['time']}  price {x['price']}  profit {x['profit']}")
+    opened = next((x for x in deals if x["entry"] == "OPEN"), None)
+    if opened:
+        stage("reported fill matches the OPEN deal", body["price"] == opened["price"],
+              f"filled {body['price']}  deal {opened['price']}")
+        if mine:
+            stage("position open time matches the OPEN deal", mine["open_time"] == opened["time"],
+                  f"position {mine['open_time']}  deal {opened['time']}")
 
     print("\nAll stages passed." if all(results) else "\nSome stages failed.")
     return 0 if all(results) else 1

@@ -79,8 +79,8 @@ Optional:
 | `ANTHROPIC_API_KEY` | — | Anthropic Claude API key |
 | `MT5_API_TOKEN` | — | MT5 Connector auth token |
 | `MT5_CONNECTOR_URL` | — | External MT5 connector URL |
-| `MT5_USE_EXTERNAL_CONNECTOR` | False | Use external MT5 connector |
 | `MT5_BROKER_UTC_OFFSET` | 0 | Broker timezone offset (e.g., 2 for UTC+2) |
+| `ALLOW_REMOTE_CONNECTOR` | False | Allow a connector address outside local and private networks |
 | `HUGGINGFACE_API_KEY` | — | For data archiving |
 | `CORS_ORIGINS` | `http://localhost:5173,http://localhost:3000` | Allowed CORS origins |
 
@@ -213,10 +213,9 @@ Flow:
   On mount → fetches symbols + positions
   User selects symbol, direction (BUY/SELL), volume, SL/TP
   → POST /api/trade/order with { symbol, action, volume, sl, tp }
-  → Backend validates, sends to MT5 via mt5.order_send()
-    (the local MetaTrader5 package, so this only works when the backend runs on
-     Windows with MT5 installed; refactor step 8 routes it through the connector)
-  → Saves to trade_records with full details
+  → Backend sends it through the MT5 connector (core/mt5_connector.py)
+  → Saves to trade_records: the fill as entry_price, the quote as requested_price
+    (and the same pair on close), so slippage can be measured
   → Returns ticket number
   → Positions list refreshes
   Close button has loading state (prevents double-submit)
@@ -348,11 +347,10 @@ Flow:
 
   Settings panel:
     → Symbol, lot size, interval, provider, model
-    → MT5 connector URL + terminal path
     → Prompt selection (multi-select)
     → Personal prompt creation
 
-  All HTTP calls use async httpx.AsyncClient (shared, not per-request)
+  Every connector call goes through core/mt5_connector.py, the single client
 ```
 
 ### 8. History Page (`/history`)
@@ -381,8 +379,8 @@ Sections:
   → Account: Change password (requires current password)
   → AI Providers: personal API keys, saved on the server encrypted per user
     (GET/POST /api/ai/user-keys), plus a Test Connection button
-  → MT5 Connection: saved in the browser only. The backend ignores the header it
-    sends, so this has no effect today (finding 21, refactor step 8)
+  → MT5 Connection: a Check Connection button only. The connector's address,
+    token and terminal are set on the server
   → Autopilot: Lot size + interval defaults (saved via API)
   → Data Sync: HuggingFace (UI stub, functional via manual scripts)
 ```
@@ -436,8 +434,8 @@ MARKET DATA:
 MT5:
   GET    /api/mt5/health              MT5 connection health
   POST   /api/mt5/initialize          Initialize MT5
-  GET    /api/mt5/symbols             Symbols (JWT auth)
-  GET    /api/mt5/symbols/all         All symbols (token auth)
+  GET    /api/mt5/symbols             Symbols
+  GET    /api/mt5/symbols/all         All symbols
   GET    /api/mt5/symbol/{symbol}     Symbol info
   POST   /api/mt5/data/fetch          Fetch historical data
   POST   /api/mt5/data/latest         Fetch latest N candles
@@ -577,7 +575,7 @@ Brokers often return timestamps in their local timezone (UTC+2, UTC+3), not UTC.
 | SQLite default, PostgreSQL optional | Zero-config for development, same SQLAlchemy code for production |
 | bcrypt directly (not passlib) | passlib incompatible with bcrypt 5.x. Use `bcrypt.hashpw()` and `bcrypt.checkpw()` directly |
 | `ta` library (not `pandas_ta`) | `pandas_ta` not available for Python 3.11+. Use `ta` (technical-analysis-library-python) |
-| `httpx.AsyncClient` shared | Reused HTTP client for autopilot connector calls, not per-request |
+| One connector client | Every broker action and MT5 data request goes through `core/mt5_connector.py`. The backend never imports MetaTrader5, and tests fail if a second route appears |
 | Per-user autopilot state | `_user_states[user_id]` dict instead of global singleton |
 | Restricted `__builtins__` in `exec()` | Prevents AI-generated code from running OS commands |
 | `execute.py` sandbox | AI Analyst, Autopilot and Historical Lab code runs through this module, always in a subprocess. Prompt Backtest still has its own runner (to be merged in step B1) |
@@ -590,7 +588,7 @@ Brokers often return timestamps in their local timezone (UTC+2, UTC+3), not UTC.
 1. **No HTTPS** in the nginx config. Needed before anything is exposed.
 2. **Single worker only.** Autopilot state and login throttling live in process memory.
 3. **The sandbox is not a security boundary.** See the sandbox section above.
-4. **Terminal trading needs a Windows backend.** It uses the local MT5 package, not the connector, until refactor step 8.
+4. **MT5 times are broker server time.** The connector reports them unchanged. Only the price sync converts them to UTC with `MT5_BROKER_UTC_OFFSET`, so autopilot close times are stored a few hours off (finding 22, step 10).
 5. **`pandas_ta` replaced with `ta`**: different API, AI prompts updated accordingly.
 6. **Retrieval runs only in the AI Analyst chat.** The autopilot does not use past analyses.
 

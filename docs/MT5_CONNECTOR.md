@@ -58,7 +58,6 @@ In `backend/.env`:
 ```env
 MT5_CONNECTOR_URL=http://127.0.0.1:5001
 MT5_API_TOKEN=<the same token>
-MT5_USE_EXTERNAL_CONNECTOR=True
 ```
 
 The backend refuses a connector address outside local and private networks,
