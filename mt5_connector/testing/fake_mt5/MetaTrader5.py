@@ -80,7 +80,7 @@ def _reset(trade_mode: int = ACCOUNT_TRADE_MODE_DEMO, now: int | None = None,
         env_now = os.getenv("FAKE_MT5_NOW")
         _S.clear()
         _S.update(
-            initialized=False, init_ok=init_ok, account_available=account_available,
+            initialized=False, init_ok=init_ok, path=None, account_available=account_available,
             trade_mode=trade_mode, balance=balance,
             now=now if now is not None else (int(env_now) if env_now else None),
             next_ticket=100_001, positions={}, deals=[], orders={},
@@ -126,6 +126,7 @@ def initialize(path: str | None = None, **_kwargs) -> bool:
             _S["last_error"] = (-10003, "IPC initialize failed, fake terminal refused")
             return False
         _S["initialized"] = True
+        _S["path"] = path
         return True
 
 

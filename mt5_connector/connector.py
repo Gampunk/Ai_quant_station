@@ -6,7 +6,7 @@ import sys
 import os
 import secrets
 import socket
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import MetaTrader5 as mt5
 
@@ -101,6 +101,22 @@ last_error = None
 terminal_path = None
 
 
+def server_time(ts: int) -> str:
+    """Format an MT5 timestamp.
+
+    MT5 stamps positions, deals and candles in the broker's server time, encoded
+    as if it were UTC. Formatting it as UTC shows that server time unchanged on
+    any machine, whatever its own time zone. The backend converts to real UTC
+    with MT5_BROKER_UTC_OFFSET where it needs to.
+    """
+    return datetime.fromtimestamp(ts, timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def as_utc(value: datetime) -> datetime:
+    """MT5 reads a naive datetime in the machine's local time zone. Pin it to UTC."""
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
 def get_network_ip():
     """Detect the primary network IP of this machine."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -171,7 +187,7 @@ async def root(_auth: bool = Depends(verify_auth)):
         "mt5_initialized": mt5_initialized,
         "last_error": last_error,
         "terminal_path": terminal_path,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 
@@ -185,12 +201,16 @@ async def health(_auth: bool = Depends(verify_auth)):
 
 
 @app.post("/initialize")
-async def initialize_mt5(terminal_path_input: Optional[str] = None, _auth: bool = Depends(verify_auth)):
-    """Initialize MT5 connection."""
+async def initialize_mt5(_auth: bool = Depends(verify_auth)):
+    """Initialize MT5 connection.
+
+    The terminal is the one set by MT5_TERMINAL_PATH on this machine. Callers
+    cannot choose it: MT5 starts whatever program sits at the path it is given.
+    """
     global mt5_initialized, last_error, terminal_path
     
     try:
-        path = terminal_path_input or STARTUP_PATH
+        path = STARTUP_PATH
         
         if path:
             if not mt5.initialize(path=path):
@@ -563,10 +583,11 @@ async def get_positions(_auth: bool = Depends(verify_auth)):
                 "volume": pos.volume,
                 "entry_price": pos.price_open,
                 "current_price": pos.price_current,
+                "sl": pos.sl if pos.sl != 0 else None,
                 "tp": pos.tp if pos.tp != 0 else None,
                 "position_id": pos.ticket,
                 "profit": pos.profit,
-                "open_time": datetime.fromtimestamp(pos.time).strftime('%Y-%m-%d %H:%M:%S')
+                "open_time": server_time(pos.time)
             })
             total_profit += pos.profit
     
@@ -591,12 +612,15 @@ async def get_history(hours: int = 0, _auth: bool = Depends(verify_auth)):
     if not mt5_initialized:
         raise HTTPException(status_code=400, detail="MT5 not initialized")
     
+    # Deal times are server time, so the start of the window is off by the broker's
+    # UTC offset. A few hours extra is harmless; the far end absorbs the rest.
+    now = datetime.now(timezone.utc)
     if hours > 0:
-        from_time = datetime.now() - timedelta(hours=hours)
+        from_time = now - timedelta(hours=hours)
     else:
-        from_time = datetime(2000, 1, 1)
+        from_time = datetime(2000, 1, 1, tzinfo=timezone.utc)
     
-    to_time = datetime.now() + timedelta(days=5)
+    to_time = now + timedelta(days=5)
     
     deals = mt5.history_deals_get(from_time, to_time)
     if deals is None:
@@ -619,7 +643,7 @@ async def get_history(hours: int = 0, _auth: bool = Depends(verify_auth)):
             "commission": deal.commission,
             "comment": deal.comment or "",
             "position_id": deal.position_id,
-            "time": datetime.utcfromtimestamp(deal.time).strftime('%Y-%m-%d %H:%M:%S'),
+            "time": server_time(deal.time),
             "entry": entry_label
         })
     
@@ -642,9 +666,11 @@ async def get_data_range(symbol: str, timeframe: str = "1h", start: str = "", en
     if not mt5.symbol_select(symbol, True):
         raise HTTPException(status_code=404, detail=f"Symbol {symbol} not found")
 
-    from datetime import datetime as dt
-    start_dt = dt.fromisoformat(start) if start else dt(2000, 1, 1)
-    end_dt = dt.fromisoformat(end) if end else dt.now()
+    try:
+        start_dt = as_utc(datetime.fromisoformat(start)) if start else datetime(2000, 1, 1, tzinfo=timezone.utc)
+        end_dt = as_utc(datetime.fromisoformat(end)) if end else datetime.now(timezone.utc)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="start and end must be ISO dates")
 
     rates = mt5.copy_rates_range(symbol, tf, start_dt, end_dt)
     if rates is None or len(rates) == 0:

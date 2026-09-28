@@ -204,3 +204,52 @@ def test_reported_prices_explain_the_profit(client):
                 if d["position_id"] == order["ticket"] and d["entry"] == "CLOSE")
     expected = (closed["close_price"] - order["price"]) * 0.10 * 100  # gold, 100 oz contract
     assert abs(expected - shut["profit"]) < 0.01
+
+
+# ── Positions and times ──────────────────────────────────────────────────────
+FIXED_NOW_TEXT = "2026-09-14 10:00:00"
+
+
+def test_positions_report_the_stop_loss(client):
+    ask = client.get("/symbol/XAUUSD").json()["ask"]
+    buy(client, sl=ask - 5, tp=ask + 10)
+    pos = client.get("/positions").json()["positions"][0]
+    assert pos["sl"] == round(ask - 5, 2)
+    assert pos["tp"] == round(ask + 10, 2)
+
+
+def test_position_without_stop_reports_none(client):
+    buy(client, sl=None, tp=None)
+    pos = client.get("/positions").json()["positions"][0]
+    assert pos["sl"] is None and pos["tp"] is None
+
+
+@pytest.fixture
+def machine_time_zone(monkeypatch):
+    """Run as if the connector machine were set to India time, UTC+5:30."""
+    import time
+    monkeypatch.setenv("TZ", "Asia/Kolkata")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def test_times_do_not_depend_on_the_machine_time_zone(client, machine_time_zone):
+    ticket = buy(client).json()["ticket"]
+    pos = client.get("/positions").json()["positions"][0]
+    deal = next(d for d in client.get("/history").json()["deals"] if d["position_id"] == ticket)
+    # Both read the same MT5 timestamp, so both must show it the same way.
+    assert pos["open_time"] == deal["time"] == FIXED_NOW_TEXT
+
+
+def test_initialize_ignores_a_caller_supplied_terminal_path(client, mt5, monkeypatch):
+    monkeypatch.setattr(connector, "mt5_initialized", False)
+    resp = client.post("/initialize", params={"terminal_path_input": r"C:\evil\payload.exe"})
+    assert resp.status_code == 200
+    assert mt5._S["path"] == connector.STARTUP_PATH
+
+
+def test_data_range_rejects_a_bad_date(client):
+    resp = client.get("/data/range/XAUUSD", params={"timeframe": "1h", "start": "yesterday"})
+    assert resp.status_code == 400
