@@ -726,6 +726,8 @@ async def _choose_prompt_with_context(
     market_regime: dict,
 ) -> tuple[dict, dict]:
     """Choose a prompt using regime fit plus historical performance."""
+    from ..core.strategy_scorer import MIN_TRADES_FOR_BEST
+
     scores_by_prompt: dict[str, list[StrategyScore]] = {}
     recent_by_prompt: dict[str, dict] = {}
 
@@ -734,7 +736,7 @@ async def _choose_prompt_with_context(
             score_result = await db.execute(
                 select(StrategyScore).where(
                     StrategyScore.symbol == symbol,
-                    StrategyScore.total_trades >= 3,
+                    StrategyScore.total_trades >= MIN_TRADES_FOR_BEST,
                 )
             )
             for score in score_result.scalars().all():
@@ -792,7 +794,7 @@ async def _choose_prompt_with_context(
             )
 
         recent = recent_by_prompt.get(prompt["text"])
-        if recent and recent["trades"] >= 3:
+        if recent and recent["trades"] >= MIN_TRADES_FOR_BEST:
             recent_wr = recent["wins"] / recent["trades"] * 100
             score += min(12, max(-12, (recent_wr - 50) * 0.35))
             score += min(8, max(-8, recent["pnl"] / 20))
@@ -969,6 +971,23 @@ async def run_autopilot_cycle(user_id: int):
         f"Using Strategy {display_id} | score={selected_score} | styles={selected_styles}: {prompt_text[:50]}...",
     )
 
+    # ── Model routing (Phase 4b): try the best-performing provider/model for
+    #    this symbol first; the user's configured provider stays in the list
+    #    as fallback. Only activates once a pair has >=10 closed trades. ──────
+    model_routing = None
+    try:
+        from ..core.strategy_scorer import get_best_model_for_symbol
+        model_routing = await get_best_model_for_symbol(symbol)
+    except Exception:
+        model_routing = None
+    if model_routing:
+        add_log(
+            user_id,
+            f"Model routing: {model_routing['provider']}/{model_routing['model']} "
+            f"(win {model_routing['win_rate']:.0f}%, {model_routing['trades']} trades) -> tried first",
+            "INFO",
+        )
+
     # ── AI call helper with 429 retry + provider fallback ────────────────────
     _call_count = 0
     _call_tokens = 0
@@ -1000,7 +1019,13 @@ async def run_autopilot_cycle(user_id: int):
         from ..core.providers import PROVIDERS, get_provider_names, get_base_url, resolve_all_api_keys
 
         providers = get_provider_names()
-        provider_idx = providers.index(provider) if provider in providers else 0
+        if model_routing and model_routing["provider"] in providers:
+            providers = [model_routing["provider"]] + [
+                p for p in providers if p != model_routing["provider"]
+            ]
+            provider_idx = 0
+        else:
+            provider_idx = providers.index(provider) if provider in providers else 0
 
         async def get_best_model(p: str, all_keys: List[str]) -> str:
             """Get the best available model for provider p.
@@ -1029,7 +1054,10 @@ async def run_autopilot_cycle(user_id: int):
                     await _log_call("no_key", p, model if p == provider else PROVIDERS[p]["models"][0], stage)
                     continue
 
-                actual_model = await get_best_model(p, all_keys)
+                if model_routing and p == model_routing["provider"]:
+                    actual_model = model_routing["model"]
+                else:
+                    actual_model = await get_best_model(p, all_keys)
 
                 # Try each key for this provider
                 for key_idx, api_key in enumerate(all_keys):
@@ -1199,6 +1227,23 @@ AUTOPILOT DECISION CONTEXT:
 Use this context as guidance.
 """
 
+    # ── RAG: inject the track record (similar past analyses + best/losing
+    #    strategies for this symbol) so the AI trades on its own history.
+    #    Best-effort: any failure degrades to no-context, never blocks a cycle.
+    rag_section = ""
+    try:
+        from ..core.rag_service import build_rag_context
+        rag_ctx = await build_rag_context(symbol, prompt_text)
+        if rag_ctx:
+            rag_section = f"""
+PAST PERFORMANCE (your own track record on {symbol}):
+{rag_ctx}
+Use this: repeat what worked, propose an alternative to anything listed as underperforming, and do NOT simply re-run losing approaches.
+"""
+            add_log(user_id, f"RAG context attached ({len(rag_ctx)} chars)")
+    except Exception as e:
+        add_log(user_id, f"RAG context unavailable: {e}", "WARNING")
+
     candle_count = len(market_data)
     data_warning = ""
     if candle_count < 100:
@@ -1234,8 +1279,8 @@ IMPORTANT RULES:
    Use df.tail(N) for last N rows. NEVER use hardcoded indices like df.iloc[13].
 
    For multi-timeframe analysis, resample df UP to higher TFs:
-     df_4h = df.resample('4H', on='timestamp').agg({{'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}})
-   Aliases: '1H'=1h, '4H'=4h, '1D'=1d.
+     df_4h = df.resample('4h', on='timestamp').agg({{'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}})
+   Aliases: '1h', '4h', '1D' (pandas 3 removed '1H'/'4H' — never use uppercase H or bare 'm').
    You CANNOT resample DOWN (e.g. 1h → 1m) — that creates fake data.
 
 4. You have THREE possible outputs at the end:
@@ -1277,6 +1322,7 @@ CURRENT VOLATILITY:
 
 Strategy:
 {prompt_text}
+{rag_section}
 {decision_section}
 {error_section}
 """
@@ -1504,6 +1550,7 @@ Total candles loaded: {len(market_data)}
 {candle_block}
 
 Strategy: {prompt_text}
+{rag_section}
 {error_section}
 
 CRITICAL SL/TP RULES:

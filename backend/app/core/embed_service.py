@@ -3,6 +3,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+
 _model = None
 
 
@@ -10,8 +12,8 @@ def _get_model():
     global _model
     if _model is None:
         from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
-        logger.info("Embedding model 'all-MiniLM-L6-v2' loaded")
+        _model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        logger.info(f"Embedding model '{EMBEDDING_MODEL_NAME}' loaded")
     return _model
 
 

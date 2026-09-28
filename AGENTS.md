@@ -544,7 +544,7 @@ Brokers often return timestamps in their local timezone (UTC+2, UTC+3), not UTC.
 3. **Autopilot uses global Python objects** — fine for single-server, breaks with multiple workers
 4. **Scratch scripts** (`data_factory.py`, etc.) — have some hardcoded paths, run only on dev machine
 5. **`pandas_ta` replaced with `ta`** — different API (see above), AI prompts updated accordingly
-6. **No vector embeddings yet** — RAG is basic (keyword-based retrieval). See `docs/RAG_ARCHITECTURE.md` for planned implementation.
+6. **Embeddings stored as BLOB (no pgvector)** — cosine similarity computed in Python; adequate at current scale, revisit if embedding count grows large. See `docs/RAG_ARCHITECTURE.md`.
 
 ## Data Files
 
@@ -580,4 +580,4 @@ See `docs/RAG_ARCHITECTURE.md` for the full 5-phase plan:
 4. **Autopilot Smart Selection** — Pick best-performing prompts, not random
 5. **Feedback Dashboard** — Visualize strategy performance
 
-Currently implemented: trade → chat link via `chat_memory_id`. All data ready for Phase 1.
+**Implemented — all 5 phases:** strategy scoreboard with win-rate classification (`MIN_TRADES_FOR_BEST=10`), sentence-transformers embeddings (BLOB storage), RAG context injection into AI chat and autopilot prompts (with `rag_logs` telemetry), autopilot smart prompt selection, and the RAG Health report (`GET /api/rag-health` + HistoryPage panel). Note: backend requires pandas-3-safe resample aliases — use `to_pandas_freq()` from `app/core/historical_loader.py`, never raw `'1H'`/`'1T'`.

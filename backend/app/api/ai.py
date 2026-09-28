@@ -52,6 +52,23 @@ router = APIRouter(prefix="/ai", tags=["AI"])
 
 logger = logging.getLogger(__name__)
 
+# Strong references for fire-and-forget tasks (embedding generation).
+# Without these, CPython may garbage-collect the task mid-execution and the
+# embedding is silently never stored.
+_background_tasks: set = set()
+
+
+def _spawn_background_task(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+
+    def _on_done(t: "asyncio.Task") -> None:
+        _background_tasks.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            logger.warning(f"Background task failed: {t.exception()}")
+
+    task.add_done_callback(_on_done)
+
 # Timeframe detection helpers
 TF_MAPPING = {
     "M1": "1m", "M5": "5m", "M15": "15m", "M30": "30m",
@@ -699,7 +716,7 @@ def calculate_signals(df): ...
             system_parts.append(f"TOTAL_CANDLES_IN_DF: {total_candles}")
             system_parts.append(f"LATEST_SAMPLES: {', '.join(samples)}")
             system_parts.append("\nNote: The 'df' variable in the Python environment contains ALL these candles. Use it for your calculations.")
-            system_parts.append(f"\nNote on timeframes: 'df' contains raw {chat_req.timeframe or '1m'} data. To analyze higher timeframes, resample in your Python code using pandas: df.resample('1H').agg({{'open':'first','high':'max','low':'min','close':'last'}}).dropna(). Available aliases: '1T'=1min, '5T'=5min, '15T'=15min, '30T'=30min, '1H'=1h, '4H'=4h, '1D'=1d. You can also compute multi-TF indicators by resampling to each TF and merging. WARNING: After resample().dropna(), check len(df) before accessing elements — resampling reduces row count significantly.")
+            system_parts.append(f"\nNote on timeframes: 'df' contains raw {chat_req.timeframe or '1m'} data. To analyze higher timeframes, resample in your Python code using pandas: df.resample('1h').agg({{'open':'first','high':'max','low':'min','close':'last'}}).dropna(). Available pandas aliases: '1min', '5min', '15min', '30min', '1h', '4h', '1D' (do NOT use '1T'/'4H'/'m' — they are removed in pandas 3). You can also compute multi-TF indicators by resampling to each TF and merging. WARNING: After resample().dropna(), check len(df) before accessing elements — resampling reduces row count significantly.")
 
         # Add current session context (recent conversation from database)
         if user_memory_context:
@@ -948,7 +965,7 @@ def calculate_signals(df): ...
 
                 # Fire-and-forget: generate and store embedding for RAG
                 try:
-                    asyncio.create_task(
+                    _spawn_background_task(
                         generate_embedding(saved_chat_memory_id, assistant_message)
                     )
                 except Exception:
@@ -1005,7 +1022,8 @@ def calculate_signals(df): ...
             execution_charts=exec_charts,
             execution_tables=exec_tables,
             chat_memory_id=saved_chat_memory_id,
-            chat_session_id=chat_req.chat_session_id # ECHO BACK
+            chat_session_id=chat_req.chat_session_id, # ECHO BACK
+            rag_context=rag_context if chat_req.debug_rag else None,
         )
 
 

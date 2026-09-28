@@ -13,6 +13,7 @@ from sqlalchemy import select, func, text, case
 from ..core.database import get_db, AsyncSessionLocal
 from ..core.security import get_current_user
 from ..core.config import settings
+from ..core.strategy_scorer import classify_prompt_status
 from ..models.strategy_score import StrategyScore
 from ..models.ai_memory import AutopilotTrade
 
@@ -885,6 +886,7 @@ async def get_strategy_scores(
                 "winning_trades": s.winning_trades,
                 "total_pnl": float(s.total_pnl) if s.total_pnl else 0,
                 "win_rate": float(s.win_rate) if s.win_rate else 0,
+                "status": classify_prompt_status(float(s.win_rate or 0), s.total_trades or 0),
                 "avg_confidence": float(s.avg_confidence) if s.avg_confidence else None,
                 "avg_profit": float(s.avg_profit) if s.avg_profit else None,
                 "avg_loss": float(s.avg_loss) if s.avg_loss else None,
@@ -893,5 +895,259 @@ async def get_strategy_scores(
             }
             for s in scores
         ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class PromptRewriteRequest(BaseModel):
+    prompt_text: str
+    symbol: str
+    provider: Optional[str] = None
+    model: Optional[str] = None
+
+
+_REWRITE_SYSTEM = """You are a quantitative trading strategy editor. You receive:
+1. An ORIGINAL strategy prompt that has underperformed.
+2. Its performance statistics (win rate, P&L, profit factor, sample size).
+3. Recent LOSING trades with the AI's reasoning at decision time.
+4. Recent WINNING trades for contrast (if any).
+
+Rewrite the original prompt so it fixes the observed weaknesses while preserving:
+- the same core strategy idea and technical approach
+- the same output behavior (still instructs the model to generate a trade setup or SKIP)
+- explicit, measurable entry conditions (levels, percentages, candle rules)
+- a clear SKIP / no-trade condition
+
+Rules:
+- Keep it under 250 words.
+- Address at least one concrete failure mode visible in the losing examples
+  (e.g. too-tight stop, missing trend/regime filter, weak confirmation).
+- Do NOT invent unrelated indicators unless the losses clearly justify one.
+- Output ONLY the rewritten prompt text. No preamble, no explanations, no quotes.
+"""
+
+
+@router.post("/prompts/rewrite")
+async def rewrite_prompt(req: PromptRewriteRequest, current_user: dict = Depends(get_current_user)):
+    """Generate an AI-rewritten version of an underperforming strategy prompt.
+
+    Suggestion only — nothing is stored or rotated automatically. The user
+    approves the rewrite by saving it as a personal prompt via
+    POST /api/autopilot/prompts; the original prompt is never replaced.
+    """
+    prompt_text = (req.prompt_text or "").strip()
+    symbol = (req.symbol or "").strip()
+    if not prompt_text or not symbol:
+        raise HTTPException(status_code=400, detail="prompt_text and symbol are required")
+
+    from sqlalchemy import desc
+    from openai import AsyncOpenAI
+    from ..core.providers import PROVIDERS, get_base_url, resolve_api_key
+
+    # 1. Scoreboard stats for this prompt
+    async with AsyncSessionLocal() as db:
+        score_rows = (await db.execute(
+            select(StrategyScore)
+            .where(StrategyScore.prompt_text == prompt_text, StrategyScore.symbol == symbol)
+            .order_by(desc(StrategyScore.total_trades))
+        )).scalars().all()
+        if not score_rows:
+            raise HTTPException(status_code=404, detail="No scoreboard data for this prompt yet")
+
+        best = score_rows[0]
+        stats = {
+            "win_rate": float(best.win_rate or 0),
+            "total_trades": best.total_trades or 0,
+            "winning_trades": best.winning_trades or 0,
+            "total_pnl": float(best.total_pnl or 0),
+            "profit_factor": float(best.profit_factor) if best.profit_factor else None,
+            "avg_profit": float(best.avg_profit) if best.avg_profit else None,
+            "avg_loss": float(best.avg_loss) if best.avg_loss else None,
+        }
+
+        # 2. Recent closed trades: losers first (what to fix), winners for contrast
+        trades = (await db.execute(
+            select(AutopilotTrade)
+            .where(
+                AutopilotTrade.prompt_text == prompt_text,
+                AutopilotTrade.symbol == symbol,
+                AutopilotTrade.profit.isnot(None),
+            )
+            .order_by(desc(AutopilotTrade.executed_at))
+            .limit(50)
+        )).scalars().all()
+
+    losers = [t for t in trades if (t.profit or 0) < 0][:3]
+    winners = [t for t in trades if (t.profit or 0) > 0][:2]
+
+    def _trade_line(t) -> str:
+        reasoning = (t.result or "")[:500]
+        return (
+            f"- {t.direction} @ {t.entry_price} SL={t.stop_loss} TP={t.take_profit} "
+            f"pnl=${t.profit:+.2f}: {reasoning}"
+        )
+
+    user_parts = [
+        f"ORIGINAL PROMPT:\n{prompt_text}",
+        f"\nSYMBOL: {symbol}  DIRECTION: {best.direction or 'any'}",
+        (
+            f"\nSTATS: {stats['winning_trades']}/{stats['total_trades']} wins "
+            f"({stats['win_rate']:.1f}%), total P&L ${stats['total_pnl']:+.2f}, "
+            f"profit factor {stats['profit_factor'] if stats['profit_factor'] is not None else 'n/a'}, "
+            f"avg win {stats['avg_profit'] if stats['avg_profit'] is not None else 'n/a'}, "
+            f"avg loss {stats['avg_loss'] if stats['avg_loss'] is not None else 'n/a'}"
+        ),
+    ]
+    if losers:
+        user_parts.append("\nRECENT LOSING TRADES (with decision-time reasoning):\n" + "\n".join(_trade_line(t) for t in losers))
+    if winners:
+        user_parts.append("\nRECENT WINNING TRADES (contrast):\n" + "\n".join(_trade_line(t) for t in winners))
+
+    # 3. Resolve provider/model (explicit choice > first provider with any key)
+    provider = req.provider
+    user_id = current_user.get("user_id") or current_user.get("id")
+    if not provider:
+        for pid in PROVIDERS:
+            if await resolve_api_key(pid, settings, user_id, AsyncSessionLocal):
+                provider = pid
+                break
+        if not provider:
+            raise HTTPException(status_code=400, detail="No AI provider API key configured")
+    api_key = await resolve_api_key(provider, settings, user_id, AsyncSessionLocal)
+    if not api_key:
+        raise HTTPException(status_code=400, detail=f"No API key for provider '{provider}'")
+
+    model = req.model
+    if not model:
+        models = PROVIDERS.get(provider, {}).get("models") or []
+        model = models[0] if isinstance(models, list) and models else None
+        if not model:
+            raise HTTPException(status_code=400, detail=f"Provider '{provider}' has no default model")
+
+    # 4. Call the model
+    try:
+        client = AsyncOpenAI(base_url=get_base_url(provider), api_key=api_key)
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _REWRITE_SYSTEM},
+                {"role": "user", "content": "\n".join(user_parts)},
+            ],
+            temperature=0.3,
+            max_tokens=600,
+            timeout=45,
+        )
+        rewritten = (response.choices[0].message.content or "").strip()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI rewrite call failed: {e}")
+
+    if not rewritten or len(rewritten) < 20:
+        raise HTTPException(status_code=502, detail="AI returned an empty or too-short rewrite")
+
+    # Strip surrounding quotes if the model added them anyway
+    if rewritten.startswith('"') and rewritten.endswith('"') and rewritten.count('"') == 2:
+        rewritten = rewritten[1:-1].strip()
+
+    return {
+        "original": prompt_text,
+        "rewritten": rewritten,
+        "stats": stats,
+        "provider": provider,
+        "model": model,
+        "losers_analyzed": len(losers),
+        "winners_analyzed": len(winners),
+        "note": "Suggestion only. Approve by saving as a personal prompt — the original is never replaced.",
+    }
+
+
+@router.get("/model-performance")
+async def get_model_performance(
+    symbol: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Win rate / P&L per AI provider+model from closed autopilot trades."""
+    try:
+        query = """
+            SELECT provider, model,
+                   COUNT(*) as trades,
+                   SUM(CASE WHEN profit > 0 THEN 1 ELSE 0 END) as wins,
+                   COALESCE(SUM(profit), 0) as total_pnl
+            FROM autopilot_trades
+            WHERE profit IS NOT NULL
+              AND provider IS NOT NULL
+              AND model IS NOT NULL
+        """
+        params: dict = {}
+        if symbol:
+            query += " AND symbol = :symbol"
+            params["symbol"] = symbol
+        query += " GROUP BY provider, model ORDER BY trades DESC LIMIT 20"
+
+        async with AsyncSessionLocal() as db:
+            rows = (await db.execute(text(query), params)).fetchall()
+
+        return [
+            {
+                "provider": r.provider,
+                "model": r.model,
+                "trades": r.trades or 0,
+                "wins": r.wins or 0,
+                "win_rate": round((r.wins or 0) / r.trades * 100, 1) if r.trades else 0.0,
+                "total_pnl": float(r.total_pnl or 0),
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/accuracy-timeline")
+async def get_accuracy_timeline(
+    days: int = 30,
+    symbol: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Daily win-rate series for the last N days (closed autopilot trades).
+
+    Aggregated in Python so it runs identically on SQLite (dev) and
+    PostgreSQL (server) — CAST()/date() SQL differs between the two.
+    """
+    try:
+        days = max(1, min(days, 90))
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        async with AsyncSessionLocal() as db:
+            query = select(
+                AutopilotTrade.executed_at, AutopilotTrade.profit
+            ).where(
+                AutopilotTrade.profit.isnot(None),
+                AutopilotTrade.executed_at >= since,
+            )
+            if symbol:
+                query = query.where(AutopilotTrade.symbol == symbol)
+            rows = (await db.execute(query)).all()
+
+        buckets: dict[str, dict] = {}
+        for r in rows:
+            ts = r.executed_at
+            if ts is None:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            day = ts.date().isoformat()
+            b = buckets.setdefault(day, {"trades": 0, "wins": 0})
+            b["trades"] += 1
+            if (r.profit or 0) > 0:
+                b["wins"] += 1
+
+        timeline = [
+            {
+                "date": day,
+                "trades": b["trades"],
+                "wins": b["wins"],
+                "win_rate": round(b["wins"] / b["trades"] * 100, 1) if b["trades"] else 0.0,
+            }
+            for day, b in sorted(buckets.items())
+        ]
+        return {"days": days, "timeline": timeline}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

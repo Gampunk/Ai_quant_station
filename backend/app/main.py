@@ -19,7 +19,7 @@ from .core.database import AsyncSessionLocal
 from .core.security import get_password_hash
 from .core.blacklist import init_blacklist_table
 from .core.blacklist import cleanup_expired_tokens
-from .api import auth, mt5, trade, ai, yahoo, execute, analytics, autopilot, historical_lab, backtest
+from .api import auth, mt5, trade, ai, yahoo, execute, analytics, autopilot, historical_lab, backtest, rag_health
 from .core.mt5_sync import start_sync_scheduler
 from .models.user import User
 
@@ -230,6 +230,7 @@ app.include_router(analytics.router, prefix="/api")
 app.include_router(autopilot.router, prefix="/api")
 app.include_router(historical_lab.router, prefix="/api")
 app.include_router(backtest.router, prefix="/api")
+app.include_router(rag_health.router, prefix="/api")
 
 # Mount static files (React build) - ONLY if frontend is built
 # In development, frontend runs on separate dev server (Vite)

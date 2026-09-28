@@ -28,9 +28,9 @@ class StrategyScore(Base):
     cost_efficiency = Column(Float, nullable=True)
     roi_per_dollar = Column(Float, nullable=True)
 
-    first_used = Column(DateTime, nullable=True)
-    last_used = Column(DateTime, nullable=True)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    first_used = Column(DateTime(timezone=True), nullable=True)
+    last_used = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         UniqueConstraint("prompt_text", "symbol", "direction", "source",

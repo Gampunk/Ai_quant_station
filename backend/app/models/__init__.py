@@ -24,6 +24,7 @@ from .ai_memory import (
 from .historical_lab import HistoricalBacktest
 from .strategy_score import StrategyScore
 from .chat_embedding import ChatEmbedding
+from .rag_log import RagLog
 
 __all__ = [
     "User",
@@ -42,6 +43,6 @@ __all__ = [
     "AutopilotSettings",
     "HistoricalBacktest",
     "StrategyScore",
-    "ChatEmbedding",
+    "ChatEmbedding", "RagLog",
     "AiCallLog",
 ]

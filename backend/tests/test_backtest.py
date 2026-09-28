@@ -1,4 +1,6 @@
 import pytest
+import numpy as np
+import pandas as pd
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -19,11 +21,49 @@ def calculate_signals(df):
 """
 
 
+@pytest.fixture
+def synthetic_parquet(tmp_path, monkeypatch):
+    """Synthetic XAUUSD 1H OHLC for 2025-12-01..2026-02-01 in a temp dir.
+
+    The real parquet archive only exists on the server, so these tests used
+    to fail locally with "No historical data found". A seeded sine-wave +
+    drift path guarantees SMA/RSI crossovers (so the engine records trades),
+    and backtest.PARQUET_DIR is redirected to the temp file.
+    """
+    rng = np.random.default_rng(42)
+    idx = pd.date_range("2025-12-01", "2026-02-01", freq="1h", inclusive="left")
+    t = np.arange(len(idx))
+    close = (
+        2600.0
+        + 80.0 * np.sin(2 * np.pi * t / 168)   # 7-day cycle → MA crossovers
+        + 0.04 * t
+        + np.cumsum(rng.normal(0, 1.2, len(idx)))
+    )
+    open_ = np.concatenate([[close[0]], close[:-1]])
+    high = np.maximum(open_, close) + rng.uniform(0.5, 2.0, len(idx))
+    low = np.minimum(open_, close) - rng.uniform(0.5, 2.0, len(idx))
+    df = pd.DataFrame({
+        # unit-agnostic epoch seconds (astype('int64') follows the index
+        # resolution — us vs ns — and broke the date filter once already)
+        "timestamp": (idx - pd.Timestamp("1970-01-01")) // pd.Timedelta("1s"),
+        "open": open_,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": rng.integers(50, 500, len(idx)).astype("float64"),
+    })
+    df.to_parquet(tmp_path / "XAUUSD_2026.parquet", index=False)
+    monkeypatch.setattr("app.api.backtest.PARQUET_DIR", tmp_path)
+    return tmp_path
+
+
 @pytest.mark.asyncio
 class TestBacktest:
-    """Real integration tests for POST /api/backtest/run.
+    """Integration tests for POST /api/backtest/run.
 
-    Uses real AI provider (NVIDIA) + real XAUUSD parquet data.
+    Offline & deterministic: synthetic parquet fixture for market data,
+    strategy_code injected inline (no AI generation), freeform AI attempt
+    fails fast without keys and falls back to the real vectorized engine.
     """
 
     async def test_backtest_invalid_symbol(self, client: AsyncClient, auth_headers: dict):
@@ -45,7 +85,7 @@ class TestBacktest:
         assert len(err_msg) > 0, "Expected error message"
         print(f"\n[test_backtest_invalid_symbol] Correctly rejected: {err_msg[:100]}")
 
-    async def test_backtest_metrics_valid(self, client: AsyncClient, auth_headers: dict):
+    async def test_backtest_metrics_valid(self, client: AsyncClient, auth_headers: dict, synthetic_parquet):
         resp = await client.post("/api/backtest/run", json={
             "prompt_id": "1",
             "symbol": "XAUUSD",
@@ -72,7 +112,7 @@ class TestBacktest:
               f"WinRate={metrics['win_rate']}% DD={metrics['max_drawdown']}% "
               f"Trades={metrics.get('trades', 'N/A')}")
 
-    async def test_backtest_equity_curve(self, client: AsyncClient, auth_headers: dict):
+    async def test_backtest_equity_curve(self, client: AsyncClient, auth_headers: dict, synthetic_parquet):
         resp = await client.post("/api/backtest/run", json={
             "prompt_id": "2",
             "symbol": "XAUUSD",
@@ -93,7 +133,7 @@ class TestBacktest:
         print(f"\n[test_backtest_equity_curve] {len(curve)} points, "
               f"start={curve[0]:.4f}, end={curve[-1]:.4f}")
 
-    async def test_backtest_trade_log(self, client: AsyncClient, auth_headers: dict):
+    async def test_backtest_trade_log(self, client: AsyncClient, auth_headers: dict, synthetic_parquet):
         resp = await client.post("/api/backtest/run", json={
             "prompt_id": "3",
             "symbol": "XAUUSD",
