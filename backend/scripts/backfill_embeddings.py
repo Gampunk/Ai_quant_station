@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy import text as sql_text
 
 from app.core.database import AsyncSessionLocal
-from app.core.rag_service import generate_embedding
+from app.core.rag_service import generate_embedding, _clean_for_embedding
 
 
 async def backfill(apply: bool, limit: int | None = None) -> None:
@@ -46,6 +46,19 @@ async def backfill(apply: bool, limit: int | None = None) -> None:
 
     if limit:
         rows = rows[:limit]
+
+    # Chats that are 100% code blocks strip to nothing — generate_embedding()
+    # skips them silently (by design), so report them truthfully instead of
+    # counting them as embedded while the DB stays short.
+    embeddable, skipped_ids = [], []
+    for r in rows:
+        if _clean_for_embedding(r.content or ""):
+            embeddable.append(r)
+        else:
+            skipped_ids.append(r.id)
+    if skipped_ids:
+        print(f"Skipped (code-only, no embeddable text): ids {skipped_ids}")
+    rows = embeddable
 
     print(f"Embeddings to create: {len(rows)}")
     if not rows:

@@ -109,6 +109,19 @@ class TestRagQueries:
         results = await find_similar_analyses([1.0, 0.5, 0.1], "XAUUSD")
         assert results == []
 
+    async def test_find_similar_matches_broker_suffix(self, db_session):
+        """Querying XAUUSD must also retrieve chats saved as XAUUSD.p (MT5)."""
+        db_session.add(ChatMemory(user_id=1, symbol="XAUUSD.p", role="assistant",
+                                  content="gold breakout above 2660"))
+        await db_session.commit()
+        chat = (await db_session.execute(select(ChatMemory))).scalars().first()
+        db_session.add(ChatEmbedding(chat_memory_id=chat.id, embedding=_vec(1.0)))
+        await db_session.commit()
+
+        results = await find_similar_analyses([1.0, 0.5, 0.1], "XAUUSD")
+        assert len(results) == 1
+        assert "gold breakout" in results[0][1].content
+
     async def test_get_strategy_scores_requires_min_trades(self, db_session):
         db_session.add_all([
             StrategyScore(prompt_text="fluke", symbol="XAUUSD", direction="buy",

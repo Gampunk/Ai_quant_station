@@ -228,7 +228,7 @@ async def get_best_model_for_symbol(symbol: str, min_trades: int = MIN_TRADES_FO
                            COUNT(*) as trades,
                            AVG(CASE WHEN profit > 0 THEN 1.0 ELSE 0.0 END) as win_rate
                     FROM autopilot_trades
-                    WHERE symbol = :symbol
+                    WHERE (symbol = :symbol OR symbol LIKE :symbol || '.%')
                       AND profit IS NOT NULL
                       AND provider IS NOT NULL
                       AND model IS NOT NULL

@@ -2,7 +2,7 @@ import asyncio
 import re
 import numpy as np
 import logging
-from sqlalchemy import text as sql_text, select
+from sqlalchemy import text as sql_text, select, or_
 
 from ..core.database import AsyncSessionLocal
 from .embed_service import embed_text, compute_similarity
@@ -73,7 +73,7 @@ async def find_similar_analyses(query_embedding: list[float], symbol: str, limit
                     JOIN chat_memories c ON c.id = ce.chat_memory_id
                     LEFT JOIN trade_records t ON cast(c.id as text) = t.ai_message
                     LEFT JOIN user_feedback uf ON uf.chat_memory_id = c.id
-                    WHERE c.symbol = :symbol
+                    WHERE (c.symbol = :symbol OR c.symbol LIKE :symbol || '.%')
                       AND ce.embedding IS NOT NULL
                     ORDER BY c.created_at DESC
                     LIMIT 100
@@ -108,7 +108,8 @@ async def get_strategy_scores(symbol: str, limit: int = TOP_COUNT):
             result = await db.execute(
                 select(StrategyScore)
                 .where(
-                    StrategyScore.symbol == symbol,
+                    or_(StrategyScore.symbol == symbol,
+                        StrategyScore.symbol.like(f"{symbol}.%")),
                     StrategyScore.total_trades >= MIN_TRADES_FOR_BEST,
                 )
                 .order_by(StrategyScore.win_rate.desc())
@@ -128,7 +129,8 @@ async def get_underperforming_strategies(symbol: str, limit: int = LOSERS_COUNT)
             result = await db.execute(
                 select(StrategyScore)
                 .where(
-                    StrategyScore.symbol == symbol,
+                    or_(StrategyScore.symbol == symbol,
+                        StrategyScore.symbol.like(f"{symbol}.%")),
                     StrategyScore.total_trades >= MIN_TRADES_FOR_FLAG,
                     StrategyScore.win_rate < FLAG_THRESHOLD * 100,
                 )
