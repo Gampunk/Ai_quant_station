@@ -394,6 +394,8 @@ is deferred.
 
 **Status:** built. Waiting for your checks.
 
+**Commits:** `eb109ad` connector limits, `ba3f39d` risk gate, `1cb0fed` Settings card, `505ddf1` docs
+
 **What changed**
 - Every new order passes one gate, `backend/app/core/risk.py`, before it reaches the broker: the Terminal page, the AI Analyst's Execute Trade button and the autopilot. A test fails if any code sends an order around it. Closing is never blocked. Changing a stop is refused only if it removes the stop.
 - The gate refuses an order, naming the rule, when:
@@ -412,7 +414,7 @@ is deferred.
 
 **Your checks.** Terminal 1 runs the fake connector, terminal 2 the backend, terminal 3 the commands.
 
-1. Five PASS lines.
+1. Five PASS lines: backend 197 passed and 9 skipped (about 15 minutes), connector 68 passed, frontend 109 passed.
    ```bash
    cd ~/dev/Ai_quant_station && ./scripts/verify.sh
    ```
