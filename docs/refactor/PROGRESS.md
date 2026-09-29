@@ -460,6 +460,11 @@ is deferred.
    curl -s -o /dev/null -w "viewer changes: %{http_code}\n" -X PUT $B/api/risk/settings -H "$VH" -H "$J" -d '{"reason":"x","daily_loss_pct":50}'
    ```
    Expect 200, then 403. A Python `KeyError: 'access_token'` means the password was wrong.
+   Forgotten the password? Set a new one. The server can keep running. From `backend/`, type the new password twice at the prompt, at least 12 characters:
+   ```bash
+   .venv/bin/python create_admin.py --username viewer_test --reset
+   ```
+   After 5 wrong attempts the account is locked for 15 minutes. Restarting the backend clears that.
 
 6. The autopilot sizes its own orders. Put the limits back, then let it place one order with a stop 8 away while the AI "asks" for 0.50 lots:
    ```bash
