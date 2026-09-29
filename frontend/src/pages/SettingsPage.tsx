@@ -6,6 +6,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useToast } from '@/hooks/use-toast'
 import axios from 'axios'
+import RiskSettingsCard from '@/components/RiskSettingsCard'
 
 export default function SettingsPage() {
   const { toast } = useToast()
@@ -85,7 +86,7 @@ export default function SettingsPage() {
               </div>
               <div>
                 <Label className="text-xs sm:text-sm">New Password</Label>
-                <Input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="Min 6 chars" className="text-sm h-9 sm:h-10" />
+                <Input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="Min 12 chars" className="text-sm h-9 sm:h-10" />
               </div>
             </div>
             <Button variant="outline" onClick={handleChangePassword} disabled={passwordLoading} className="text-xs sm:text-sm w-full sm:w-auto">
@@ -191,6 +192,7 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
+        <RiskSettingsCard />
 
       </div>
     </div>
