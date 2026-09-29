@@ -28,6 +28,7 @@ from ..core.security import get_current_user
 from ..core.database import AsyncSessionLocal
 from ..core.providers import PROVIDERS, get_api_key as _get_api_key, get_base_url, resolve_api_key, resolve_all_api_keys
 from ..core.models_cache import get_live_models as _get_live_models
+from ..core.utils import apply_default_sl_tp
 from ..models.ai_memory import AutopilotTrade, AutopilotSettings, UserPrompt, AutopilotLog, ModelUsage, AiCallLog, AutopilotExecutionAttempt
 from ..models.strategy_score import StrategyScore
 from ..core.providers import estimate_cost
@@ -370,6 +371,11 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
 
         # Reference price for stop distance checks (current market for pending orders too)
         ref_price = price or entry_price
+
+        # Default SL/TP (0.2% of ref price) when the AI setup omits them or
+        # returns 0.0 — no autopilot trade is ever sent naked. Runs before the
+        # min-distance safeguards below so broker rules still apply after.
+        sl, tp = apply_default_sl_tp(direction, ref_price, sl, tp, digits)
 
         # Apply minimum stop distance safeguard to SL
         if sl and sl > 0 and min_dist and ref_price and digits:

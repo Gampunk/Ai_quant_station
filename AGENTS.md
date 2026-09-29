@@ -190,8 +190,10 @@ Flow:
   On mount → fetches symbols + positions
   User selects symbol, direction (BUY/SELL), volume, SL/TP
   → POST /api/trade/order with { symbol, action, volume, sl, tp }
-  → Backend validates, sends to MT5 via mt5.order_send()
-  → Saves to trade_records with full details
+  → Backend validates, sends to MT5 (local MetaTrader5, or the external
+    connector when configured — auto-detected on hosts without the package)
+  → Saves to trade_records, auto-linked to the user's latest same-symbol
+    AI analysis from the last 24h when no chat_memory_id was passed
   → Returns ticket number
   → Positions list refreshes
   Close button has loading state (prevents double-submit)
@@ -533,7 +535,10 @@ Brokers often return timestamps in their local timezone (UTC+2, UTC+3), not UTC.
 | Per-user autopilot state | `_user_states[user_id]` dict instead of global singleton |
 | Restricted `__builtins__` in `exec()` | Prevents AI-generated code from running OS commands |
 | `execute.py` sandbox | All AI code execution goes through this single module with safe_globals |
-| `chat_memory_id` in trade link | Enables win-rate tracking per strategy prompt (RAG pipeline) |
+| `chat_memory_id` in trade link | Enables win-rate tracking per strategy prompt (RAG pipeline). Terminal orders without an explicit id auto-link to the user's latest same-symbol analysis within 24h (`_resolve_chat_link`). |
+| Connector-first trade execution | `/api/trade/*` routes through the external MT5 connector when the flag is set, or when `MT5_CONNECTOR_URL` is configured on a host without the Windows MetaTrader5 package (the Linux production server). |
+| 5-minute profit reconciler | `app/core/trade_reconcile.py` matches open `trade_records` against MT5 history deals and writes `profit_loss` for trades closed outside the app (SL/TP, manual terminal closes) — the RAG score's 0.3 profit weight is dead without it. |
+| Default SL/TP = 0.2% of price | `apply_default_sl_tp()` (`app/core/utils.py`) fills a missing **or zero** SL/TP before broker min-distance checks on **all three paths**: autopilot (`execute_trade`), Terminal, and Execute-Trade (direct + connector). AI models returning `stop_loss: 0.0` can no longer place naked trades. Existing safeguards (min distance, ATR clamp, TP ≥ 1.5×SL) still run after. |
 | `PRAGMA foreign_keys=ON` for SQLite | Required for CASCADE deletes to work on SQLite |
 | Prompt refinement before AI call | `_refine_query()` rewrites vague user queries into structured analysis requests using a fast/cheap model (`mistralai/mistral-7b-instruct-v0.3`), falls back to the user's main model if unavailable. Controlled by `refine_prompt: bool` on `ChatRequest` (default: True). Adds ~300ms latency per query. |
 

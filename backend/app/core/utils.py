@@ -100,3 +100,39 @@ MANDATORY RULES:
 
 Output ONLY the code block enclosed in ```python ... ```, no explanations.
 """
+
+# ─── Default SL/TP ──────────────────────────────────────────────────────────
+# Orders that arrive without a stop-loss / take-profit (AI models often return
+# 0.0 for both) get a default distance as a fraction of price so no trade is
+# ever sent naked. Applied on all three execution paths: autopilot, Terminal,
+# and AI-Analyst Execute-Trade. Existing broker min-distance rules run after
+# this and may push the values further out.
+DEFAULT_SL_TP_PCT = 0.002  # 0.2% of price
+
+
+def apply_default_sl_tp(
+    action: str,
+    price: Optional[float],
+    sl: Optional[float],
+    tp: Optional[float],
+    digits: Optional[int] = None,
+    pct: float = DEFAULT_SL_TP_PCT,
+):
+    """Fill missing/zero SL or TP with a +/- pct distance around `price`.
+
+    BUY:  SL below price, TP above price (mirrored for SELL and pending
+    actions such as BUY_LIMIT / SELL_STOP). Each side is independent — only
+    the missing one is filled. Returns (sl, tp); rounds to `digits` when
+    given. Passes through unchanged when price is missing/invalid.
+    """
+    if not price or price <= 0:
+        return sl, tp
+    is_buy = "BUY" in (action or "").upper()
+    if not sl or sl <= 0:
+        sl = price * (1 - pct) if is_buy else price * (1 + pct)
+    if not tp or tp <= 0:
+        tp = price * (1 + pct) if is_buy else price * (1 - pct)
+    if digits is not None:
+        sl = round(sl, digits)
+        tp = round(tp, digits)
+    return sl, tp

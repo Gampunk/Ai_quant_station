@@ -3,10 +3,16 @@ import logging
 import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+import httpx
 from sqlalchemy import select
 
+from ..core.config import settings
 from ..core.database import AsyncSessionLocal
-from ..models.ai_memory import TradeRecord, PositionAudit
+from ..core.mt5_connector import connector_client
+from ..core.trade_reconcile import fetch_position_close
+from ..core.utils import apply_default_sl_tp
+from ..models.ai_memory import TradeRecord, PositionAudit, ChatMemory
 from ..models.schemas import OrderRequest, CloseRequest, ModifyRequest
 
 logger = logging.getLogger(__name__)
@@ -18,6 +24,32 @@ def _get_mt5():
         return mt5
     except ImportError:
         return None
+
+
+def _use_connector() -> bool:
+    """Route orders to the external MT5 connector when appropriate.
+
+    The explicit flag wins; otherwise auto-detect so hosts without the
+    Windows MetaTrader5 package (the Linux production server) use the
+    connector whenever a URL is configured.
+    """
+    if settings.MT5_USE_EXTERNAL_CONNECTOR and settings.MT5_CONNECTOR_URL:
+        return True
+    return bool(settings.MT5_CONNECTOR_URL) and _get_mt5() is None
+
+
+def _connector_error(action: str, exc: Exception) -> "TradeError":
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        try:
+            detail = exc.response.json().get("detail") or exc.response.text[:300]
+        except Exception:
+            detail = exc.response.text[:300]
+        return TradeError(
+            f"{action} failed: {detail}",
+            status if 400 <= status < 500 else 502,
+        )
+    return TradeError(f"{action} failed: MT5 connector unreachable ({exc})", 502)
 
 
 def _get_safe_attr(attr, fallback):
@@ -54,6 +86,8 @@ class TradeError(Exception):
 
 
 async def init_mt5() -> None:
+    if _use_connector():
+        return  # the remote Windows connector manages its own MT5 session
     mt5 = _get_mt5()
     if mt5 is None:
         raise TradeError("MT5 not installed on this server", 500)
@@ -79,7 +113,84 @@ async def _select_symbol(symbol: str):
     return symbol_info, tick
 
 
+async def _resolve_chat_link(
+    user_id: Optional[int], symbol: str, explicit_id: Optional[int]
+) -> Optional[int]:
+    """Attach the AI analysis behind this trade (backlog item A).
+
+    The Execute-Trade button passes chat_memory_id explicitly; Terminal
+    orders don't. Fall back to the user's latest assistant analysis of the
+    same symbol (broker-suffix-insensitive) from the last 24h so every
+    trade_record feeds the RAG profit/feedback scores.
+    """
+    if explicit_id:
+        return explicit_id
+    if not user_id or not symbol:
+        return None
+    base = symbol.split(".")[0].upper()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(ChatMemory.id, ChatMemory.symbol)
+                .where(
+                    ChatMemory.user_id == user_id,
+                    ChatMemory.role == "assistant",
+                    ChatMemory.created_at >= cutoff,
+                )
+                .order_by(ChatMemory.created_at.desc())
+                .limit(100)
+            )
+            for cid, chat_symbol in result.all():
+                if (chat_symbol or "").split(".")[0].upper() == base:
+                    return cid
+    except Exception:
+        logger.warning(
+            f"Chat link lookup failed for {symbol}:\n{traceback.format_exc()}"
+        )
+    return None
+
+
+async def _save_trade_record(
+    user_id: Optional[int],
+    order: OrderRequest,
+    *,
+    price: float,
+    volume: float,
+    sl: Optional[float],
+    tp: Optional[float],
+    ticket: Optional[int],
+    resolved_chat_id: Optional[int],
+) -> None:
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(TradeRecord(
+                user_id=user_id or 0,
+                symbol=order.symbol,
+                direction="BUY" if "BUY" in order.action else "SELL",
+                entry_price=price,
+                stop_loss=sl,
+                take_profit=tp,
+                volume=volume,
+                order_type="market" if order.action in ("BUY", "SELL") else "pending",
+                status="open",
+                mt5_ticket=ticket,
+                executed_at=datetime.now(timezone.utc),
+                comment=order.comment,
+                ai_message=str(resolved_chat_id) if resolved_chat_id else None,
+            ))
+            await db.commit()
+    except Exception:
+        logger.warning(
+            f"Failed to save trade record for ticket {ticket}:\n{traceback.format_exc()}"
+        )
+
+
 async def place_order(order: OrderRequest, user_id: Optional[int]) -> dict:
+    if order.action not in ACTION_MAP:
+        raise TradeError(f"Invalid action: {order.action}")
+    if _use_connector():
+        return await _place_order_connector(order, user_id)
     await init_mt5()
     mt5 = _get_mt5()
     loop = asyncio.get_running_loop()
@@ -93,9 +204,6 @@ async def place_order(order: OrderRequest, user_id: Optional[int]) -> dict:
     volume = round(volume, 2)
     point = symbol_info.point
     digits = symbol_info.digits
-
-    if order.action not in ACTION_MAP:
-        raise TradeError(f"Invalid action: {order.action}")
 
     order_type = ACTION_MAP[order.action]
     is_pending = order.action in PENDING_ACTIONS
@@ -114,6 +222,9 @@ async def place_order(order: OrderRequest, user_id: Optional[int]) -> dict:
         raise TradeError("Cannot get current price", 500)
 
     price = round(price, digits)
+
+    # Default SL/TP (0.2% of price) when the request has none or zero.
+    order.sl, order.tp = apply_default_sl_tp(order.action, price, order.sl, order.tp, digits)
 
     min_dist = max(symbol_info.trade_stops_level, 10) * point
 
@@ -170,27 +281,12 @@ async def place_order(order: OrderRequest, user_id: Optional[int]) -> dict:
         detail = result.comment if result else "Unknown error"
         raise TradeError(f"Order failed: {detail}")
 
-    try:
-        async with AsyncSessionLocal() as db:
-            trade_rec = TradeRecord(
-                user_id=user_id or 0,
-                symbol=order.symbol,
-                direction="BUY" if "BUY" in order.action else "SELL",
-                entry_price=price,
-                stop_loss=sl,
-                take_profit=tp,
-                volume=volume,
-                order_type="market" if not is_pending else "pending",
-                status="open",
-                mt5_ticket=result.order,
-                executed_at=datetime.now(timezone.utc),
-                comment=order.comment,
-                ai_message=str(order.chat_memory_id) if order.chat_memory_id else None,
-            )
-            db.add(trade_rec)
-            await db.commit()
-    except Exception:
-        logger.warning(f"Failed to save trade record for ticket {result.order}:\n{traceback.format_exc()}")
+    chat_id = await _resolve_chat_link(user_id, order.symbol, order.chat_memory_id)
+    await _save_trade_record(
+        user_id, order,
+        price=price, volume=volume, sl=sl, tp=tp,
+        ticket=result.order, resolved_chat_id=chat_id,
+    )
 
     return {
         "success": True,
@@ -205,7 +301,89 @@ async def place_order(order: OrderRequest, user_id: Optional[int]) -> dict:
     }
 
 
+async def _place_order_connector(order: OrderRequest, user_id: Optional[int]) -> dict:
+    """Place an order through the external MT5 connector (backlog item A).
+
+    The connector (Windows box with the terminal) performs all broker
+    validation — min volume, step rounding, stop distance — and returns the
+    final adjusted price/sl/tp/volume, which we store in trade_records.
+    """
+    if order.action in PENDING_ACTIONS and order.price is None:
+        raise TradeError("Price required for pending orders")
+
+    symbol_info = {}
+    try:
+        symbol_info = await connector_client.get_symbol(order.symbol)
+    except Exception as e:
+        logger.debug(f"Symbol info unavailable for {order.symbol}: {e}")
+    vol_min = symbol_info.get("volume_min")
+    if vol_min and order.volume < vol_min:
+        raise TradeError(f"Volume {order.volume} below minimum {vol_min}")
+
+    # Default SL/TP (0.2% of price) when the request has none or zero.
+    # Reference price: requested price for pendings, else current bid/ask.
+    ref_price = order.price
+    if ref_price is None and symbol_info:
+        ref_price = symbol_info.get("ask") if "BUY" in order.action else symbol_info.get("bid")
+    order.sl, order.tp = apply_default_sl_tp(
+        order.action, ref_price, order.sl, order.tp,
+        digits=symbol_info.get("digits") if symbol_info else None,
+    )
+
+    payload = {
+        "symbol": order.symbol,
+        "action": order.action,
+        "volume": order.volume,
+        "comment": order.comment,
+        "magic": order.magic,
+    }
+    if order.price is not None:
+        payload["price"] = order.price
+    if order.sl is not None:
+        payload["sl"] = order.sl
+    if order.tp is not None:
+        payload["tp"] = order.tp
+
+    try:
+        data = await connector_client.place_order(payload)
+    except Exception as e:
+        raise _connector_error("Order", e)
+    if not data.get("success"):
+        raise TradeError(f"Order failed: {data.get('error') or 'unknown error'}")
+
+    ticket = data.get("ticket")
+    volume = data.get("volume") or order.volume
+    sl = data.get("sl", order.sl)
+    tp = data.get("tp", order.tp)
+    price = data.get("price") or order.price
+    if price is None and symbol_info:
+        price = symbol_info.get("ask") if order.action == "BUY" else symbol_info.get("bid")
+    if price is None:
+        raise TradeError("Order placed but no fill price returned", 502)
+
+    chat_id = await _resolve_chat_link(user_id, order.symbol, order.chat_memory_id)
+    await _save_trade_record(
+        user_id, order,
+        price=price, volume=volume, sl=sl, tp=tp,
+        ticket=ticket, resolved_chat_id=chat_id,
+    )
+
+    return {
+        "success": True,
+        "ticket": ticket,
+        "symbol": order.symbol,
+        "action": order.action,
+        "volume": volume,
+        "price": price,
+        "sl": sl,
+        "tp": tp,
+        "comment": data.get("comment") or order.comment,
+    }
+
+
 async def close_position(ticket: int, close_volume: Optional[float], user_id: Optional[int]) -> dict:
+    if _use_connector():
+        return await _close_position_connector(ticket, close_volume, user_id)
     await init_mt5()
     mt5 = _get_mt5()
     loop = asyncio.get_running_loop()
@@ -310,7 +488,84 @@ async def close_position(ticket: int, close_volume: Optional[float], user_id: Op
     }
 
 
+async def _connector_position(ticket: int, action: str) -> dict:
+    try:
+        res = await connector_client.get_positions()
+    except Exception as e:
+        raise _connector_error(action, e)
+    for p in res.get("positions") or []:
+        if p.get("ticket") == ticket:
+            return p
+    raise TradeError(f"Position {ticket} not found", 404)
+
+
+async def _close_position_connector(
+    ticket: int, close_volume: Optional[float], user_id: Optional[int]
+) -> dict:
+    position = await _connector_position(ticket, "Close")
+    volume = float(close_volume) if close_volume else float(position.get("volume") or 0)
+    if volume > float(position.get("volume") or volume):
+        raise TradeError("Close volume exceeds position volume")
+
+    try:
+        data = await connector_client.close_position(ticket, volume)
+    except Exception as e:
+        raise _connector_error("Close", e)
+    if data.get("success") is False:
+        raise TradeError(f"Close failed: {data.get('error') or 'unknown error'}")
+
+    # The connector returns close_price but not profit — pull it from history.
+    close_price = data.get("close_price")
+    close_profit = None
+    try:
+        deal = await fetch_position_close(ticket)
+        if deal:
+            if deal.get("price") is not None:
+                close_price = deal["price"]
+            close_profit = deal.get("profit")
+    except Exception:
+        pass
+
+    try:
+        async with AsyncSessionLocal() as db:
+            rec = await db.execute(
+                select(TradeRecord).where(TradeRecord.mt5_ticket == ticket)
+            )
+            trade_rec = rec.scalar_one_or_none()
+            if trade_rec:
+                trade_rec.status = "closed"
+                trade_rec.closed_at = datetime.now(timezone.utc)
+                if close_price is not None:
+                    trade_rec.exit_price = close_price
+                if close_profit is not None:
+                    trade_rec.profit_loss = close_profit
+
+            db.add(PositionAudit(
+                user_id=user_id,
+                mt5_ticket=ticket,
+                action="close",
+                symbol=position.get("symbol", ""),
+                original_sl=position.get("sl"),
+                original_tp=position.get("tp"),
+                close_volume=volume,
+                close_price=close_price,
+            ))
+            await db.commit()
+    except Exception:
+        logger.warning(f"Close audit failed for ticket {ticket}:\n{traceback.format_exc()}")
+
+    return {
+        "success": True,
+        "ticket": ticket,
+        "closed_volume": volume,
+        "close_price": close_price,
+        "comment": data.get("comment", ""),
+    }
+
+
 async def modify_position(ticket: int, new_sl: Optional[float], new_tp: Optional[float], user_id: Optional[int]) -> dict:
+    if _use_connector():
+        return await _modify_position_connector(ticket, new_sl, new_tp, user_id)
     await init_mt5()
     mt5 = _get_mt5()
     loop = asyncio.get_running_loop()
@@ -363,4 +618,43 @@ async def modify_position(ticket: int, new_sl: Optional[float], new_tp: Optional
         "sl": resolved_sl,
         "tp": resolved_tp,
         "comment": result.comment,
+    }
+
+
+async def _modify_position_connector(
+    ticket: int, new_sl: Optional[float], new_tp: Optional[float], user_id: Optional[int]
+) -> dict:
+    position = await _connector_position(ticket, "Modify")
+    try:
+        data = await connector_client.modify_position(ticket, new_sl, new_tp)
+    except Exception as e:
+        raise _connector_error("Modify", e)
+    if data.get("success") is False:
+        raise TradeError(f"Modify failed: {data.get('error') or 'unknown error'}")
+
+    resolved_sl = data.get("sl", new_sl)
+    resolved_tp = data.get("tp", new_tp)
+
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(PositionAudit(
+                user_id=user_id,
+                mt5_ticket=ticket,
+                action="modify",
+                symbol=position.get("symbol", ""),
+                original_sl=position.get("sl"),
+                original_tp=position.get("tp"),
+                new_sl=resolved_sl,
+                new_tp=resolved_tp,
+            ))
+            await db.commit()
+    except Exception:
+        logger.warning(f"PositionAudit modify failed for ticket {ticket}:\n{traceback.format_exc()}")
+
+    return {
+        "success": True,
+        "ticket": ticket,
+        "sl": resolved_sl,
+        "tp": resolved_tp,
+        "comment": data.get("comment", ""),
     }

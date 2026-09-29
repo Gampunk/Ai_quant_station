@@ -197,15 +197,27 @@ async def startup_event():
     except Exception as e:
         print(f"  Report scheduler start: {e}")
 
+    # Start trade profit reconciler (closes trade_records whose MT5 positions
+    # were closed externally — SL/TP, manual terminal closes)
+    try:
+        import asyncio
+        from .core.trade_reconcile import start_trade_reconciler, reconcile_trade_records
+        start_trade_reconciler()
+        asyncio.create_task(reconcile_trade_records())
+    except Exception as e:
+        print(f"  Trade reconciler start: {e}")
+
 @app.on_event("shutdown")
 async def shutdown_event():
     from .core.mt5_connector import shutdown_connector
     from .core.mt5_sync import shutdown_scheduler
     from .api.autopilot import shutdown_http_client
     from .core.email_reports import shutdown_report_scheduler
+    from .core.trade_reconcile import shutdown_reconciler
     await shutdown_connector()
     shutdown_scheduler()
     shutdown_report_scheduler()
+    shutdown_reconciler()
     await shutdown_http_client()
 
 # Middleware chain: UserIdentity (innermost) → CORS → SlowAPI (outermost)
