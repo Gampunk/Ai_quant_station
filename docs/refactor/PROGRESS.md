@@ -392,7 +392,9 @@ is deferred.
 
 ## Step 9. Risk engine
 
-**Status:** built. Waiting for your checks.
+**Status:** approved by you on 2026-09-29. All eight checks passed, including the Settings page card.
+Checks 5 and 6 were rerun after a password reset and a fresh login: the first attempt's 401s were an expired
+15-minute login, and the autopilot correctly sized 0.03 lots under the 0.3% limit still in force.
 
 **Commits:** `eb109ad` connector limits, `ba3f39d` risk gate, `1cb0fed` Settings card, `505ddf1` docs
 
