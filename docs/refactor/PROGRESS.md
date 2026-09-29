@@ -443,6 +443,7 @@ is deferred.
    echo "0.05 lots:"; curl -s -X POST $B/api/trade/order -H "$H" -H "$J" -d "{\"symbol\":\"XAUUSD\",\"action\":\"BUY\",\"volume\":0.05,\"sl\":$SL}"; echo
    ```
    Expect a refusal naming the missing stop loss, a refusal saying 10 lots risks about 100% against a 2% limit, then a filled order with `"risk_pct"` about 0.5.
+   A login lasts 15 minutes. If a later command prints `401`, run the `H=...` line again to log in afresh.
 
 4. Change a limit, and the next order follows it. Still in terminal 3:
    ```bash
