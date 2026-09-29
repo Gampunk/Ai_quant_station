@@ -4,14 +4,6 @@ Backend against the real connector.py running on the fake MetaTrader5 terminal.
 Covers the one route to the broker end to end: autopilot, the Terminal page's
 trade endpoints, the market data routes, and the background candle fetches.
 """
-import os
-import socket
-import subprocess
-import sys
-import time
-from pathlib import Path
-
-import httpx
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -20,43 +12,18 @@ from app.api import autopilot
 from app.core.config import settings
 from app.core.mt5_connector import ConnectorError, connector_client
 from app.models.ai_memory import AutopilotSettings, AutopilotTrade, PositionAudit, TradeRecord
+from tests.fake_connector import free_port, start_fake, stop_fake
 
-LAUNCHER = Path(__file__).resolve().parents[2] / "mt5_connector" / "testing" / "run_fake_connector.py"
 USER_ID = 1  # admin, created by conftest
 CONTRACT_TOKEN = "contract-test-token"
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _start_fake(port, *extra):
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("MT5_", "FAKE_MT5_"))}
-    proc = subprocess.Popen(
-        [sys.executable, str(LAUNCHER), "--port", str(port), *extra],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-    )
-    url = f"http://127.0.0.1:{port}"
-    for _ in range(60):
-        if proc.poll() is not None:
-            pytest.fail(f"fake connector exited early:\n{proc.stdout.read()}")
-        try:
-            httpx.get(f"{url}/health", timeout=1)
-            return proc, url
-        except httpx.HTTPError:
-            time.sleep(0.5)
-    proc.terminate()
-    pytest.fail("fake connector did not start")
+_free_port, _start_fake = free_port, start_fake
 
 
 @pytest.fixture(scope="module")
 def fake_url():
     proc, url = _start_fake(_free_port())
     yield url
-    proc.terminate()
-    proc.wait(timeout=10)
+    stop_fake(proc)
 
 
 @pytest.fixture(autouse=True)
@@ -107,7 +74,7 @@ async def test_autopilot_trade_round_trip_is_recorded_by_sync(db_session):
 
 async def test_autopilot_records_the_filled_price_not_the_quote():
     quote = await connector_client.get_symbol("XAUUSD")
-    placed = await autopilot.execute_trade(USER_ID, "XAUUSD", "BUY", 0.10)
+    placed = await autopilot.execute_trade(USER_ID, "XAUUSD", "BUY", 0.10, sl=quote["bid"] - 10)
     assert placed["success"] is True, placed
     opened = _deal((await connector_client.get_history(hours=24))["deals"], placed["ticket"], "OPEN")
     assert placed["price"] == opened["price"], "stored the quote instead of the fill"
@@ -163,6 +130,7 @@ async def test_pending_order_records_no_requested_price(client: AsyncClient, tra
     bid = (await connector_client.get_symbol("XAUUSD"))["bid"]
     order = await client.post("/api/trade/order", headers=trader_headers, json={
         "symbol": "XAUUSD", "action": "BUY_LIMIT", "volume": 0.05, "price": round(bid - 50, 2),
+        "sl": round(bid - 60, 2),
     })
     assert order.status_code == 200, order.text
     record = (await db_session.execute(
@@ -173,7 +141,7 @@ async def test_pending_order_records_no_requested_price(client: AsyncClient, tra
 
 async def test_terminal_passes_on_the_connectors_refusal(client: AsyncClient, trader_headers):
     resp = await client.post("/api/trade/order", headers=trader_headers,
-                             json={"symbol": "NOPE", "action": "BUY", "volume": 0.05})
+                             json={"symbol": "NOPE", "action": "BUY", "volume": 0.05, "sl": 1.0})
     assert resp.status_code == 404
     assert "not found" in resp.json()["detail"].lower()
 
@@ -181,7 +149,7 @@ async def test_terminal_passes_on_the_connectors_refusal(client: AsyncClient, tr
 async def test_terminal_reports_an_unreachable_connector(client: AsyncClient, trader_headers, monkeypatch):
     monkeypatch.setattr(settings, "MT5_CONNECTOR_URL", f"http://127.0.0.1:{_free_port()}")
     resp = await client.post("/api/trade/order", headers=trader_headers,
-                             json={"symbol": "XAUUSD", "action": "BUY", "volume": 0.05})
+                             json={"symbol": "XAUUSD", "action": "BUY", "volume": 0.05, "sl": 1.0})
     assert resp.status_code == 502
     assert "unreachable" in resp.json()["detail"].lower()
 

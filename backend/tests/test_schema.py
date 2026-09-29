@@ -61,16 +61,23 @@ def test_second_start_does_nothing(db):
     assert ensure_schema(url) == "up to date"
 
 
+def _tables(path):
+    return {r[0] for r in sqlite3.connect(path).execute("select name from sqlite_master where type='table'")}
+
+
 def test_database_migrations_behind_is_upgraded(db):
+    """Go back to a fixed older version, so adding a migration never weakens this test."""
     path, url = db
     ensure_schema(url)
-    command.downgrade(_alembic_config(url), "-2")
+    command.downgrade(_alembic_config(url), "d2e5f1c0a3b4")
     assert not {"market_regime", "requested_price"} & _columns(path, "autopilot_trades")
     assert not {"requested_price", "requested_exit_price"} & _columns(path, "trade_records")
+    assert not {"risk_settings", "risk_days", "risk_decisions"} & _tables(path)
 
     assert ensure_schema(url) == "upgraded"
     assert {"market_regime", "requested_price"} <= _columns(path, "autopilot_trades")
     assert {"requested_price", "requested_exit_price"} <= _columns(path, "trade_records")
+    assert {"risk_settings", "risk_days", "risk_decisions"} <= _tables(path)
     assert _revision(path) == _head()
 
 

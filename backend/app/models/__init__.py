@@ -24,6 +24,7 @@ from .ai_memory import (
 from .historical_lab import HistoricalBacktest
 from .strategy_score import StrategyScore
 from .chat_embedding import ChatEmbedding
+from .risk import RiskDay, RiskDecision, RiskSettings
 
 __all__ = [
     "User",
@@ -44,4 +45,7 @@ __all__ = [
     "StrategyScore",
     "ChatEmbedding",
     "AiCallLog",
+    "RiskSettings",
+    "RiskDay",
+    "RiskDecision",
 ]

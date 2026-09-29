@@ -169,6 +169,9 @@ class OrderResponse(BaseModel):
     sl: Optional[float]
     tp: Optional[float]
     comment: str
+    # What the order risks if its stop is hit, as checked by the risk gate.
+    risk_amount: Optional[float] = None
+    risk_pct: Optional[float] = None
 
 
 class CloseRequest(BaseModel):

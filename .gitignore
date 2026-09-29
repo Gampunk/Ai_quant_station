@@ -6,6 +6,7 @@ backend/.env
 
 # Database files
 *.db
+*.db.bak
 *.sqlite
 *.sqlite3
 

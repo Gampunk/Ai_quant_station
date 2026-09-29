@@ -29,6 +29,7 @@ from ..models.ai_memory import AutopilotTrade, AutopilotSettings, UserPrompt, Au
 from ..models.strategy_score import StrategyScore
 from ..core.providers import estimate_cost
 from ..core.mt5_connector import ConnectorError, connector_client
+from ..core.risk import RiskRefused, submit_order
 
 router = APIRouter(prefix="/autopilot", tags=["Autopilot"])
 
@@ -307,9 +308,14 @@ def _build_order_action(direction: str, order_type: str) -> str:
     return d
 
 
-async def execute_trade(user_id: int, symbol: str, direction: str, volume: float, entry_price: float = None,
+async def execute_trade(user_id: int, symbol: str, direction: str, volume: float = None, entry_price: float = None,
                        sl: float = None, tp: float = None, comment: str = "[AUTOPILOT]", prompt_num: int = None,
-                       order_type: str = "market"):
+                       order_type: str = "market", context: dict = None):
+    """Send one autopilot order through the risk gate, which sizes it from the stop loss.
+
+    `volume`, the AI's suggested lot, is ignored: the size is set so that hitting
+    the stop loses the autopilot risk percent of equity. It is kept in the context.
+    """
     try:
         if prompt_num:
             if isinstance(prompt_num, int) and prompt_num < 0:
@@ -328,11 +334,9 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
         digits = None
         try:
             sym_data = await connector_client.get_symbol(symbol)
-            price = sym_data.get("bid") or sym_data.get("ask")
-            stops_level = sym_data.get("trade_stops_level") or sym_data.get("stops_level")
-            point = sym_data.get("point")
-            if stops_level is not None and point:
-                min_dist = max(stops_level, 10) * point
+            # A buy fills at the ask and a sell at the bid; stops are measured from there.
+            price = sym_data.get("ask") if direction.upper() == "BUY" else sym_data.get("bid")
+            min_dist = sym_data.get("min_stop_distance")
             digits = sym_data.get("digits")
         except Exception as e:
             add_log(user_id, f"Could not fetch symbol info for {symbol}: {str(e)}", "ERROR")
@@ -370,7 +374,7 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
                     add_log(user_id, f"TP {tp} too close, adjusted to {adjusted}", "WARNING")
                     tp = adjusted
 
-        payload = {"symbol": symbol, "action": action, "volume": volume, "comment": trade_comment}
+        payload = {"symbol": symbol, "action": action, "comment": trade_comment}
         if is_pending:
             payload["price"] = entry_price
         if sl and sl > 0:
@@ -378,11 +382,19 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
         if tp and tp > 0:
             payload["tp"] = tp
 
-        data = await connector_client.place_order(payload)
+        ctx = {**(context or {}), "prompt_number": prompt_num, "ai_lot": volume}
+        data = await submit_order(payload, source="autopilot", user_id=user_id, context=ctx, size_from_risk=True)
         if data.get("success"):
+            risk = data.get("risk") or {}
+            add_log(user_id, f"Sized {risk.get('volume')} lots: risks {risk.get('risk_amount')} "
+                             f"({risk.get('risk_pct')}% of equity) if the stop is hit")
             return {"success": True, "ticket": data.get("ticket"), "price": data.get("price"),
+                    "volume": data.get("volume") or risk.get("volume"),
                     "requested_price": None if is_pending else data.get("requested_price")}
         return {"success": False, "error": "Order failed"}
+    except RiskRefused as e:
+        add_log(user_id, f"Risk check refused the order ({e.code}): {e.message}", "WARNING")
+        return {"success": False, "error": e.message, "refused": e.code}
     except ConnectorError as e:
         add_log(user_id, f"Trade execution failed: {e.detail}", "ERROR")
         return {"success": False, "error": e.detail}
@@ -1474,11 +1486,8 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
     entry_price = setup.get("entry_price")
     sl = setup.get("stop_loss")
     tp = setup.get("take_profit")
+    # The AI's lot is recorded but not used: the risk gate sizes the order from its stop.
     lot = setup.get("lot_size", lot_size)
-    # Clamp lot to at least the configured default (MT5 rejects below 0.01)
-    if lot < lot_size:
-        add_log(user_id, f"Lot {lot} below minimum {lot_size}, adjusted to {lot_size}", "WARNING")
-        lot = lot_size
     reasoning = setup.get("reasoning", "")
     confidence = setup.get("confidence", 70)
 
@@ -1512,9 +1521,11 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
                 tp = entry_price - min_tp_dist
             add_log(user_id, f"TP adjusted from {tp_dist:.2f}pts to {min_tp_dist:.2f}pts (min 1.5x SL={sl_dist:.2f})", "WARNING")
 
-    add_log(user_id, f"TRADE SETUP - {direction} ({order_type}) | Entry: {entry_price} SL: {sl} TP: {tp} Lot: {lot} Confidence: {confidence}%")
+    add_log(user_id, f"TRADE SETUP - {direction} ({order_type}) | Entry: {entry_price} SL: {sl} TP: {tp} Confidence: {confidence}%")
 
-    result = await execute_trade(user_id, symbol, direction, lot, entry_price, sl, tp, prompt_num=prompt_num, order_type=order_type)
+    result = await execute_trade(user_id, symbol, direction, lot, entry_price, sl, tp, prompt_num=prompt_num,
+                                 order_type=order_type,
+                                 context={"market_regime": market_regime.get("regime"), "confidence": confidence})
     state["last_trade_time"] = datetime.now(timezone.utc)
 
     if result.get("success"):
@@ -1529,7 +1540,7 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
             trade = AutopilotTrade(
                 user_id=user_id, prompt_number=prompt_num, prompt_text=prompt_text,
                 symbol=symbol, direction=direction, order_type=order_type, entry_price=entry_price,
-                stop_loss=sl, take_profit=tp, lot_size=lot,
+                stop_loss=sl, take_profit=tp, lot_size=result.get("volume") or lot,
                 mt5_ticket=ticket, execution_price=exec_price, execution_status="executed",
                 requested_price=result.get("requested_price"),
                 reasoning=reasoning, confidence=confidence, ai_response=ai_response,

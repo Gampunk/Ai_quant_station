@@ -2,8 +2,8 @@
 Manual trading from the Terminal page. Every broker action goes through the
 connector client; this module records what happened.
 
-The connector validates volume, rounds prices, and moves stops that sit too
-close to the market, so none of that is repeated here.
+New orders pass the risk gate in core/risk.py, which checks them against the
+limits in force and is the only code that sends them. Closing is never blocked.
 """
 import logging
 import traceback
@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from ..core.database import AsyncSessionLocal
 from ..core.mt5_connector import ConnectorError, connector_client
+from ..core.risk import RiskRefused, check_modify, submit_order
 from ..models.ai_memory import PositionAudit, TradeRecord
 from ..models.schemas import OrderRequest
 
@@ -50,8 +51,12 @@ async def place_order(order: OrderRequest, user_id: Optional[int]) -> dict:
         if getattr(order, key) is not None:
             payload[key] = getattr(order, key)
 
+    source = "ai_analyst" if order.chat_memory_id else "terminal"
+    context = {"chat_memory_id": order.chat_memory_id} if order.chat_memory_id else None
     try:
-        result = await connector_client.place_order(payload)
+        result = await submit_order(payload, source=source, user_id=user_id, context=context)
+    except RiskRefused as exc:
+        raise TradeError(f"Order refused: {exc.message}", 422)
     except ConnectorError as exc:
         raise _as_trade_error(exc, "Order")
 
@@ -87,6 +92,8 @@ async def place_order(order: OrderRequest, user_id: Optional[int]) -> dict:
         "sl": result.get("sl"),
         "tp": result.get("tp"),
         "comment": result.get("comment"),
+        "risk_amount": (result.get("risk") or {}).get("risk_amount"),
+        "risk_pct": (result.get("risk") or {}).get("risk_pct"),
     }
 
 
@@ -145,6 +152,10 @@ async def close_position(ticket: int, close_volume: Optional[float], user_id: Op
 
 async def modify_position(ticket: int, new_sl: Optional[float], new_tp: Optional[float], user_id: Optional[int]) -> dict:
     before = await _open_position(ticket)
+    try:
+        await check_modify(ticket, (before or {}).get("symbol", ""), new_sl, source="terminal", user_id=user_id)
+    except RiskRefused as exc:
+        raise TradeError(f"Change refused: {exc.message}", 422)
     try:
         result = await connector_client.modify_position(ticket, new_sl, new_tp)
     except ConnectorError as exc:
