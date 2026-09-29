@@ -36,6 +36,7 @@ All settings are environment variables. There are no command-line options.
 | `MT5_API_TOKEN` | none | **Required.** Every request must send it as `Authorization: Bearer <token>`. Without one, every request is refused with 503 |
 | `MT5_ALLOW_NO_TOKEN` | `false` | Run without a token. Only for an instance nothing else can reach |
 | `MT5_REQUIRE_DEMO` | `true` | Refuse order, close and modify unless the account is a demo account. Set `false` only for a deliberate live deployment |
+| `MT5_MAX_VOLUME` | `1.0` | The largest order it sends, in lots. Larger orders are refused with 403, whatever the backend asks. The backend's own risk limits sit in front of this |
 | `MT5_ENABLE_DOCS` | `false` | Serve the interactive `/docs` page, which can place orders. Keep it off anywhere reachable |
 | `MT5_TERMINAL_PATH` | none | Path to `terminal64.exe` when several terminals are installed |
 | `CORS_ORIGINS` | local dev ports | Browser origins allowed to call it |

@@ -389,3 +389,109 @@ is deferred.
 - In `backend/app/services/trade_service.py`, remove `requested_price=` or `rec.requested_exit_price =`: `test_terminal_order_close_and_modify` fails. Recording a quote for pending orders fails `test_pending_order_records_no_requested_price`.
 - In `backend/app/api/autopilot.py`, drop `requested_price` from `execute_trade`'s result: `test_autopilot_records_the_filled_price_not_the_quote` fails.
 - In `backend/app/core/schema.py`, replace `command.upgrade(cfg, "head")` with `pass`: `test_database_migrations_behind_is_upgraded` fails.
+
+## Step 9. Risk engine
+
+**Status:** built. Waiting for your checks.
+
+**What changed**
+- Every new order passes one gate, `backend/app/core/risk.py`, before it reaches the broker: the Terminal page, the AI Analyst's Execute Trade button and the autopilot. A test fails if any code sends an order around it. Closing is never blocked. Changing a stop is refused only if it removes the stop.
+- The gate refuses an order, naming the rule, when:
+  - it has no stop loss
+  - its stop or target is on the wrong side of the price, or closer than the broker allows
+  - it would lose more than the per-trade limit, 2% of equity, if the stop is hit
+  - the account is down 3% or more since the start of the UTC day
+  - the margin level is below 200%
+  - a pending order's price is more than 2% from the market
+  - the open-trade limit is reached. This is off by default (0 = no limit), as you asked
+- The autopilot sizes every order from equity and the stop: 1% of equity lost if the stop is hit. The AI's lot is ignored, and kept in the record. If even the smallest lot would risk too much, the order is refused, not rounded up.
+- All the limits are settings you change on the Settings page or through `/api/risk/settings`. Only an admin can change them, and every change needs a reason. Changes are never overwritten: each one is a new version with who and why. Every order decision records the version it used, the numbers, and the context (prompt, market regime, AI's lot).
+- The Settings page's new Risk Limits card shows today's standing, recent changes and recently refused orders.
+- Connector: it refuses any order above `MT5_MAX_VOLUME` (default 1 lot), a second lock the website cannot change. It refuses volume above the broker's maximum, and refuses misplaced stops instead of moving them. `/symbol` now sends what sizing needs, including the minimum stop distance (finding 7).
+- New findings 24 to 26.
+
+**Your checks.** Terminal 1 runs the fake connector, terminal 2 the backend, terminal 3 the commands.
+
+1. Five PASS lines.
+   ```bash
+   cd ~/dev/Ai_quant_station && ./scripts/verify.sh
+   ```
+
+2. Your database gets the three new tables. Terminal 1:
+   ```bash
+   cd ~/dev/Ai_quant_station
+   mt5_connector/.venv/bin/python mt5_connector/testing/run_fake_connector.py --port 5001 --token mytoken
+   ```
+   Terminal 2:
+   ```bash
+   cd ~/dev/Ai_quant_station/backend
+   MT5_CONNECTOR_URL=http://127.0.0.1:5001 MT5_API_TOKEN=mytoken .venv/bin/python -m uvicorn app.main:app --port 8002
+   ```
+   Expect `Upgrading database from f1c3a5e7b9d2 to a7d2c4e6f8b1`, then `Database schema upgraded`.
+
+3. The gate. Terminal 3:
+   ```bash
+   cd ~/dev/Ai_quant_station/backend
+   B=localhost:8002; J="content-type: application/json"; ADMIN_PW=$(grep ^DEFAULT_ADMIN_PASSWORD .env | cut -d= -f2-)
+   H="Authorization: Bearer $(curl -s -X POST $B/api/auth/login -H "$J" -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PW\"}" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")"
+   curl -s -X POST $B/api/mt5/initialize -H "$H" -o /dev/null -w "initialize: %{http_code}\n"
+   SL=$(curl -s $B/api/mt5/symbol/XAUUSD -H "$H" | python3 -c "import sys,json; print(round(json.load(sys.stdin)['ask'] - 10, 2))")
+   echo "no stop:";   curl -s -X POST $B/api/trade/order -H "$H" -H "$J" -d '{"symbol":"XAUUSD","action":"BUY","volume":0.05}'; echo
+   echo "10 lots:";   curl -s -X POST $B/api/trade/order -H "$H" -H "$J" -d "{\"symbol\":\"XAUUSD\",\"action\":\"BUY\",\"volume\":10,\"sl\":$SL}"; echo
+   echo "0.05 lots:"; curl -s -X POST $B/api/trade/order -H "$H" -H "$J" -d "{\"symbol\":\"XAUUSD\",\"action\":\"BUY\",\"volume\":0.05,\"sl\":$SL}"; echo
+   ```
+   Expect a refusal naming the missing stop loss, a refusal saying 10 lots risks about 100% against a 2% limit, then a filled order with `"risk_pct"` about 0.5.
+
+4. Change a limit, and the next order follows it. Still in terminal 3:
+   ```bash
+   curl -s -X PUT $B/api/risk/settings -H "$H" -H "$J" -d '{"reason":"my first test","max_trade_risk_pct":0.3,"autopilot_risk_pct":0.3}' -o /dev/null -w "change: %{http_code}\n"
+   curl -s -X POST $B/api/trade/order -H "$H" -H "$J" -d "{\"symbol\":\"XAUUSD\",\"action\":\"BUY\",\"volume\":0.05,\"sl\":$SL}"; echo
+   curl -s $B/api/risk/settings/history -H "$H" | python3 -c "import sys,json; [print('version', v['id'], 'cap', v['max_trade_risk_pct'], 'by', v['changed_by_name'], '-', v['reason']) for v in json.load(sys.stdin)['versions']]"
+   curl -s "$B/api/risk/decisions?limit=5" -H "$H" | python3 -c "import sys,json; [print(d['outcome'], d['reason_code'], d['volume'], 'lots, version', d['settings_id']) for d in json.load(sys.stdin)['decisions']]"
+   ```
+   Expect `change: 200`, a refusal against the 0.3% limit, two versions with your reason, and the decisions: the newest refused under the new version, the older ones under version 1.
+
+5. A viewer cannot change limits. Replace `YOUR_VIEWER_PASSWORD` with the real `viewer_test` password:
+   ```bash
+   VH="Authorization: Bearer $(curl -s -X POST $B/api/auth/login -H "$J" -d '{"username":"viewer_test","password":"YOUR_VIEWER_PASSWORD"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")"
+   curl -s -o /dev/null -w "viewer reads: %{http_code}\n" $B/api/risk/settings -H "$VH"
+   curl -s -o /dev/null -w "viewer changes: %{http_code}\n" -X PUT $B/api/risk/settings -H "$VH" -H "$J" -d '{"reason":"x","daily_loss_pct":50}'
+   ```
+   Expect 200, then 403. A Python `KeyError: 'access_token'` means the password was wrong.
+
+6. The autopilot sizes its own orders. Put the limits back, then let it place one order with a stop 8 away while the AI "asks" for 0.50 lots:
+   ```bash
+   curl -s -X PUT $B/api/risk/settings -H "$H" -H "$J" -d '{"reason":"back to defaults","max_trade_risk_pct":2,"autopilot_risk_pct":1}' -o /dev/null -w "reset: %{http_code}\n"
+   MT5_CONNECTOR_URL=http://127.0.0.1:5001 MT5_API_TOKEN=mytoken .venv/bin/python -c "
+   import asyncio
+   from app.api import autopilot
+   from app.core.mt5_connector import connector_client
+   async def main():
+       q = await connector_client.get_symbol('XAUUSD'); a = await connector_client.get_account()
+       r = await autopilot.execute_trade(1, 'XAUUSD', 'BUY', 0.50, sl=round(q['ask'] - 8, 2))
+       print('equity', a['equity'], '| AI asked for 0.50 lots | sent', r.get('volume'), '|', r.get('error', 'ok'))
+       if r.get('ticket'): await connector_client.close_position(r['ticket'])
+   asyncio.run(main())" 2>&1 | tail -1
+   ```
+   Expect about `sent 0.12`: 1% of about 10,000 is 100, and a stop 8 away on 1 lot of gold costs 800, so 0.125, rounded down.
+
+7. The connector's own cap, sent straight to it:
+   ```bash
+   curl -s -X POST localhost:5001/order -H "Authorization: Bearer mytoken" -H "$J" -d '{"symbol":"XAUUSD","action":"BUY","volume":1.01}'; echo
+   ```
+   Expect a refusal naming `MT5_MAX_VOLUME`.
+
+8. The Settings page. Terminal 3:
+   ```bash
+   cd ~/dev/Ai_quant_station/frontend && npm run dev
+   ```
+   Open http://localhost:5173, log in as admin, and go to Settings. The Risk Limits card should show your limits, today's equity, the changes you made with their reasons, and the orders refused above. Change a value, save without a reason (refused), then with one (saved). Stop everything with Ctrl+C.
+
+**Negative controls.** Claude ran these before handover. Each failed where stated.
+
+- In `backend/app/services/trade_service.py`, send with `connector_client.place_order(payload)` instead of `submit_order(...)`: 3 failures in `test_risk_gate.py`, including `test_only_the_risk_gate_places_orders`.
+- In `backend/app/api/risk.py`, make `update_settings` depend on `get_current_user`: `test_only_an_admin_changes_the_limits` fails.
+- In `backend/app/core/risk.py`, make `evaluate` return `Evaluation(True, volume=order.get("volume"))` first: 22 of the 35 rule tests fail.
+- Size with `budget / ev.stop_distance`, leaving out the value per lot: 4 sizing tests fail.
+- Loosen the daily limit to `loss_pct > limit + 1`: `test_daily_loss_at_the_limit_refuses` fails.
+- In `mt5_connector/connector.py`, switch off the volume cap: 1 failure. Switch off `check_stops`: 5 failures.

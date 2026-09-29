@@ -52,7 +52,7 @@ npm run dev
 ### First Run
 
 On first startup with a fresh database, the backend auto-creates:
-- All 22 database tables
+- All 25 database tables
 - One `admin` account, only if `DEFAULT_ADMIN_PASSWORD` is set and strong
 
 **Delete old `finance_engine.db` if upgrading from an older version** (schema changed).
@@ -97,7 +97,7 @@ Add people or reset a password with `python create_admin.py`. It prompts for the
 | trader | Trade, run the autopilot, run anything that executes AI-written code |
 | viewer | Read dashboards, history, reports and settings |
 
-## Database Tables (22)
+## Database Tables (25)
 
 | Table | Purpose |
 |---|---|
@@ -123,6 +123,9 @@ Add people or reset a password with `python create_admin.py`. It prompts for the
 | `ai_call_logs` | Every AI call: provider, model, tokens, outcome |
 | `strategy_scores` | Win rate, profit factor and cost per prompt, updated hourly |
 | `chat_embeddings` | Vectors of past AI Analyst answers, used for retrieval |
+| `risk_settings` | Every version of the risk limits, with who changed them and why. The newest is in force |
+| `risk_days` | Equity at the first order check of each UTC day, the baseline for the daily loss limit |
+| `risk_decisions` | Every order the risk gate checked: refused, sent or failed, with the numbers and the settings version |
 
 ## Authentication Flow
 
@@ -213,6 +216,9 @@ Flow:
   On mount → fetches symbols + positions
   User selects symbol, direction (BUY/SELL), volume, SL/TP
   → POST /api/trade/order with { symbol, action, volume, sl, tp }
+  → The risk gate (core/risk.py) checks it: stop loss present and placed right,
+    risk within the per-trade limit, daily loss, margin level, open trades.
+    A refusal returns 422 naming the rule, and is recorded in risk_decisions
   → Backend sends it through the MT5 connector (core/mt5_connector.py)
   → Saves to trade_records: the fill as entry_price, the quote as requested_price
     (and the same pair on close), so slippage can be measured
@@ -336,7 +342,8 @@ Flow:
     3. Classify the market regime (trend, volatility) from 15m candles, then pick
        a prompt at random weighted by regime fit and past win rate
     4. Call AI to analyze market + detect TRADE_SETUP JSON
-    5. If setup found → execute trade via MT5 connector
+    5. If setup found → the risk gate sizes it from equity and the stop loss
+       (the AI's lot is ignored), checks the limits, then sends it via the connector
     6. Sleep (configurable interval, default 300s)
     7. Loop until stopped
 
@@ -382,6 +389,8 @@ Sections:
   → MT5 Connection: a Check Connection button only. The connector's address,
     token and terminal are set on the server
   → Autopilot: Lot size + interval defaults (saved via API)
+  → Risk Limits: every limit the risk gate applies, today's standing, recent
+    changes and refusals. Admins edit them, with a reason (GET/PUT /api/risk/settings)
   → Data Sync: HuggingFace (UI stub, functional via manual scripts)
 ```
 
@@ -400,7 +409,7 @@ Flow:
   → Cannot delete "admin" user
 ```
 
-## API Routes (63 total)
+## API Routes (68 total)
 
 ```
 AUTH:
@@ -484,6 +493,13 @@ AUTOPILOT:
 Routes that trade, change autopilot settings, or run AI-written code
 (AI chat, prompt backtest, historical lab run and chat) need the admin or
 trader role. Everything else needs any logged-in user.
+
+RISK:
+  GET    /api/risk/settings           Limits in force, defaults and allowed ranges
+  PUT    /api/risk/settings           Change limits (admin, reason required); adds a version
+  GET    /api/risk/settings/history   Every version of the limits
+  GET    /api/risk/status             Today's equity, loss, margin level and open trades
+  GET    /api/risk/decisions          Recent order decisions, filter by outcome or source
 
 BACKTEST:
   POST   /api/backtest/run            Run prompt backtest
@@ -576,6 +592,8 @@ Brokers often return timestamps in their local timezone (UTC+2, UTC+3), not UTC.
 | bcrypt directly (not passlib) | passlib incompatible with bcrypt 5.x. Use `bcrypt.hashpw()` and `bcrypt.checkpw()` directly |
 | `ta` library (not `pandas_ta`) | `pandas_ta` not available for Python 3.11+. Use `ta` (technical-analysis-library-python) |
 | One connector client | Every broker action and MT5 data request goes through `core/mt5_connector.py`. The backend never imports MetaTrader5, and tests fail if a second route appears |
+| One risk gate | `core/risk.py` `submit_order` is the only caller of `place_order`, and a test enforces it. The rules live in the pure `evaluate()` function. Limits are versioned rows, not constants, so they can be tuned, later by agents, and every decision names the version it used |
+| Connector lot cap | `MT5_MAX_VOLUME` on the connector machine (default 1.0 lot) refuses larger orders whatever the backend sends. Nothing on the website can raise it |
 | Per-user autopilot state | `_user_states[user_id]` dict instead of global singleton |
 | Restricted `__builtins__` in `exec()` | Prevents AI-generated code from running OS commands |
 | `execute.py` sandbox | AI Analyst, Autopilot and Historical Lab code runs through this module, always in a subprocess. Prompt Backtest still has its own runner (to be merged in step B1) |
