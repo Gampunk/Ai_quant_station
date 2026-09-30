@@ -508,7 +508,7 @@ Checks 5 and 6 were rerun after a password reset and a fresh login: the first at
 
 ## Step 10. Autopilot fixes
 
-**Status:** built. Waiting for your checks.
+**Status:** built. Check 1 passed for you on 2026-09-30. Checks 2 to 6 still to do.
 
 **Commits:** `b0fe844` connector clock and close reasons, `b6c0941` autopilot and UTC, `b58a64c` Autopilot page, and the docs commit after them
 
