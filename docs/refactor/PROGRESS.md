@@ -505,3 +505,90 @@ Checks 5 and 6 were rerun after a password reset and a fresh login: the first at
 - Size with `budget / ev.stop_distance`, leaving out the value per lot: 4 sizing tests fail.
 - Loosen the daily limit to `loss_pct > limit + 1`: `test_daily_loss_at_the_limit_refuses` fails.
 - In `mt5_connector/connector.py`, switch off the volume cap: 1 failure. Switch off `check_stops`: 5 failures.
+
+## Step 10. Autopilot fixes
+
+**Status:** built. Waiting for your checks.
+
+**Commits:** `b0fe844` connector clock and close reasons, `b6c0941` autopilot and UTC, `b58a64c` Autopilot page, and the docs commit after them
+
+**What changed**
+- The autopilot loop survives errors. A failure in one cycle is logged in full and the next cycle still runs. It used to end the loop silently while the page said running. If the loop ever does end unexpectedly, the page shows it stopped, with the reason.
+- The autopilot's own daily loss brake pauses it for the rest of the UTC day, logs that once, and resumes by itself at 00:00 UTC. It used to switch the autopilot off for good. It can now be switched off on the Autopilot page. The account-wide 3% limit in the risk gate applies either way.
+- The autopilot's daily trade count and profit are read from the database every cycle, profit by the day each trade closed. They used to be memory counters that mixed open and close days, and missed trades found by the start-up back-sync.
+- Real UTC everywhere in the backend (finding 22). The connector client converts every broker time in one place: trade history, open trades, candles, and range queries. The price sync's separate conversion is gone, so nothing is converted twice. The offset is detected from the connector's new `/clock` while prices are live, so it follows summer time. `MT5_BROKER_UTC_OFFSET` is only the fallback. `/api/mt5/health` shows which is in use.
+- The AI's code sees real candle times, not January 1970 (finding 9).
+- Stop and target hits come from the broker's own deal reason, in one helper used by all seven places that used to guess from the comment (finding 10). The broker force-closing a trade for margin now shows as `STOP_OUT`.
+- The unused open-trade check is deleted. The risk gate's open-trade setting covers it.
+- Records made before this step keep their old times, as you chose.
+- The History page and every API now show UTC times, a few hours earlier than the broker's own clock.
+
+**Your checks.** T1 runs the fake broker, set 3 hours ahead of UTC like a real broker. T2 runs the backend, T3 the commands.
+
+1. Five PASS lines: backend 225 passed and 9 skipped (about 16 minutes), connector 72, frontend 109.
+   ```bash
+   cd ~/dev/Ai_quant_station && ./scripts/verify.sh
+   ```
+
+2. The database update. T1:
+   ```bash
+   cd ~/dev/Ai_quant_station
+   mt5_connector/.venv/bin/python mt5_connector/testing/run_fake_connector.py --port 5001 --token mytoken --server-offset 3
+   ```
+   Expect `server_clock=UTC+3` in its first line. T2:
+   ```bash
+   cd ~/dev/Ai_quant_station/backend
+   MT5_CONNECTOR_URL=http://127.0.0.1:5001 MT5_API_TOKEN=mytoken .venv/bin/python -m uvicorn app.main:app --port 8002
+   ```
+   Expect `Upgrading database from a7d2c4e6f8b1 to c5e8f2a4d6b9`.
+
+3. The broker's clock is detected. T3:
+   ```bash
+   cd ~/dev/Ai_quant_station/backend
+   B=localhost:8002; J="content-type: application/json"; ADMIN_PW=$(grep ^DEFAULT_ADMIN_PASSWORD .env | cut -d= -f2-)
+   H="Authorization: Bearer $(curl -s -X POST $B/api/auth/login -H "$J" -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PW\"}" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")"
+   curl -s -X POST $B/api/mt5/initialize -H "$H" -o /dev/null -w "initialize: %{http_code}\n"
+   curl -s $B/api/mt5/health -H "$H"; echo
+   sleep 35
+   curl -s $B/api/mt5/health -H "$H"; echo
+   ```
+   Expect the first `broker_clock` to say `"source":"MT5_BROKER_UTC_OFFSET"` with offset 0. The first reading cannot tell yet, because prices must move between two readings. The second should say `"offset_hours":3.0,"source":"detected"`. T2's log shows a warning that `MT5_BROKER_UTC_OFFSET is +0` but the broker reads UTC+3.
+
+4. Times arrive in UTC. Place a trade, then compare the broker's own time with what the backend reports:
+   ```bash
+   SL=$(curl -s $B/api/mt5/symbol/XAUUSD -H "$H" | python3 -c "import sys,json; print(round(json.load(sys.stdin)['ask'] - 10, 2))")
+   T=$(curl -s -X POST $B/api/trade/order -H "$H" -H "$J" -d "{\"symbol\":\"XAUUSD\",\"action\":\"BUY\",\"volume\":0.01,\"sl\":$SL}" | python3 -c "import sys,json; print(json.load(sys.stdin)['ticket'])")
+   echo "UTC now:         $(date -u '+%Y-%m-%d %H:%M:%S')"
+   echo "broker's clock:  $(curl -s localhost:5001/positions -H 'Authorization: Bearer mytoken' | python3 -c "import sys,json; print(json.load(sys.stdin)['positions'][-1]['open_time'])")"
+   echo "backend reports: $(curl -s $B/api/mt5/positions -H "$H" | python3 -c "import sys,json; print(json.load(sys.stdin)['positions'][-1]['open_time'])")"
+   curl -s -X POST $B/api/trade/close -H "$H" -H "$J" -d "{\"ticket\":$T}" -o /dev/null
+   curl -s "$B/api/mt5/history?hours=1" -H "$H" | python3 -c "import sys,json; [print('closing deal:  ', d['time'], 'reason', d['reason']) for d in json.load(sys.stdin)['deals'] if d['position_id']==$T and d['entry']=='CLOSE']"
+   ```
+   Expect the broker's clock 3 hours ahead of UTC now, and the backend's time and the closing deal matching UTC now. The reason reads `expert`, which is how the broker marks a close sent by software.
+
+5. Candles arrive in UTC:
+   ```bash
+   curl -s -X POST $B/api/mt5/data/latest -H "$H" -H "$J" -d '{"symbol":"XAUUSD","timeframe":"15m","count":2}' | python3 -c "
+   import sys, json, datetime
+   t = json.load(sys.stdin)['data'][-1]['time']
+   print('latest 15m candle opened at', datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime('%H:%M'), 'UTC')"
+   date -u '+now it is %H:%M UTC'
+   ```
+   Expect the candle within the last 15 minutes, not 3 hours ahead.
+
+6. The brake switch on the Autopilot page. T3, once the checks above are done:
+   ```bash
+   cd ~/dev/Ai_quant_station/frontend && npm run dev
+   ```
+   Open http://localhost:5173 as admin and go to Autopilot. Next to Max Daily Loss there is a tick box, "Autopilot daily loss brake ($)", with an explanation underneath. Untick it: the amount greys out. Start the autopilot and stop it again, which saves the settings, then reload the page. The box should stay unticked. Tick it again, start and stop, and reload once more.
+
+**Negative controls.** Claude ran these before handover. Each failed where stated.
+
+- In `backend/app/api/autopilot.py`, narrow the loop's `except Exception` to `except ZeroDivisionError`: `test_an_error_does_not_end_the_loop` fails.
+- In `_daily_totals`, count profit by `executed_at` instead of `closed_at`: 2 failures.
+- In `_loop_iteration`, set `state["running"] = False` when the brake is hit, as the old code did: `test_the_brake_pauses_and_resumes_the_next_day` fails.
+- In `backend/app/core/mt5_connector.py`, stop converting deal times: 2 failures.
+- In `backend/app/core/trade_outcome.py`, guess from `"sl" in comment` again: `test_a_comment_mentioning_sl_is_not_a_stop` fails.
+- In `backend/app/core/broker_clock.py`, make `epoch_to_utc` return its input: 2 failures.
+- In `backend/app/api/execute.py`, drop `unit='s'`: `test_sandbox_candles_are_in_this_century` fails.
+- In `mt5_connector/connector.py`: trusting a price that has not moved, dropping the 5-minute tolerance, or dropping the deal reason each fail 1 test.

@@ -348,9 +348,14 @@ Flow:
     7. Loop until stopped
 
   Safety limits enforced:
-    → max_trades_per_day (stops after limit)
-    → max_daily_loss (stops if daily P&L below threshold)
-    → Daily counters reset at midnight UTC
+    → max_trades_per_day (skips cycles after the limit)
+    → daily loss brake: max_daily_loss on the autopilot's own trades closed
+      today (UTC). Pauses until 00:00 UTC, then resumes by itself. Can be
+      switched off; the account-wide limit in the risk gate applies either way
+    → Both counts are read from the database every cycle
+    → An error in one cycle is logged and the next cycle still runs; if the
+      loop ever ends unexpectedly, the status shows it stopped, with the reason
+    → Stop and target hits come from the broker's deal reason (core/trade_outcome.py)
 
   Settings panel:
     → Symbol, lot size, interval, provider, model
@@ -578,11 +583,18 @@ through its own weaker runner in `backtest.py`, not through this sandbox.
 
 ## MT5 Broker Timezone Handling
 
-Brokers often return timestamps in their local timezone (UTC+2, UTC+3), not UTC.
+MT5 stamps everything in the broker's server time (often UTC+2 or UTC+3, moving
+with summer time). The backend works in real UTC throughout.
 
-- Set `MT5_BROKER_UTC_OFFSET=2` in `.env` if your broker uses UTC+2
-- Set to `0` if your broker returns UTC timestamps
-- The offset is subtracted from MT5 timestamps before storing in parquet files
+- `core/mt5_connector.py` converts at the boundary, in one place: deal times,
+  position open times, candle times, and range queries on the way out. No other
+  module converts anything
+- `core/broker_clock.py` learns the offset from the connector's `/clock`, which
+  compares the latest price time with UTC and answers only while prices are live.
+  It follows summer time by itself, and keeps the last good reading when the market is closed
+- `MT5_BROKER_UTC_OFFSET` in `.env` is only the fallback before the first reading,
+  for example after a restart at the weekend. A warning is logged if it disagrees
+- `/api/mt5/health` shows the offset in use and where it came from
 
 ## Architecture Decisions
 
@@ -606,7 +618,7 @@ Brokers often return timestamps in their local timezone (UTC+2, UTC+3), not UTC.
 1. **No HTTPS** in the nginx config. Needed before anything is exposed.
 2. **Single worker only.** Autopilot state and login throttling live in process memory.
 3. **The sandbox is not a security boundary.** See the sandbox section above.
-4. **MT5 times are broker server time.** The connector reports them unchanged. Only the price sync converts them to UTC with `MT5_BROKER_UTC_OFFSET`, so autopilot close times are stored a few hours off (finding 22, step 10).
+4. **Records made before step 10 keep broker time.** Autopilot close times and durations stored earlier are a few hours off. They were left as they are; the live database's history is handled in the step 14 plan.
 5. **`pandas_ta` replaced with `ta`**: different API, AI prompts updated accordingly.
 6. **Retrieval runs only in the AI Analyst chat.** The autopilot does not use past analyses.
 

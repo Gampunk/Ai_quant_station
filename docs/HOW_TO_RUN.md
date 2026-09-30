@@ -25,7 +25,7 @@ Set these in `backend/.env`:
 | `DATABASE_URL` | no | Defaults to a SQLite file, `backend/finance_engine.db` |
 | `MT5_CONNECTOR_URL` | for trading | For example `http://127.0.0.1:5001` |
 | `MT5_API_TOKEN` | for trading | Must match the connector's token |
-| `MT5_BROKER_UTC_OFFSET` | for price sync | Hours the broker's server clock is ahead of UTC, for example 2 for UTC+2 |
+| `MT5_BROKER_UTC_OFFSET` | no | Hours the broker's server clock is ahead of UTC, for example 2. Only a fallback: the backend detects the real offset while prices are live |
 | AI provider keys | no | `NVIDIA_API_KEY`, `GROQ_API_KEY` and others. Users can also save their own on the Settings page |
 
 Start it:

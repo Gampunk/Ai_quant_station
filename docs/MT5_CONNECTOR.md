@@ -39,6 +39,7 @@ All settings are environment variables. There are no command-line options.
 | `MT5_MAX_VOLUME` | `1.0` | The largest order it sends, in lots. Larger orders are refused with 403, whatever the backend asks. The backend's own risk limits sit in front of this |
 | `MT5_ENABLE_DOCS` | `false` | Serve the interactive `/docs` page, which can place orders. Keep it off anywhere reachable |
 | `MT5_TERMINAL_PATH` | none | Path to `terminal64.exe` when several terminals are installed |
+| `MT5_CLOCK_SYMBOLS` | `XAUUSD,EURUSD,BTCUSD` | Symbols whose latest price reveals the broker's clock for `/clock`. Include one that trades at weekends if your broker has one |
 | `CORS_ORIGINS` | local dev ports | Browser origins allowed to call it |
 
 ## Start
