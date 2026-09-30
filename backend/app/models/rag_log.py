@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Index
+from sqlalchemy import Column, Integer, String, DateTime, Index, ForeignKey, JSON
 from datetime import datetime, timezone
 from ..core.database import Base
 
@@ -15,7 +15,13 @@ class RagLog(Base):
     __tablename__ = "rag_logs"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    cycle_id = Column(String(36), nullable=True, index=True)
     symbol = Column(String, index=True)
+    source = Column(String, nullable=True)
+    query_hash = Column(String(64), nullable=True)
+    context_hash = Column(String(64), nullable=True)
+    selected_memories = Column(JSON, nullable=True)
     similar_count = Column(Integer, default=0)
     top_count = Column(Integer, default=0)
     losers_count = Column(Integer, default=0)

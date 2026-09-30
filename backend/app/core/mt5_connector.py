@@ -59,10 +59,18 @@ class MT5ConnectorClient:
     async def get_positions(self) -> Dict[str, Any]:
         """Get open positions."""
         return await self._request("GET", "/positions")
+
+    async def get_orders(self) -> Dict[str, Any]:
+        """Get currently active/pending orders."""
+        return await self._request("GET", "/orders")
     
     async def get_history(self, hours: int = 0) -> Dict[str, Any]:
         """Get trade history."""
         return await self._request("GET", f"/history?hours={hours}")
+
+    async def get_order_history(self, hours: int = 0) -> Dict[str, Any]:
+        """Get historical order states, including cancelled and expired orders."""
+        return await self._request("GET", f"/history/orders?hours={hours}")
     
     async def place_order(self, order_data: Dict[str, Any]) -> Dict[str, Any]:
         """Place an order."""

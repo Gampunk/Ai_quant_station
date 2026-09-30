@@ -655,7 +655,9 @@ Last 10 candles:
                     None
                 )
                 if last_user_msg:
-                    rag_context = await build_rag_context(chat_req.symbol, last_user_msg)
+                    rag_context = await build_rag_context(
+                        chat_req.symbol, last_user_msg, user_id=current_user["id"], source="ai_analyst"
+                    )
             except Exception as e:
                 logger.warning(f"RAG context build error: {e}")
 

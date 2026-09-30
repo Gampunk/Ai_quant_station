@@ -383,20 +383,37 @@ async def place_order(order: OrderRequest, authorization: str = Header("")):
     
     result = mt5.order_send(request)
     
-    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+    accepted_retcodes = {
+        mt5.TRADE_RETCODE_DONE,
+        getattr(mt5, "TRADE_RETCODE_PLACED", -1),
+        getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", -1),
+    }
+    if result is None or result.retcode not in accepted_retcodes:
         raise HTTPException(status_code=400, detail=f"Order failed: {result.comment if result else 'Unknown'}")
+
+    retcode = result.retcode
+    order_status = (
+        "placed" if retcode == getattr(mt5, "TRADE_RETCODE_PLACED", -1)
+        else "partially_filled" if retcode == getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", -1)
+        else "filled"
+    )
     
     return {
         "success": True,
         "ticket": result.order,
+        "order_ticket": result.order,
         "deal": result.deal,
+        "deal_ticket": result.deal,
+        "retcode": retcode,
+        "order_status": order_status,
+        "is_pending": is_pending,
         "symbol": order.symbol,
         "volume": volume,
         "price": result.price,
         "sl": sl,
         "tp": tp,
         "comment": result.comment,
-        "position": result.order
+        "position": getattr(result, "position", 0) or None
     }
 
 
@@ -568,12 +585,41 @@ async def get_history(hours: int = 0, authorization: str = Header("")):
     
     deal_list = []
     for deal in deals:
-        entry_label = {0: "OPEN", 1: "CLOSE", 2: "ROLLOVER", 3: "SPLIT"}.get(deal.entry, "UNKNOWN")
-        if deal.entry not in (0, 1, 2, 3):
+        entry_labels = {
+            getattr(mt5, "DEAL_ENTRY_IN", 0): "OPEN",
+            getattr(mt5, "DEAL_ENTRY_OUT", 1): "CLOSE",
+            getattr(mt5, "DEAL_ENTRY_INOUT", 2): "INOUT",
+            getattr(mt5, "DEAL_ENTRY_OUT_BY", 3): "OUT_BY",
+        }
+        reason_names = {
+            getattr(mt5, "DEAL_REASON_CLIENT", 0): "CLIENT",
+            getattr(mt5, "DEAL_REASON_MOBILE", 1): "MOBILE",
+            getattr(mt5, "DEAL_REASON_WEB", 2): "WEB",
+            getattr(mt5, "DEAL_REASON_EXPERT", 3): "EXPERT",
+            getattr(mt5, "DEAL_REASON_SL", 4): "SL",
+            getattr(mt5, "DEAL_REASON_TP", 5): "TP",
+            getattr(mt5, "DEAL_REASON_SO", 6): "STOP_OUT",
+            getattr(mt5, "DEAL_REASON_ROLLOVER", -99): "ROLLOVER",
+        }
+        entry_label = entry_labels.get(deal.entry)
+        if entry_label is None:
             continue
+        reason_code = int(getattr(deal, "reason", -1))
+        reason_label = reason_names.get(reason_code)
+        if reason_label is None:
+            for code_name in ("DEAL_REASON_VMARGIN", "DEAL_REASON_SPLIT", "DEAL_REASON_CORPORATE_ACTION"):
+                code = getattr(mt5, code_name, None)
+                if code is not None and reason_code == int(code):
+                    reason_label = code_name.removeprefix("DEAL_REASON_")
+                    break
         
         deal_list.append({
             "ticket": deal.order,
+            "deal_ticket": deal.ticket,
+            "order_ticket": deal.order,
+            "reason_code": reason_code,
+            "reason": reason_label or "UNKNOWN",
+            "entry_code": int(deal.entry),
             "symbol": deal.symbol,
             "direction": "BUY" if deal.type == mt5.DEAL_TYPE_BUY else "SELL",
             "volume": deal.volume,
@@ -583,11 +629,83 @@ async def get_history(hours: int = 0, authorization: str = Header("")):
             "commission": deal.commission,
             "comment": deal.comment or "",
             "position_id": deal.position_id,
+            "magic": int(getattr(deal, "magic", 0) or 0),
             "time": datetime.utcfromtimestamp(deal.time).strftime('%Y-%m-%d %H:%M:%S'),
+            "time_msc": int(getattr(deal, "time_msc", 0) or 0),
             "entry": entry_label
         })
     
     return {"success": True, "count": len(deal_list), "deals": deal_list}
+
+
+def _serialize_order(order, is_active: bool = False):
+    state_names = {
+        getattr(mt5, "ORDER_STATE_STARTED", -101): "started",
+        getattr(mt5, "ORDER_STATE_PLACED", -102): "placed",
+        getattr(mt5, "ORDER_STATE_CANCELED", -103): "cancelled",
+        getattr(mt5, "ORDER_STATE_PARTIAL", -104): "partially_filled",
+        getattr(mt5, "ORDER_STATE_FILLED", -105): "filled",
+        getattr(mt5, "ORDER_STATE_REJECTED", -106): "rejected",
+        getattr(mt5, "ORDER_STATE_EXPIRED", -107): "expired",
+        getattr(mt5, "ORDER_STATE_REQUEST_ADD", -108): "request_add",
+        getattr(mt5, "ORDER_STATE_REQUEST_MODIFY", -109): "request_modify",
+        getattr(mt5, "ORDER_STATE_REQUEST_CANCEL", -110): "request_cancel",
+    }
+    type_names = {
+        getattr(mt5, "ORDER_TYPE_BUY", -201): "buy",
+        getattr(mt5, "ORDER_TYPE_SELL", -202): "sell",
+        getattr(mt5, "ORDER_TYPE_BUY_LIMIT", -203): "buy_limit",
+        getattr(mt5, "ORDER_TYPE_SELL_LIMIT", -204): "sell_limit",
+        getattr(mt5, "ORDER_TYPE_BUY_STOP", -205): "buy_stop",
+        getattr(mt5, "ORDER_TYPE_SELL_STOP", -206): "sell_stop",
+        getattr(mt5, "ORDER_TYPE_BUY_STOP_LIMIT", -207): "buy_stop_limit",
+        getattr(mt5, "ORDER_TYPE_SELL_STOP_LIMIT", -208): "sell_stop_limit",
+    }
+    setup_time = getattr(order, "time_setup", None)
+    done_time = getattr(order, "time_done", None)
+    return {
+        "ticket": int(order.ticket), "order_ticket": int(order.ticket),
+        "symbol": order.symbol, "status": state_names.get(order.state, "unknown"),
+        "is_active": is_active,
+        "state_code": int(order.state), "type": type_names.get(order.type, "unknown"),
+        "volume_initial": float(order.volume_initial), "volume_current": float(order.volume_current),
+        "price_open": float(order.price_open), "price_current": float(order.price_current),
+        "sl": float(order.sl) if order.sl else None, "tp": float(order.tp) if order.tp else None,
+        "position_id": int(getattr(order, "position_id", 0) or 0) or None,
+        "magic": int(getattr(order, "magic", 0) or 0), "comment": getattr(order, "comment", "") or "",
+        "setup_time": datetime.fromtimestamp(setup_time).strftime('%Y-%m-%d %H:%M:%S') if setup_time else None,
+        "done_time": datetime.fromtimestamp(done_time).strftime('%Y-%m-%d %H:%M:%S') if done_time else None,
+    }
+
+
+@app.get("/orders")
+async def get_orders(authorization: str = Header("")):
+    """Get currently active MT5 orders, including unfilled pending orders."""
+    verify_auth(authorization)
+    if not mt5_initialized:
+        raise HTTPException(status_code=400, detail="MT5 not initialized")
+    orders = mt5.orders_get()
+    if orders is None:
+        error = mt5.last_error()
+        raise HTTPException(status_code=502, detail=f"Could not read active orders: {error}")
+    serialized = [_serialize_order(order, is_active=True) for order in orders]
+    return {"success": True, "count": len(serialized), "orders": serialized}
+
+
+@app.get("/history/orders")
+async def get_order_history(hours: int = 0, authorization: str = Header("")):
+    """Get historical orders to observe fills, cancellation, rejection, and expiry."""
+    verify_auth(authorization)
+    if not mt5_initialized:
+        raise HTTPException(status_code=400, detail="MT5 not initialized")
+    from_time = datetime.now() - timedelta(hours=hours) if hours > 0 else datetime(2000, 1, 1)
+    to_time = datetime.now() + timedelta(days=5)
+    orders = mt5.history_orders_get(from_time, to_time)
+    if orders is None:
+        error = mt5.last_error()
+        raise HTTPException(status_code=502, detail=f"Could not read order history: {error}")
+    serialized = [_serialize_order(order, is_active=False) for order in orders]
+    return {"success": True, "count": len(serialized), "orders": serialized}
 
 
 @app.get("/data/range/{symbol}")

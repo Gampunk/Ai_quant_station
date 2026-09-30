@@ -17,7 +17,7 @@ from sqlalchemy import select
 
 from ..core.config import settings
 from ..core.database import AsyncSessionLocal
-from ..models.ai_memory import TradeRecord
+from ..models.ai_memory import TradeRecord, AutopilotSettings
 
 logger = logging.getLogger(__name__)
 
@@ -214,8 +214,37 @@ def start_trade_reconciler():
             max_instances=1,
             coalesce=True,
         )
+        # Autopilot trades have their own lifecycle table and may close while
+        # Autopilot is stopped, so reconcile them on the same server schedule.
+        scheduler.add_job(
+            reconcile_autopilot_trades,
+            "interval",
+            minutes=5,
+            id="autopilot-trade-reconcile",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
         scheduler.start()
     logger.info("[Reconcile] Trade reconciler started (every 5 min)")
+
+
+async def reconcile_autopilot_trades() -> int:
+    """Sync Autopilot closes periodically even when its decision loop is stopped."""
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(AutopilotSettings.user_id))
+            user_ids = result.scalars().all()
+        if not user_ids:
+            return 0
+        from ..api.autopilot import sync_trade_results
+        total = 0
+        for user_id in user_ids:
+            total += await sync_trade_results(int(user_id))
+        return total
+    except Exception:
+        logger.warning("[Reconcile] Autopilot trade sync failed", exc_info=True)
+        return 0
 
 
 def shutdown_reconciler():

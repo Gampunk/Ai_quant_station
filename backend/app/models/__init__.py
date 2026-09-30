@@ -20,6 +20,10 @@ from .ai_memory import (
     DefaultPromptStrategy,
     AutopilotSettings,
     AiCallLog,
+    AutopilotCycle,
+    AutopilotLog,
+    AutopilotExecutionAttempt,
+    AutopilotOrderEvent,
 )
 from .historical_lab import HistoricalBacktest
 from .strategy_score import StrategyScore
@@ -45,4 +49,8 @@ __all__ = [
     "StrategyScore",
     "ChatEmbedding", "RagLog",
     "AiCallLog",
+    "AutopilotCycle",
+    "AutopilotLog",
+    "AutopilotExecutionAttempt",
+    "AutopilotOrderEvent",
 ]

@@ -175,11 +175,16 @@ class AutopilotTrade(Base):
     order_type = Column(String, default="market")
 
     mt5_ticket = Column(BigInteger, nullable=True, index=True)
+    mt5_order_ticket = Column(BigInteger, nullable=True, index=True)
+    order_status = Column(String, nullable=True, index=True)
+    order_completed_at = Column(DateTime(timezone=True), nullable=True)
     executed_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     execution_price = Column(Float, nullable=True)
     execution_status = Column(String, default="pending")
 
     result = Column(String, nullable=True)
+    exit_reason = Column(String, nullable=True, index=True)
+    exit_reason_source = Column(String, nullable=True)
     profit = Column(Float, nullable=True)
     exit_price = Column(Float, nullable=True)
     closed_at = Column(DateTime(timezone=True), nullable=True)
@@ -210,6 +215,7 @@ class AutopilotTrade(Base):
     slippage_pips = Column(Float, nullable=True)
 
     cycle_number = Column(Integer, nullable=True, index=True)
+    cycle_id = Column(String(36), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
@@ -310,6 +316,7 @@ class AutopilotLog(Base):
     level = Column(String(20), nullable=False, index=True)
     message = Column(Text, nullable=False)
     cycle_number = Column(Integer, nullable=True, index=True)
+    cycle_id = Column(String(36), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
@@ -327,6 +334,7 @@ class AiCallLog(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     prompt_number = Column(Integer, nullable=True, index=True)
     cycle_number = Column(Integer, nullable=True, index=True)
+    cycle_id = Column(String(36), nullable=True, index=True)
     provider = Column(String, nullable=True)
     model = Column(String, nullable=True)
     prompt_tokens = Column(Integer, default=0)
@@ -351,6 +359,7 @@ class AutopilotExecutionAttempt(Base):
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     cycle_number = Column(Integer, nullable=True, index=True)
+    cycle_id = Column(String(36), nullable=True, index=True)
     symbol = Column(String, nullable=False)
     direction = Column(String, nullable=False)
     order_type = Column(String, default="market")
@@ -369,4 +378,89 @@ class AutopilotExecutionAttempt(Base):
     __table_args__ = (
         Index("ix_autopilot_exec_attempts_user_cycle", "user_id", "cycle_number"),
         Index("ix_autopilot_exec_attempts_user_outcome", "user_id", "outcome"),
+    )
+
+
+class AutopilotCycle(Base):
+    """One durable, joinable record for each started autopilot analysis cycle."""
+    __tablename__ = "autopilot_cycles"
+
+    cycle_id = Column(String(36), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    cycle_number = Column(Integer, nullable=False)
+    symbol = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="running", index=True)
+    outcome = Column(String, nullable=True, index=True)
+    outcome_reason = Column(Text, nullable=True)
+    prompt_number = Column(Integer, nullable=True, index=True)
+    prompt_text = Column(Text, nullable=True)
+    prompt_version = Column(String(64), nullable=True)
+    provider = Column(String, nullable=True)
+    model = Column(String, nullable=True)
+    market_regime = Column(String, nullable=True, index=True)
+    regime_details = Column(JSON, nullable=True)
+    selection_context = Column(JSON, nullable=True)
+    market_timeframe = Column(String, nullable=True)
+    candles_loaded = Column(Integer, nullable=True)
+    market_data_hash = Column(String(64), nullable=True)
+    analysis_prompt_hash = Column(String(64), nullable=True)
+    decision_source = Column(String, nullable=True)
+    rag_context_included = Column(Boolean, nullable=True)
+    rag_context_chars = Column(Integer, nullable=True)
+    atr_14 = Column(Float, nullable=True)
+    avg_atr_20 = Column(Float, nullable=True)
+    setup = Column(JSON, nullable=True)
+    requested_lot_size = Column(Float, nullable=True)
+    final_lot_size = Column(Float, nullable=True)
+    execution_status = Column(String, nullable=True)
+    mt5_ticket = Column(BigInteger, nullable=True)
+    mt5_order_ticket = Column(BigInteger, nullable=True)
+    order_status = Column(String, nullable=True, index=True)
+    order_completed_at = Column(DateTime(timezone=True), nullable=True)
+    trade_result = Column(String, nullable=True)
+    exit_reason = Column(String, nullable=True)
+    exit_reason_source = Column(String, nullable=True)
+    realized_profit = Column(Float, nullable=True)
+    trade_closed_at = Column(DateTime(timezone=True), nullable=True)
+    duration_minutes = Column(Integer, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_autopilot_cycles_user_started", "user_id", "started_at"),
+        Index("ix_autopilot_cycles_user_prompt", "user_id", "prompt_number"),
+    )
+
+
+class AutopilotOrderEvent(Base):
+    """Deduplicated broker event ledger linked to an Autopilot prompt/cycle."""
+    __tablename__ = "autopilot_order_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_key = Column(String(180), nullable=False, unique=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    autopilot_trade_id = Column(Integer, ForeignKey("autopilot_trades.id", ondelete="SET NULL"), nullable=True, index=True)
+    cycle_id = Column(String(36), nullable=True, index=True)
+    prompt_number = Column(Integer, nullable=True, index=True)
+    symbol = Column(String, nullable=True)
+    event_type = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=True)
+    order_ticket = Column(BigInteger, nullable=True, index=True)
+    deal_ticket = Column(BigInteger, nullable=True, index=True)
+    position_id = Column(BigInteger, nullable=True, index=True)
+    entry_type = Column(String, nullable=True)
+    reason_code = Column(Integer, nullable=True)
+    reason = Column(String, nullable=True)
+    volume = Column(Float, nullable=True)
+    price = Column(Float, nullable=True)
+    profit = Column(Float, nullable=True)
+    swap = Column(Float, nullable=True)
+    commission = Column(Float, nullable=True)
+    broker_time = Column(DateTime(timezone=True), nullable=True, index=True)
+    comment = Column(String(256), nullable=True)
+    observed_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+
+    __table_args__ = (
+        Index("ix_autopilot_order_events_user_cycle", "user_id", "cycle_id"),
+        Index("ix_autopilot_order_events_user_prompt", "user_id", "prompt_number"),
     )

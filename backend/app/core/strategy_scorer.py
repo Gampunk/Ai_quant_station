@@ -65,6 +65,9 @@ async def update_strategy_scores():
                        COUNT(*) as total_trades,
                        SUM(CASE WHEN profit > 0 THEN 1 ELSE 0 END) as winning_trades,
                        SUM(profit) as total_pnl,
+                       SUM(CASE WHEN profit > 0 THEN profit ELSE 0 END) as gross_profit,
+                       SUM(CASE WHEN profit < 0 THEN ABS(profit) ELSE 0 END) as gross_loss,
+                       SUM(CASE WHEN profit = 0 THEN 1 ELSE 0 END) as breakeven_trades,
                        AVG(CASE WHEN profit > 0 THEN profit END) as avg_profit,
                        AVG(CASE WHEN profit < 0 THEN profit END) as avg_loss,
                        AVG(confidence) as avg_confidence,
@@ -125,17 +128,16 @@ async def update_strategy_scores():
                 pnl = row.total_pnl or 0.0
                 avg_profit = row.avg_profit
                 avg_loss = row.avg_loss
+                gross_profit = float(row.gross_profit or 0.0)
+                gross_loss = float(row.gross_loss or 0.0)
                 avg_conf = row.avg_confidence
                 first = _ensure_aware(row.first_used)
                 last = _ensure_aware(row.last_used)
                 win_rate = (wins / total * 100) if total > 0 else 0.0
-                losses = total - wins
-                gross_profit = (wins * avg_profit) if avg_profit and wins > 0 else 0
-                gross_loss = (losses * avg_loss) if avg_loss and losses > 0 else 0
-                if gross_loss < 0:
-                    profit_factor = round(abs(gross_profit / gross_loss), 2) if gross_profit > 0 else 0.0
+                if gross_loss > 0:
+                    profit_factor = round(gross_profit / gross_loss, 2)
                 else:
-                    profit_factor = None
+                    profit_factor = float("inf") if gross_profit > 0 else None
 
                 token_key = (prompt_text, symbol, direction)
                 token_data = token_map.get(token_key, {})

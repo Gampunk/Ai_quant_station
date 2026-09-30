@@ -91,12 +91,15 @@ class TestRagQueries:
         db_session.add(ChatEmbedding(chat_memory_id=chat.id, embedding=_vec(1.0)))
         await db_session.commit()
 
-        results = await find_similar_analyses([1.0, 0.5, 0.1], "XAUUSD")
+        results = await find_similar_analyses([1.0, 0.5, 0.1], "XAUUSD", user_id=1)
         assert len(results) == 1
-        score, row = results[0]
+        score, row, similarity, profit_component, feedback_component = results[0]
         assert "Support holding" in row.content
-        # identical vectors → similarity 1.0 → score = 0.5*1 + 0.3*0 + 0.2*0
-        assert score == pytest.approx(0.5, abs=1e-3)
+        # Identical vectors score 0.80 under the current relevance weighting.
+        assert score == pytest.approx(0.8, abs=1e-3)
+        assert similarity == pytest.approx(1.0, abs=1e-3)
+        assert profit_component is None
+        assert feedback_component is None
 
     async def test_find_similar_filters_by_symbol(self, db_session):
         db_session.add(ChatMemory(user_id=1, symbol="BTCUSD", role="assistant",
@@ -106,7 +109,7 @@ class TestRagQueries:
         db_session.add(ChatEmbedding(chat_memory_id=chat.id, embedding=_vec(1.0)))
         await db_session.commit()
 
-        results = await find_similar_analyses([1.0, 0.5, 0.1], "XAUUSD")
+        results = await find_similar_analyses([1.0, 0.5, 0.1], "XAUUSD", user_id=1)
         assert results == []
 
     async def test_find_similar_matches_broker_suffix(self, db_session):
@@ -118,12 +121,12 @@ class TestRagQueries:
         db_session.add(ChatEmbedding(chat_memory_id=chat.id, embedding=_vec(1.0)))
         await db_session.commit()
 
-        results = await find_similar_analyses([1.0, 0.5, 0.1], "XAUUSD")
+        results = await find_similar_analyses([1.0, 0.5, 0.1], "XAUUSD", user_id=1)
         assert len(results) == 1
         assert "gold breakout" in results[0][1].content
 
         # reverse direction: suffixed query finds plain-symbol chats too
-        results_rev = await find_similar_analyses([1.0, 0.5, 0.1], "XAUUSD.p")
+        results_rev = await find_similar_analyses([1.0, 0.5, 0.1], "XAUUSD.p", user_id=1)
         assert len(results_rev) == 1
         assert "gold breakout" in results_rev[0][1].content
 
