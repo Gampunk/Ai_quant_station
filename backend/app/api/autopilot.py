@@ -30,6 +30,7 @@ from ..models.strategy_score import StrategyScore
 from ..core.providers import estimate_cost
 from ..core.mt5_connector import ConnectorError, connector_client
 from ..core.risk import RiskRefused, submit_order
+from ..core.trade_outcome import close_result
 
 router = APIRouter(prefix="/autopilot", tags=["Autopilot"])
 
@@ -76,25 +77,35 @@ def _ensure_aware(dt: Optional[datetime]) -> Optional[datetime]:
     return dt
 
 
-async def _rebuild_daily_state(user_id: int):
-    """Rebuild daily counters from DB after server restart so safety limits aren't reset."""
+async def _daily_totals(user_id: int) -> tuple[int, float]:
+    """Today's autopilot trades opened, and profit from trades closed, in UTC. Read from the database.
+
+    These used to be counters in memory, rebuilt at start-up from trades opened
+    today but added to during the day from trades closed today, so a trade could
+    count on the wrong day, and closes found by the start-up back-sync were never
+    counted at all.
+    """
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow = today_start + timedelta(days=1)
+    async with AsyncSessionLocal() as db:
+        opened = (await db.execute(select(func.count(AutopilotTrade.id)).where(
+            AutopilotTrade.user_id == user_id,
+            AutopilotTrade.executed_at >= today_start, AutopilotTrade.executed_at < tomorrow,
+        ))).scalar_one()
+        closed_pnl = (await db.execute(select(func.coalesce(func.sum(AutopilotTrade.profit), 0)).where(
+            AutopilotTrade.user_id == user_id, AutopilotTrade.result.is_not(None),
+            AutopilotTrade.closed_at >= today_start, AutopilotTrade.closed_at < tomorrow,
+        ))).scalar_one()
+    return int(opened), round(float(closed_pnl), 2)
+
+
+async def _refresh_daily_stats(user_id: int) -> tuple[int, float]:
     state = _get_state(user_id)
-    now = datetime.now(timezone.utc)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    try:
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(AutopilotTrade).where(
-                    AutopilotTrade.user_id == user_id,
-                    AutopilotTrade.executed_at >= today_start
-                )
-            )
-            today_trades = result.scalars().all()
-        state["stats"]["daily_trade_count"] = len(today_trades)
-        state["stats"]["daily_pnl"] = round(sum(t.profit or 0 for t in today_trades), 2)
-        state["stats"]["daily_reset_date"] = now.date().isoformat()
-    except Exception:
-        pass
+    count, pnl = await _daily_totals(user_id)
+    state["stats"]["daily_trade_count"] = count
+    state["stats"]["daily_pnl"] = pnl
+    state["stats"]["daily_reset_date"] = datetime.now(timezone.utc).date().isoformat()
+    return count, pnl
 
 
 async def _rebuild_stats(user_id: int):
@@ -470,17 +481,6 @@ async def _log_ai_call(
             return log.id
     except Exception:
         return None
-
-
-async def check_open_positions(user_id: int = 0):
-    try:
-        data = await connector_client.get_positions()
-        if data.get("success"):
-            return data.get("positions", [])
-    except Exception as e:
-        import traceback as _tb
-        add_log(user_id, f"check_open_positions error: {e}\n{_tb.format_exc()}", "ERROR")
-    return []
 
 
 def _infer_prompt_tags(prompt_text: str) -> dict:
@@ -882,26 +882,8 @@ async def run_autopilot_cycle(user_id: int):
     state["stats"]["last_run"] = datetime.now(timezone.utc).isoformat()
     add_log(user_id, f"=== Starting Cycle #{state['stats']['total_runs']} ===")
 
-    # Safety limits — persist across server restarts by reading from DB
-    today = datetime.now(timezone.utc).date()
-    if state["stats"]["daily_reset_date"] != str(today):
-        today_start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
-        today_end = today_start + timedelta(days=1)
-        async with AsyncSessionLocal() as db:
-            row = (await db.execute(
-                select(
-                    func.count(AutopilotTrade.id),
-                    func.coalesce(func.sum(AutopilotTrade.profit), 0),
-                ).where(
-                    AutopilotTrade.user_id == user_id,
-                    AutopilotTrade.executed_at >= today_start,
-                    AutopilotTrade.executed_at < today_end,
-                )
-            )).one()
-            state["stats"]["daily_trade_count"] = row[0]
-            state["stats"]["daily_pnl"] = float(row[1])
-        state["stats"]["daily_reset_date"] = str(today)
-
+    # Read from the database every cycle, so restarts and back-syncs cannot skew them.
+    await _refresh_daily_stats(user_id)
     if state["stats"]["daily_trade_count"] >= max_trades:
         add_log(user_id, f"Daily trade limit ({max_trades}) reached. Skipping.", "WARNING")
         state["stats"]["skipped_count"] += 1
@@ -1652,17 +1634,7 @@ async def sync_all_trades_from_mt5(user_id: int, hours: int = 720):
                 entry_price = opn.get("price", 0) or 0
                 direction = opn.get("direction", "BUY").upper()
                 entry_time_str = opn.get("time")
-                close_comment = (close.get("comment", "") or "").lower()
-
-                res_type = "MANUAL_CLOSE"
-                if "sl" in close_comment:
-                    res_type = "SL_HIT"
-                elif "tp" in close_comment:
-                    res_type = "TP_HIT"
-                elif profit > 0:
-                    res_type = "PROFIT"
-                else:
-                    res_type = "LOSS"
+                res_type = close_result(close)
 
                 def _parse_ts(s):
                     if not s:
@@ -1764,21 +1736,11 @@ async def sync_trade_results(user_id: int):
                     profit = close_deal.get("profit", 0)
                     exit_price = close_deal.get("price")
                     closed_at_str = close_deal.get("time")
-                    comment = close_deal.get("comment", "").lower()
-                    res_type = "MANUAL_CLOSE"
-                    if "sl" in comment:
-                        res_type = "SL_HIT"
-                    elif "tp" in comment:
-                        res_type = "TP_HIT"
-                    elif profit > 0:
-                        res_type = "PROFIT"
-                    else:
-                        res_type = "LOSS"
+                    res_type = close_result(close_deal)
 
                     trade.profit = profit
                     trade.exit_price = exit_price
                     trade.result = res_type
-                    state["stats"]["daily_pnl"] = state["stats"].get("daily_pnl", 0) + profit
                     if closed_at_str:
                         trade.closed_at = _ensure_aware(datetime.strptime(closed_at_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc))
                         trade.executed_at = _ensure_aware(trade.executed_at)
@@ -1795,75 +1757,117 @@ async def sync_trade_results(user_id: int):
         add_log(user_id, f"Failed to sync trade results: {str(e)}", "ERROR")
 
 
-async def autopilot_loop(user_id: int):
+async def _settings_row(user_id: int):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
+        return result.scalar_one_or_none()
+
+
+def _loss_limit_hit(settings_row, daily_pnl: float) -> bool:
+    """The autopilot's own daily loss brake, a dollar amount on its own trades. Can be switched off."""
+    if settings_row is None or not getattr(settings_row, "daily_loss_limit_enabled", True):
+        return False
+    return settings_row.max_daily_loss is not None and daily_pnl <= settings_row.max_daily_loss
+
+
+async def _loop_iteration(user_id: int) -> None:
+    """One pass: cooldown, market hours, result sync, the daily brake, then a cycle."""
     state = _get_state(user_id)
-    await _rebuild_daily_state(user_id)
-    await _rebuild_stats(user_id)
-    # Full back-sync from MT5 history at startup (captures trades that were missed)
+    s = await _settings_row(user_id)
+    cooldown_mins = (s.cooldown_minutes or 0) if s else 0
+
+    last_trade = state.get("last_trade_time")
+    if cooldown_mins > 0 and last_trade:
+        elapsed_mins = (datetime.now(timezone.utc) - last_trade).total_seconds() / 60
+        if elapsed_mins < cooldown_mins:
+            add_log(user_id, f"Cooldown ({elapsed_mins:.0f}/{cooldown_mins} min). Skipping cycle.", "INFO")
+            state["stats"]["skipped_count"] += 1
+            return
+
+    if not await _is_market_open():
+        if not state.get("market_closed"):
+            add_log(user_id, "Market closed (Sat/Sun). Waiting until Sunday 23:00 UTC.", "INFO")
+            state["market_closed"] = True
+        state["stats"]["skipped_count"] += 1
+        return
+    state["market_closed"] = False
+
+    await sync_trade_results(user_id)
+    _, daily_pnl = await _refresh_daily_stats(user_id)
+    today = datetime.now(timezone.utc).date().isoformat()
+
+    if _loss_limit_hit(s, daily_pnl):
+        # Pause for the rest of the UTC day, log it once, and carry on tomorrow by itself.
+        # It used to switch the autopilot off for good while the page still said running.
+        if state.get("paused_day") != today:
+            add_log(user_id, f"Daily loss limit reached: {daily_pnl:+.2f} against {s.max_daily_loss:+.2f}. "
+                             "Paused until 00:00 UTC.", "WARNING")
+            state["paused_day"] = today
+        state["stats"]["paused_reason"] = f"Daily loss limit reached ({daily_pnl:+.2f}). Resumes at 00:00 UTC."
+        state["stats"]["skipped_count"] += 1
+        return
+    if state.get("paused_day"):
+        add_log(user_id, "Daily loss pause over. Resuming.", "INFO")
+        state["paused_day"] = None
+    state["stats"]["paused_reason"] = None
+
+    await run_autopilot_cycle(user_id)
+
+
+async def autopilot_loop(user_id: int):
+    """Run cycles until stopped. An error in one cycle is logged and the next cycle still runs.
+
+    Any unexpected error used to end this loop silently, leaving the page saying
+    running while nothing ran.
+    """
+    state = _get_state(user_id)
     try:
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
-            s = result.scalar_one_or_none()
-            if s and connector_client.configured:
-                await sync_all_trades_from_mt5(user_id)
-    except Exception:
-        pass
+        await _refresh_daily_stats(user_id)
+        await _rebuild_stats(user_id)
+        if connector_client.configured and await _settings_row(user_id):
+            await sync_all_trades_from_mt5(user_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        add_log(user_id, f"Start-up sync failed, continuing: {e}", "ERROR")
+
     try:
         while state["enabled"]:
             if state["running"]:
-                state["stats"]["daily_pnl"] = state["stats"].get("daily_pnl", 0)
-                max_loss = None
-                cooldown_mins = 0
-                async with AsyncSessionLocal() as db:
-                    result = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
-                    s = result.scalar_one_or_none()
-                    if s:
-                        max_loss = s.max_daily_loss
-                        cooldown_mins = s.cooldown_minutes or 0
-
-                # Cooldown check
-                last_trade = state.get("last_trade_time")
-                if cooldown_mins > 0 and last_trade:
-                    elapsed_mins = (datetime.now(timezone.utc) - last_trade).total_seconds() / 60
-                    if elapsed_mins < cooldown_mins:
-                        add_log(user_id, f"Cooldown ({elapsed_mins:.0f}/{cooldown_mins} min). Skipping cycle.", "INFO")
-                        state["stats"]["skipped_count"] += 1
-                        async with AsyncSessionLocal() as db:
-                            result = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
-                            s = result.scalar_one_or_none()
-                            interval = s.interval_seconds if s else 300
-                        if not state["enabled"]:
-                            break
-                        await asyncio.sleep(interval)
-                        continue
-
-                hit_loss_limit = False
-                if max_loss is not None and state["stats"]["daily_pnl"] <= max_loss:
-                    add_log(user_id, f"Daily loss limit (${max_loss}) reached. Stopping.", "WARNING")
-                    state["running"] = False
-                    hit_loss_limit = True
-
-                # Market open check — skip if XAUUSD is closed (weekend)
-                if not await _is_market_open():
-                    add_log(user_id, "Market closed (Sat/Sun). Skipping until Sunday 23:00 UTC.", "INFO")
-                    state["stats"]["skipped_count"] += 1
-                    await asyncio.sleep(3600)  # re-check every hour
-                    continue
-
-                await sync_trade_results(user_id)
-                if not hit_loss_limit:
-                    await run_autopilot_cycle(user_id)
-
-            async with AsyncSessionLocal() as db:
-                result = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
-                s = result.scalar_one_or_none()
-                interval = s.interval_seconds if s else 300
-            # Only sleep if we're still enabled — skip sleep if stop was requested mid-cycle
+                try:
+                    await _loop_iteration(user_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    import traceback as _tb
+                    state["stats"]["error_count"] += 1
+                    add_log(user_id, f"Cycle failed, the next one will still run: {e}\n{_tb.format_exc()}", "ERROR")
             if not state["enabled"]:
                 break
-            await asyncio.sleep(interval)
+            s = None
+            try:
+                s = await _settings_row(user_id)
+            except Exception:
+                pass
+            await asyncio.sleep(s.interval_seconds if s and s.interval_seconds else 300)
     except asyncio.CancelledError:
         add_log(user_id, "Autopilot loop cancelled.", "INFO")
+        raise
+
+
+def _watch_loop(user_id: int, task: "asyncio.Task") -> None:
+    """If the loop ever ends other than by Stop, say so and show it as stopped."""
+    def done(t: "asyncio.Task") -> None:
+        state = _get_state(user_id)
+        if t.cancelled():
+            return
+        error = t.exception()
+        if error is None and not state["enabled"]:
+            return
+        state["running"] = False
+        state["stats"]["stopped_reason"] = f"The autopilot loop stopped unexpectedly: {error or 'ended'}"
+        add_log(user_id, state["stats"]["stopped_reason"], "ERROR")
+    task.add_done_callback(done)
 
 
 # Pydantic models
@@ -1874,6 +1878,7 @@ class AutopilotConfig(BaseModel):
     max_trades_per_day: int = 10
     cooldown_minutes: int = 5
     max_daily_loss: float = -50.0
+    daily_loss_limit_enabled: bool = True
     symbol: str = "XAUUSD"
     provider: str = "nvidia"
     model: str = "qwen/qwen3.5-122b-a10b"
@@ -1982,7 +1987,9 @@ async def _start_autopilot_internal(user_id: int) -> bool:
         state["enabled"] = True
         state["running"] = True
         if state["task"] is None or state["task"].done():
+            state["stats"]["stopped_reason"] = None
             state["task"] = asyncio.create_task(autopilot_loop(user_id))
+            _watch_loop(user_id, state["task"])
     add_log(user_id, "Autopilot auto-restarted after server boot")
     return True
 
@@ -2011,7 +2018,9 @@ async def start_autopilot(current_user: dict = Depends(require_trader)):
         state["enabled"] = True
         state["running"] = True
         if state["task"] is None or state["task"].done():
+            state["stats"]["stopped_reason"] = None
             state["task"] = asyncio.create_task(autopilot_loop(user_id))
+            _watch_loop(user_id, state["task"])
 
     add_log(user_id, "Autopilot STARTED")
     return {"success": True, "message": "Autopilot started"}
@@ -2055,6 +2064,7 @@ async def get_status(current_user: dict = Depends(get_current_user)):
                 "enabled": settings_obj.enabled, "interval_seconds": settings_obj.interval_seconds,
                 "default_lot": settings_obj.default_lot, "max_trades_per_day": settings_obj.max_trades_per_day,
                 "cooldown_minutes": settings_obj.cooldown_minutes, "max_daily_loss": settings_obj.max_daily_loss,
+                "daily_loss_limit_enabled": settings_obj.daily_loss_limit_enabled,
                 "symbol": settings_obj.symbol, "provider": settings_obj.provider, "model": settings_obj.model,
                 "mt5_connected": settings_obj.mt5_connected,
                 "selected_prompts": settings_obj.selected_prompts or []
@@ -2105,6 +2115,7 @@ async def save_settings(
         settings_obj.max_trades_per_day = config.max_trades_per_day
         settings_obj.cooldown_minutes = config.cooldown_minutes
         settings_obj.max_daily_loss = config.max_daily_loss
+        settings_obj.daily_loss_limit_enabled = config.daily_loss_limit_enabled
         settings_obj.symbol = config.symbol
         settings_obj.provider = config.provider
         settings_obj.model = config.model

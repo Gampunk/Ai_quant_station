@@ -82,12 +82,7 @@ async def sync_mt5_to_parquet():
             # 3. Fetch data
             logger.info(f"[Sync] Fetching {symbol} from {start_dt} to {end_dt}...")
             raw_data = await fetch_ohlc_range(symbol, "1m", start_dt, end_dt)
-            # Convert broker-local timestamps to UTC
-            if raw_data and settings.MT5_BROKER_UTC_OFFSET != 0:
-                offset = settings.MT5_BROKER_UTC_OFFSET * 3600
-                for row in raw_data:
-                    if 'time' in row:
-                        row['time'] = row['time'] - offset
+            # Candle times arrive in UTC: the connector client converts broker time.
             
             if not raw_data:
                 logger.info(f"[Sync] No new candles found for {symbol}.")

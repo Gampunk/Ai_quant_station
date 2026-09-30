@@ -78,7 +78,9 @@ class Settings(BaseSettings):
 
     # MT5 broker UTC offset (brokers often return timestamps in local time)
     # Examples: UTC+2 = 2, UTC+3 = 3, UTC = 0. Set to 0 if your broker returns UTC.
-    MT5_BROKER_UTC_OFFSET: int = 0
+    # Hours the broker's server clock runs ahead of UTC. Only a fallback: the backend
+    # reads the real offset from the connector while prices are live (core/broker_clock.py).
+    MT5_BROKER_UTC_OFFSET: float = 0
 
     # Yahoo Finance (for market data)
     YAHOO_FINANCE_ENABLED: bool = True

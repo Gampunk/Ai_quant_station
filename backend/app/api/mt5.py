@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.database import get_db
 from ..core.mt5_connector import ConnectorError, connector_client
+from ..core.broker_clock import broker_clock
 from ..core.security import get_current_user, require_trader
 from ..models.market_data import MarketData
 from ..models.schemas import (
@@ -87,7 +88,9 @@ async def health_check(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail=f"Connector unavailable: {exc.detail}")
     # The connector reports "mt5_connected". This route used to read a key the
     # connector never sends, so it always said the terminal was not initialized.
-    return {"status": "running", "source": "connector", "mt5_initialized": bool(result.get("mt5_connected"))}
+    await connector_client.refresh_clock()
+    return {"status": "running", "source": "connector", "mt5_initialized": bool(result.get("mt5_connected")),
+            "broker_clock": broker_clock.status()}
 
 
 @router.post("/initialize")

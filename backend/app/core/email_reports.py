@@ -27,6 +27,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from ..core.config import settings
 from ..core.mt5_connector import connector_client
+from .trade_outcome import close_result
 
 logger = logging.getLogger(__name__)
 
@@ -119,18 +120,9 @@ async def _fetch_mt5_trades() -> list[dict] | None:
         prompt_match = re.search(r"P(\d+)", comment)
         prompt_number = int(prompt_match.group(1)) if prompt_match else None
 
-        close_comment = (close_deal.get("comment", "") or "").lower() if close_deal else ""
-        if close_deal:
-            if "sl" in close_comment:
-                res_type = "Loss"
-            elif "tp" in close_comment:
-                res_type = "Win"
-            elif profit > 0:
-                res_type = "Win"
-            else:
-                res_type = "Loss"
-        else:
-            res_type = "Open"
+        outcome = close_result(close_deal)
+        res_type = {"OPEN": "Open", "TP_HIT": "Win", "SL_HIT": "Loss", "STOP_OUT": "Loss"}.get(
+            outcome, "Win" if profit > 0 else "Loss")
 
         trades.append({
             "ticket": pid,
@@ -200,18 +192,9 @@ async def _fetch_weekly_mt5_trades() -> list[dict] | None:
         prompt_match = re.search(r"P(\d+)", comment)
         prompt_number = int(prompt_match.group(1)) if prompt_match else None
 
-        close_comment = (close_deal.get("comment", "") or "").lower() if close_deal else ""
-        if close_deal:
-            if "sl" in close_comment:
-                res_type = "Loss"
-            elif "tp" in close_comment:
-                res_type = "Win"
-            elif profit > 0:
-                res_type = "Win"
-            else:
-                res_type = "Loss"
-        else:
-            res_type = "Open"
+        outcome = close_result(close_deal)
+        res_type = {"OPEN": "Open", "TP_HIT": "Win", "SL_HIT": "Loss", "STOP_OUT": "Loss"}.get(
+            outcome, "Win" if profit > 0 else "Loss")
 
         trades.append({
             "ticket": pid,

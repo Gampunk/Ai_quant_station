@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Float, Text, ForeignKey, JSON, Boolean, BigInteger, Numeric, UniqueConstraint, Index
+from sqlalchemy import Column, Integer, String, DateTime, Float, Text, ForeignKey, JSON, Boolean, BigInteger, Numeric, UniqueConstraint, Index, true
 from datetime import datetime, timezone
 from ..core.database import Base
 
@@ -258,6 +258,8 @@ class AutopilotSettings(Base):
     cooldown_minutes = Column(Integer, default=5)
 
     max_daily_loss = Column(Float, default=-50.0)
+    # The autopilot's own daily loss brake can be switched off; the account-wide limit still applies.
+    daily_loss_limit_enabled = Column(Boolean, nullable=False, default=True, server_default=true())
 
     mt5_terminal_path = Column(String, nullable=True)
     mt5_connector_url = Column(String, nullable=True)

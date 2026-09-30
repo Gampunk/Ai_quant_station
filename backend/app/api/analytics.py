@@ -15,6 +15,7 @@ from ..core.config import settings
 from ..core.mt5_connector import connector_client
 from ..models.strategy_score import StrategyScore
 from ..models.ai_memory import AutopilotTrade
+from ..core.trade_outcome import close_result
 
 router = APIRouter(prefix="/analytics", tags=["User Analytics"])
 
@@ -112,18 +113,7 @@ async def get_reports(current_user: dict = Depends(get_current_user)):
                 prompt_match = __import__("re").search(r"P(\d+)", comment)
                 prompt_number = int(prompt_match.group(1)) if prompt_match else None
 
-                close_comment = (close_deal.get("comment", "") or "").lower() if close_deal else ""
-                if close_deal:
-                    if "sl" in close_comment:
-                        res_type = "SL_HIT"
-                    elif "tp" in close_comment:
-                        res_type = "TP_HIT"
-                    elif profit > 0:
-                        res_type = "PROFIT"
-                    else:
-                        res_type = "LOSS"
-                else:
-                    res_type = "OPEN"
+                res_type = close_result(close_deal)
 
                 trades.append({
                     "id": -pid,
@@ -294,18 +284,7 @@ async def export_reports(current_user: dict = Depends(get_current_user)):
                 prompt_match = __import__("re").search(r"P(\d+)", comment)
                 prompt_number = int(prompt_match.group(1)) if prompt_match else None
 
-                close_comment = (close_deal.get("comment", "") or "").lower() if close_deal else ""
-                if close_deal:
-                    if "sl" in close_comment:
-                        res_type = "SL_HIT"
-                    elif "tp" in close_comment:
-                        res_type = "TP_HIT"
-                    elif profit > 0:
-                        res_type = "PROFIT"
-                    else:
-                        res_type = "LOSS"
-                else:
-                    res_type = "OPEN"
+                res_type = close_result(close_deal)
 
                 trades.append({
                     "id": -pid,
@@ -424,18 +403,7 @@ async def _fetch_mt5_trades(from_date: str, to_date: Optional[str] = None) -> tu
                 prompt_match = __import__("re").search(r"P(\d+)", comment)
                 prompt_number = int(prompt_match.group(1)) if prompt_match else None
 
-                close_comment = (close_deal.get("comment", "") or "").lower() if close_deal else ""
-                if close_deal:
-                    if "sl" in close_comment:
-                        res_type = "SL_HIT"
-                    elif "tp" in close_comment:
-                        res_type = "TP_HIT"
-                    elif profit > 0:
-                        res_type = "PROFIT"
-                    else:
-                        res_type = "LOSS"
-                else:
-                    res_type = "OPEN"
+                res_type = close_result(close_deal)
 
                 trades.append({
                     "id": -pid,

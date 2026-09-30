@@ -136,8 +136,11 @@ class Trade(BaseModel):
     swap: float
     commission: float
     comment: str
-    time: str
+    time: str  # UTC
     entry: str
+    position_id: Optional[int] = None
+    # Why the deal happened, from the broker: sl, tp, expert, client, stop_out...
+    reason: Optional[str] = None
 
 
 class HistoryResponse(BaseModel):

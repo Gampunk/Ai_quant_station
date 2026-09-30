@@ -50,7 +50,7 @@ async def test_autopilot_trade_round_trip_is_recorded_by_sync(db_session):
     placed = await autopilot.execute_trade(USER_ID, "XAUUSD", "BUY", 0.10, sl=bid - 10, tp=bid + 20)
     assert placed["success"] is True, placed
     ticket = placed["ticket"]
-    assert ticket in [p["ticket"] for p in await autopilot.check_open_positions(USER_ID)]
+    assert ticket in [p["ticket"] for p in (await connector_client.get_positions())["positions"]]
 
     db_session.add(AutopilotSettings(user_id=USER_ID))
     db_session.add(AutopilotTrade(

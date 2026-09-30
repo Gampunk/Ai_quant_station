@@ -6,16 +6,25 @@ It reads the address and token from the server settings, checks the address is
 local or private, sends the token, and turns connector failures into
 ConnectorError with the connector's own message and status.
 
+Every time it returns is real UTC. The connector reports the broker's server
+time; broker_clock converts deals, positions and candles here, and range
+queries on the way out, so no caller converts anything.
+
 There is no second route. An earlier version also called the Windows-only
 MetaTrader5 package directly, which could not work on a Linux server, and let
 each user set their own connector address.
 """
+import logging
+import time
 from typing import Any, Dict, Optional
 
 import httpx
 
 from ..core.config import settings
+from .broker_clock import broker_clock
 from .connector_guard import check_connector_url
+
+log = logging.getLogger("mt5_connector")
 
 
 class ConnectorError(Exception):
@@ -77,6 +86,20 @@ class MT5ConnectorClient:
             raise ConnectorError(response.status_code, str(detail)[:500])
         return response.json()
 
+    # ── Broker clock ──────────────────────────────────────────────────────
+    async def clock(self) -> Dict[str, Any]:
+        return await self.request("GET", "/clock")
+
+    async def refresh_clock(self) -> None:
+        if not broker_clock.due():
+            return
+        try:
+            broker_clock.observe(await self.clock())
+        except ConnectorError as exc:
+            broker_clock.last_checked = time.time()
+            log.warning("Could not read the broker clock (%s); using UTC%+g from %s",
+                        exc.detail, broker_clock.offset_hours, broker_clock.source)
+
     # ── Terminal and account ──────────────────────────────────────────────
     async def health(self) -> Dict[str, Any]:
         return await self.request("GET", "/health")
@@ -94,19 +117,40 @@ class MT5ConnectorClient:
     async def get_symbol(self, symbol: str) -> Dict[str, Any]:
         return await self.request("GET", f"/symbol/{symbol}")
 
+    @staticmethod
+    def _candles_to_utc(res: Dict[str, Any]) -> Dict[str, Any]:
+        for row in res.get("data") or []:
+            row["time"] = broker_clock.epoch_to_utc(row.get("time"))
+        return res
+
     async def get_latest_data(self, symbol: str, timeframe: str = "1h", count: int = 500) -> Dict[str, Any]:
-        return await self.request("GET", f"/data/latest/{symbol}", params={"timeframe": timeframe, "count": count})
+        await self.refresh_clock()
+        res = await self.request("GET", f"/data/latest/{symbol}", params={"timeframe": timeframe, "count": count})
+        return self._candles_to_utc(res)
 
     async def get_range(self, symbol: str, timeframe: str, start: str, end: str) -> Dict[str, Any]:
-        return await self.request("GET", f"/data/range/{symbol}",
-                                  params={"timeframe": timeframe, "start": start, "end": end})
+        """`start` and `end` are ISO times in UTC; naive ones are read as UTC."""
+        await self.refresh_clock()
+        params = {"timeframe": timeframe, "start": broker_clock.iso_utc_to_server(start),
+                  "end": broker_clock.iso_utc_to_server(end)}
+        return self._candles_to_utc(await self.request("GET", f"/data/range/{symbol}", params=params))
 
     # ── Positions and history ─────────────────────────────────────────────
     async def get_positions(self) -> Dict[str, Any]:
-        return await self.request("GET", "/positions")
+        await self.refresh_clock()
+        res = await self.request("GET", "/positions")
+        for pos in res.get("positions") or []:
+            pos["open_time"] = broker_clock.text_to_utc(pos.get("open_time"))
+        return res
 
     async def get_history(self, hours: int = 0) -> Dict[str, Any]:
-        return await self.request("GET", "/history", params={"hours": hours})
+        await self.refresh_clock()
+        # The connector's window is in server time; ask for enough extra to cover the offset.
+        extra = int(abs(broker_clock.offset_hours)) + 1 if hours else 0
+        res = await self.request("GET", "/history", params={"hours": hours + extra})
+        for deal in res.get("deals") or []:
+            deal["time"] = broker_clock.text_to_utc(deal.get("time"))
+        return res
 
     # ── Trading. These are the only functions that change a position. ─────
     async def place_order(self, order: Dict[str, Any]) -> Dict[str, Any]:

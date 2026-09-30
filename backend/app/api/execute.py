@@ -175,7 +175,12 @@ def _execute_sandbox_sync(
                 # Add 'timestamp' column as datetime (not int64) so resample(on='timestamp') works
                 df['timestamp'] = df.index
             elif 'time' in df.columns:
-                df['time'] = _pd.to_datetime(df['time'])
+                # Connector candles carry unix seconds. Read as the default nanoseconds,
+                # every candle landed in January 1970.
+                if _pd.api.types.is_numeric_dtype(df['time']):
+                    df['time'] = _pd.to_datetime(df['time'], unit='s')
+                else:
+                    df['time'] = _pd.to_datetime(df['time'])
                 df = df.set_index('time')
                 df.index.name = None
                 df['timestamp'] = df.index
