@@ -22,6 +22,8 @@ def main():
                         help="account type the fake terminal reports")
     parser.add_argument("--token", default="", help="require this API token; default is no token")
     parser.add_argument("--enable-docs", action="store_true", help="serve the /docs page")
+    parser.add_argument("--server-offset", type=float, default=0.0,
+                        help="hours the broker's server clock runs ahead of UTC, for example 3")
     args = parser.parse_args()
 
     os.environ["MT5_CONNECTOR_PORT"] = str(args.port)
@@ -38,7 +40,8 @@ def main():
     import MetaTrader5 as mt5
     if not getattr(mt5, "IS_FAKE", False):
         sys.exit("Refusing to start: the real MetaTrader5 package was loaded instead of the fake.")
-    mt5._reset(trade_mode=mt5.ACCOUNT_TRADE_MODE_REAL if args.trade_mode == "real" else mt5.ACCOUNT_TRADE_MODE_DEMO)
+    mt5._reset(trade_mode=mt5.ACCOUNT_TRADE_MODE_REAL if args.trade_mode == "real" else mt5.ACCOUNT_TRADE_MODE_DEMO,
+               server_offset_hours=args.server_offset)
 
     import connector
     import uvicorn
@@ -48,7 +51,7 @@ def main():
     connector.mt5_initialized = True
     print(f"FAKE MT5 connector on http://{args.host}:{args.port}  trade_mode={args.trade_mode}  "
           f"demo_guard={'ON' if connector.REQUIRE_DEMO else 'OFF'}  "
-          f"token={'required' if connector.CONNECTOR_API_TOKEN else 'none'}")
+          f"token={'required' if connector.CONNECTOR_API_TOKEN else 'none'}  server_clock=UTC{args.server_offset:+g}")
     uvicorn.run(connector.app, host=args.host, port=args.port, log_level="warning")
 
 

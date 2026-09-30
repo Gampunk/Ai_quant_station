@@ -6,6 +6,7 @@ import sys
 import os
 import secrets
 import socket
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 import MetaTrader5 as mt5
@@ -155,6 +156,45 @@ def as_utc(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
+# Why a deal happened, from MT5's DEAL_REASON_* values. Stop and target hits used to
+# be guessed by searching the comment for "sl" or "tp".
+DEAL_REASONS = {0: "client", 1: "mobile", 2: "web", 3: "expert", 4: "sl", 5: "tp",
+                6: "stop_out", 7: "rollover", 8: "variation_margin", 9: "split"}
+
+# Symbols whose latest price reveals the broker's clock. Crypto often trades at weekends.
+CLOCK_SYMBOLS = [s.strip() for s in os.getenv("MT5_CLOCK_SYMBOLS", "XAUUSD,EURUSD,BTCUSD").split(",") if s.strip()]
+_clock_last = {"tick": None, "at": None}
+
+
+def read_broker_clock() -> dict:
+    """Estimate how far the broker's server clock runs ahead of UTC.
+
+    MT5 has no call for the server's time zone. The latest price's time is server
+    time, so while prices are live it sits within seconds of UTC plus the offset.
+    When the market is closed the latest price is hours old and says nothing, so
+    an offset is reported only when prices moved since the previous reading and the
+    difference lands within 5 minutes of a whole or half hour.
+    """
+    ticks = [mt5.symbol_info_tick(name) for name in CLOCK_SYMBOLS if mt5.symbol_select(name, True)]
+    times = [t.time for t in ticks if t is not None and t.time]
+    now = time.time()
+    if not times:
+        return {"offset_hours": None, "live": False, "server_time": None, "utc_time": _utc_text(now)}
+    tick = max(times)
+    prev_tick, prev_at = _clock_last["tick"], _clock_last["at"]
+    live = prev_tick is not None and tick > prev_tick and now - prev_at < 3600
+    _clock_last.update(tick=tick, at=now)
+    diff = tick - now
+    offset = round(diff / 1800) / 2
+    reliable = live and abs(diff - offset * 3600) <= 300 and -12 <= offset <= 14
+    return {"offset_hours": offset if reliable else None, "live": live,
+            "server_time": server_time(tick), "utc_time": _utc_text(now)}
+
+
+def _utc_text(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+
+
 def get_network_ip():
     """Detect the primary network IP of this machine."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -236,6 +276,14 @@ async def health(_auth: bool = Depends(verify_auth)):
         "mt5_connected": mt5_initialized,
         "terminal_path": terminal_path
     }
+
+
+@app.get("/clock")
+async def clock(_auth: bool = Depends(verify_auth)):
+    """The broker's server clock against UTC. offset_hours is None until prices are live."""
+    if not mt5_initialized:
+        raise HTTPException(status_code=400, detail="MT5 not initialized")
+    return read_broker_clock()
 
 
 @app.post("/initialize")
@@ -676,7 +724,8 @@ async def get_history(hours: int = 0, _auth: bool = Depends(verify_auth)):
             "comment": deal.comment or "",
             "position_id": deal.position_id,
             "time": server_time(deal.time),
-            "entry": entry_label
+            "entry": entry_label,
+            "reason": DEAL_REASONS.get(getattr(deal, "reason", None), "unknown"),
         })
     
     return {"success": True, "count": len(deal_list), "deals": deal_list}

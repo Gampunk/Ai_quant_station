@@ -40,6 +40,8 @@ POSITION_TYPE_BUY, POSITION_TYPE_SELL = 0, 1
 DEAL_TYPE_BUY, DEAL_TYPE_SELL = 0, 1
 DEAL_ENTRY_IN, DEAL_ENTRY_OUT = 0, 1
 ACCOUNT_TRADE_MODE_DEMO, ACCOUNT_TRADE_MODE_CONTEST, ACCOUNT_TRADE_MODE_REAL = 0, 1, 2
+DEAL_REASON_CLIENT, DEAL_REASON_MOBILE, DEAL_REASON_WEB, DEAL_REASON_EXPERT = 0, 1, 2, 3
+DEAL_REASON_SL, DEAL_REASON_TP, DEAL_REASON_SO = 4, 5, 6
 
 TRADE_RETCODE_DONE = 10009
 TRADE_RETCODE_INVALID_VOLUME = 10014
@@ -53,7 +55,7 @@ SymbolInfo = namedtuple("SymbolInfo", "name description visible point digits vol
 Tick = namedtuple("Tick", "time bid ask last volume")
 OrderSendResult = namedtuple("OrderSendResult", "retcode deal order volume price bid ask comment request_id")
 TradePosition = namedtuple("TradePosition", "ticket time type volume price_open sl tp price_current profit symbol comment magic")
-TradeDeal = namedtuple("TradeDeal", "ticket order time type entry position_id volume price profit swap commission symbol comment magic")
+TradeDeal = namedtuple("TradeDeal", "ticket order time type entry position_id volume price profit swap commission symbol comment magic reason")
 
 _RATE_DTYPE = np.dtype([("time", "<i8"), ("open", "<f8"), ("high", "<f8"), ("low", "<f8"),
                         ("close", "<f8"), ("tick_volume", "<u8"), ("spread", "<i4"), ("real_volume", "<u8")])
@@ -74,10 +76,16 @@ _S: dict = {}
 
 def _reset(trade_mode: int = ACCOUNT_TRADE_MODE_DEMO, now: int | None = None,
            balance: float = 10_000.0, init_ok: bool = True, account_available: bool = True,
-           slippage_points: int = 2) -> None:
-    """Test helper. Restore a clean account. `now` is a unix timestamp that fixes the clock."""
+           slippage_points: int = 2, server_offset_hours: float | None = None) -> None:
+    """Test helper. Restore a clean account. `now` is a unix timestamp that fixes the clock.
+
+    `server_offset_hours` sets the broker's server clock ahead of UTC, as real brokers
+    do (UTC+2 or UTC+3 is common). Every time the terminal reports is server time.
+    """
     with _lock:
         env_now = os.getenv("FAKE_MT5_NOW")
+        if server_offset_hours is None:
+            server_offset_hours = float(os.getenv("FAKE_MT5_SERVER_OFFSET", "0"))
         _S.clear()
         _S.update(
             initialized=False, init_ok=init_ok, path=None, account_available=account_available,
@@ -85,6 +93,7 @@ def _reset(trade_mode: int = ACCOUNT_TRADE_MODE_DEMO, now: int | None = None,
             now=now if now is not None else (int(env_now) if env_now else None),
             next_ticket=100_001, positions={}, deals=[], orders={},
             ticks={}, last_error=(1, "Success"), slippage_points=slippage_points,
+            server_offset=int(server_offset_hours * 3600),
         )
         for name, (_, point, digits, _, spread, _, _) in _SYMBOLS.items():
             bid = round(float(_mid(name, np.array([_now()]))[0]), digits)
@@ -92,7 +101,13 @@ def _reset(trade_mode: int = ACCOUNT_TRADE_MODE_DEMO, now: int | None = None,
 
 
 def _now() -> int:
+    """Real UTC, as a unix timestamp."""
     return _S["now"] if _S["now"] is not None else int(_time.time())
+
+
+def _server_now() -> int:
+    """The broker's server clock, encoded the way MT5 encodes it: as if it were UTC."""
+    return _now() + _S.get("server_offset", 0)
 
 
 def _set_price(symbol: str, bid: float, ask: float | None = None) -> None:
@@ -108,9 +123,9 @@ def _set_price(symbol: str, bid: float, ask: float | None = None) -> None:
             buy = pos["type"] == POSITION_TYPE_BUY
             mark = bid if buy else ask
             if pos["sl"] and ((buy and mark <= pos["sl"]) or (not buy and mark >= pos["sl"])):
-                _close(pos, pos["volume"], pos["sl"], f"[sl {pos['sl']}]")
+                _close(pos, pos["volume"], pos["sl"], f"[sl {pos['sl']}]", DEAL_REASON_SL)
             elif pos["tp"] and ((buy and mark >= pos["tp"]) or (not buy and mark <= pos["tp"])):
-                _close(pos, pos["volume"], pos["tp"], f"[tp {pos['tp']}]")
+                _close(pos, pos["volume"], pos["tp"], f"[tp {pos['tp']}]", DEAL_REASON_TP)
 
 
 def _advance(seconds: int) -> None:
@@ -201,7 +216,7 @@ def symbol_info_tick(symbol):
         if symbol not in _SYMBOLS:
             return None
         bid, ask = _S["ticks"][symbol]
-        return Tick(time=_now(), bid=bid, ask=ask, last=bid, volume=0)
+        return Tick(time=_server_now(), bid=bid, ask=ask, last=bid, volume=0)
 
 
 def symbol_select(symbol, enable=True):
@@ -249,13 +264,13 @@ def copy_rates_from_pos(symbol, timeframe, start_pos, count):
     if symbol not in _SYMBOLS or timeframe not in _TF_SECONDS or count <= 0:
         return None
     step = _TF_SECONDS[timeframe]
-    return _series(symbol, timeframe, _now() - start_pos * step, int(count))
+    return _series(symbol, timeframe, _server_now() - start_pos * step, int(count))
 
 
 def copy_rates_range(symbol, timeframe, date_from, date_to):
     if symbol not in _SYMBOLS or timeframe not in _TF_SECONDS:
         return None
-    start, end = _ts(date_from), min(_ts(date_to), _now())
+    start, end = _ts(date_from), min(_ts(date_to), _server_now())
     step = _TF_SECONDS[timeframe]
     count = max(0, (end - start) // step)
     count = min(count, 100_000)
@@ -290,19 +305,19 @@ def _ticket():
     return t
 
 
-def _deal(pos, entry, volume, price, profit, comment):
+def _deal(pos, entry, volume, price, profit, comment, reason=DEAL_REASON_EXPERT):
     deal_type = pos["type"] if entry == DEAL_ENTRY_IN else 1 - pos["type"]
     ticket = _ticket()
-    _S["deals"].append(TradeDeal(ticket=ticket, order=ticket, time=_now(), type=deal_type, entry=entry,
+    _S["deals"].append(TradeDeal(ticket=ticket, order=ticket, time=_server_now(), type=deal_type, entry=entry,
                                  position_id=pos["ticket"], volume=volume, price=price, profit=profit,
                                  swap=0.0, commission=0.0, symbol=pos["symbol"], comment=comment,
-                                 magic=pos["magic"]))
+                                 magic=pos["magic"], reason=reason))
     return ticket
 
 
-def _close(pos, volume, price, comment):
+def _close(pos, volume, price, comment, reason=DEAL_REASON_EXPERT):
     profit = _profit(pos["symbol"], pos["type"], volume, pos["price_open"], price)
-    deal = _deal(pos, DEAL_ENTRY_OUT, volume, price, profit, comment)
+    deal = _deal(pos, DEAL_ENTRY_OUT, volume, price, profit, comment, reason)
     _S["balance"] += profit
     pos["volume"] = round(pos["volume"] - volume, 2)
     if pos["volume"] <= 0:
@@ -347,7 +362,7 @@ def order_send(request: dict):
 
         if action == TRADE_ACTION_PENDING:
             ticket = _ticket()
-            _S["orders"][ticket] = dict(request, ticket=ticket, time=_now())
+            _S["orders"][ticket] = dict(request, ticket=ticket, time=_server_now())
             return _result(TRADE_RETCODE_DONE, "Request executed", order=ticket, volume=volume,
                            price=request.get("price", 0.0), bid=bid, ask=ask)
 
@@ -373,7 +388,7 @@ def order_send(request: dict):
         if not _stops_valid(buy, price, sl, tp):
             return _result(TRADE_RETCODE_INVALID_STOPS, "Invalid stops", bid=bid, ask=ask)
         ticket = _ticket()
-        pos = dict(ticket=ticket, time=_now(), type=POSITION_TYPE_BUY if buy else POSITION_TYPE_SELL,
+        pos = dict(ticket=ticket, time=_server_now(), type=POSITION_TYPE_BUY if buy else POSITION_TYPE_SELL,
                    volume=volume, price_open=price, sl=round(sl, digits), tp=round(tp, digits),
                    symbol=symbol, comment=request.get("comment", ""), magic=request.get("magic", 0))
         _S["positions"][ticket] = pos

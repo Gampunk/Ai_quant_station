@@ -301,3 +301,47 @@ def test_misplaced_stops_are_refused_not_moved(client, mt5, side, sl_offset, tp_
     assert resp.status_code == 400, resp.text
     assert word in resp.json()["detail"]
     assert mt5.positions_get() == ()
+
+
+# ── Broker clock and close reasons ───────────────────────────────────────────
+@pytest.fixture
+def broker_on_utc_plus_3(mt5, client, monkeypatch):
+    mt5._S["server_offset"] = 3 * 3600
+    monkeypatch.setattr(connector.time, "time", lambda: mt5._now())
+    connector._clock_last.update(tick=None, at=None)
+    return mt5
+
+
+def test_clock_reports_nothing_until_prices_move(client, broker_on_utc_plus_3):
+    body = client.get("/clock").json()
+    assert body["offset_hours"] is None and body["live"] is False
+
+
+def test_clock_detects_the_offset_once_prices_move(client, broker_on_utc_plus_3):
+    client.get("/clock")
+    broker_on_utc_plus_3._advance(60)
+    body = client.get("/clock").json()
+    assert body["live"] is True and body["offset_hours"] == 3.0
+
+
+def test_clock_ignores_stale_prices(client, broker_on_utc_plus_3, monkeypatch):
+    """A closed market: the last price is 40 minutes old, which is no offset at all."""
+    mt5 = broker_on_utc_plus_3
+    client.get("/clock")
+    mt5._advance(60)
+    real_now = mt5._now()
+    monkeypatch.setattr(connector.time, "time", lambda: real_now + 40 * 60)
+    assert client.get("/clock").json()["offset_hours"] is None
+
+
+def test_history_reports_why_a_deal_closed(client, mt5):
+    ask = client.get("/symbol/XAUUSD").json()["ask"]
+    stopped = buy(client, sl=ask - 5, tp=ask + 10).json()["ticket"]
+    mt5._set_price("XAUUSD", ask - 6)
+    targeted = buy(client, sl=ask - 20, tp=ask + 1).json()["ticket"]
+    mt5._set_price("XAUUSD", ask + 2)
+    manual = buy(client, sl=ask - 20).json()["ticket"]
+    client.post("/close", json={"ticket": manual})
+    deals = client.get("/history").json()["deals"]
+    reason = {d["position_id"]: d["reason"] for d in deals if d["entry"] == "CLOSE"}
+    assert reason == {stopped: "sl", targeted: "tp", manual: "expert"}
