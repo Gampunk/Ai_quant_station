@@ -33,6 +33,7 @@ interface AutopilotStatus {
     max_trades_per_day: number
     cooldown_minutes: number
     max_daily_loss: number
+    daily_loss_limit_enabled?: boolean
     symbol: string
     provider: string
     model: string
@@ -44,6 +45,8 @@ interface AutopilotStatus {
     skipped_count: number
     error_count: number
     last_run: string | null
+    paused_reason?: string | null
+    stopped_reason?: string | null
   }
   logs: LogEntry[]
 }
@@ -122,6 +125,7 @@ export default function AutopilotPage() {
   const maxDailyLoss = useAutopilotStore((s) => s.maxDailyLoss)
   const setMaxDailyLoss = useAutopilotStore((s) => s.setMaxDailyLoss)
   const [mt5Connected, setMt5Connected] = useState(false)
+  const [lossLimitOn, setLossLimitOn] = useState(true)
 
   useEffect(() => {
     fetchProviders()
@@ -198,6 +202,7 @@ export default function AutopilotPage() {
         setMt5Connected(res.data.settings.mt5_connected || false)
         setMaxTradesPerDay(String(res.data.settings.max_trades_per_day ?? 10))
         setMaxDailyLoss(String(res.data.settings.max_daily_loss ?? -50))
+        setLossLimitOn(res.data.settings.daily_loss_limit_enabled ?? true)
         if (res.data.settings.selected_prompts) {
           setSelectedPromptIds(res.data.settings.selected_prompts.map(String))
         }
@@ -245,6 +250,7 @@ export default function AutopilotPage() {
         max_trades_per_day: parseInt(maxTradesPerDay) || 10,
         cooldown_minutes: 5,
         max_daily_loss: parseFloat(maxDailyLoss) || -50,
+        daily_loss_limit_enabled: lossLimitOn,
         symbol: symbol,
         provider: provider,
         model: model,
@@ -348,6 +354,12 @@ export default function AutopilotPage() {
           )}
         </div>
       </div>
+
+      {(status?.stats.stopped_reason || status?.stats.paused_reason) && (
+        <div className={`mb-4 p-3 rounded text-sm ${status?.stats.stopped_reason ? 'bg-red-500/10 text-red-500' : 'bg-yellow-500/10 text-yellow-500'}`}>
+          {status?.stats.stopped_reason || status?.stats.paused_reason}
+        </div>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
@@ -465,14 +477,22 @@ export default function AutopilotPage() {
                 />
               </div>
               <div>
-                <label className="text-sm text-muted-foreground">Max Daily Loss ($)</label>
+                <label className="text-sm text-muted-foreground flex items-center gap-2">
+                  <input type="checkbox" checked={lossLimitOn} onChange={(e) => setLossLimitOn(e.target.checked)}
+                    disabled={status?.enabled} />
+                  Autopilot daily loss brake ($)
+                </label>
                 <Input
                   type="number"
                   step="1"
                   value={maxDailyLoss}
                   onChange={(e) => setMaxDailyLoss(e.target.value)}
-                  disabled={status?.enabled}
+                  disabled={status?.enabled || !lossLimitOn}
                 />
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  Pauses the autopilot for the rest of the UTC day when its own closed trades lose this much.
+                  The account-wide daily limit in Settings applies either way.
+                </p>
               </div>
             </div>
 
