@@ -34,6 +34,26 @@ def get_password_hash(password: str) -> str:
     return bcrypt.hashpw(password_bytes, salt).decode("utf-8")
 
 
+def set_password(user, password: str) -> None:
+    """Give the user a new password and end every session made with the old one."""
+    user.hashed_password = get_password_hash(password)
+    user.password_version = (user.password_version or 0) + 1
+
+
+def token_claims(user) -> dict:
+    """What every token for this user carries. `pwv` is checked against the database on use."""
+    return {"sub": user.username, "user_id": user.id, "role": user.role, "name": user.name,
+            "pwv": user.password_version or 0}
+
+
+def issued_before_password_change(payload: dict, user) -> bool:
+    """True if the token was issued before the user's latest password change.
+
+    Tokens from before this check existed carry no `pwv` and count as version 0.
+    """
+    return payload.get("pwv", 0) != (user.password_version or 0)
+
+
 TRADING_ROLES = ("admin", "trader")
 
 
@@ -114,6 +134,8 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         raise _unauthorized("Account no longer exists")
     if not user.is_active:
         raise _unauthorized("Account is disabled")
+    if issued_before_password_change(payload, user):
+        raise _unauthorized("The password was changed. Log in again")
 
     return {"username": user.username, "id": user.id, "role": user.role}
 

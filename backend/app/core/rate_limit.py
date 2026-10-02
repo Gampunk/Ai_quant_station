@@ -1,6 +1,7 @@
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from starlette.requests import Request
+
+from .client_ip import client_ip
 
 
 def user_identifier(request: Request) -> str:
@@ -11,7 +12,7 @@ def user_identifier(request: Request) -> str:
     user = getattr(request.state, "user", None)
     if user and user.get("id"):
         return f"user:{user['id']}"
-    return f"ip:{get_remote_address(request)}"
+    return f"ip:{client_ip(request)}"
 
 
 limiter = Limiter(key_func=user_identifier)

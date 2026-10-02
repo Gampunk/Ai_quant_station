@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     TOKENLB_API_KEY: str = ""
     ZENMUX_API_KEY: str = ""
 
+    # Proxies whose X-Forwarded-For header is believed, as addresses or networks
+    # separated by commas. Empty means no proxy: the connecting address is used.
+    # See core/client_ip.py.
+    FORWARDED_ALLOW_IPS: str = ""
+
     # CORS
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
 

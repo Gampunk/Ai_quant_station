@@ -20,7 +20,7 @@ from sqlalchemy import select  # noqa: E402
 
 from app.core.config import admin_password_problem  # noqa: E402
 from app.core.database import AsyncSessionLocal, init_db  # noqa: E402
-from app.core.security import get_password_hash  # noqa: E402
+from app.core.security import get_password_hash, set_password  # noqa: E402
 from app.models.user import User  # noqa: E402
 
 ROLES = ("admin", "trader", "viewer")
@@ -53,9 +53,9 @@ async def main(args) -> int:
 
         password = ask_password()
         if user:
-            user.hashed_password = get_password_hash(password)
+            set_password(user, password)
             await session.commit()
-            print(f"Password for '{args.username}' updated.")
+            print(f"Password for '{args.username}' updated. Everyone logged in as '{args.username}' must log in again.")
         else:
             session.add(User(username=args.username, name=args.name or args.username,
                              role=args.role, hashed_password=get_password_hash(password)))

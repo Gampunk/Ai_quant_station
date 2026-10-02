@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useToast } from '@/hooks/use-toast'
 import axios from 'axios'
 import RiskSettingsCard from '@/components/RiskSettingsCard'
+import { useAuthStore } from '@/store/authStore'
 
 export default function SettingsPage() {
   const { toast } = useToast()
@@ -26,8 +27,11 @@ export default function SettingsPage() {
     if (!newPassword || newPassword.length < 12) { toast({ title: 'Error', description: 'New password must be at least 12 characters', variant: 'destructive' }); return }
     setPasswordLoading(true)
     try {
-      await axios.put('/api/auth/password', { current_password: currentPassword, new_password: newPassword })
-      toast({ title: 'Success', description: 'Password changed successfully' })
+      const res = await axios.put('/api/auth/password', { current_password: currentPassword, new_password: newPassword })
+      if (res.data?.access_token && res.data?.refresh_token) {
+        useAuthStore.getState().setTokens(res.data.access_token, res.data.refresh_token)
+      }
+      toast({ title: 'Success', description: 'Password changed. Other sessions have been logged out.' })
       setCurrentPassword(''); setNewPassword('')
     } catch (error: any) {
       toast({ title: 'Error', description: error.response?.data?.detail || 'Failed to change password', variant: 'destructive' })

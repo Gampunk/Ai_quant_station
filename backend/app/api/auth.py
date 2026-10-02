@@ -10,9 +10,11 @@ from ..core.database import get_db
 from ..core.security import (
     verify_password, get_password_hash,
     create_access_token, create_refresh_token,
-    decode_token, get_current_user
+    decode_token, get_current_user,
+    set_password, token_claims, issued_before_password_change,
 )
 from ..core.blacklist import blacklist_token
+from ..core.client_ip import client_ip
 from ..core.config import password_problem
 from ..models.user import User
 from ..models.schemas import UserLogin, Token, UserResponse, PasswordChange
@@ -75,8 +77,7 @@ def _validate_role(role: str) -> None:
 
 @router.post("/login", response_model=Token)
 async def login(request: Request, user_data: UserLogin, db: AsyncSession = Depends(get_db)):
-    client_ip = request.client.host if request.client else "unknown"
-    if not _check_login_rate(client_ip):
+    if not _check_login_rate(client_ip(request)):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Too many login attempts. Try again in {_LOGIN_RATE_WINDOW} seconds."
@@ -112,7 +113,7 @@ async def login(request: Request, user_data: UserLogin, db: AsyncSession = Depen
     except Exception:
         pass
 
-    claims = {"sub": user.username, "user_id": user.id, "role": user.role, "name": user.name}
+    claims = token_claims(user)
     return Token(access_token=create_access_token(data=claims), refresh_token=create_refresh_token(data=claims))
 
 
@@ -143,6 +144,8 @@ async def refresh_token(refresh_data: dict, db: AsyncSession = Depends(get_db)):
         )
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is disabled")
+    if issued_before_password_change(payload, user):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="The password was changed. Log in again")
 
     # Blacklist the old refresh token so it can't be reused
     try:
@@ -151,8 +154,8 @@ async def refresh_token(refresh_data: dict, db: AsyncSession = Depends(get_db)):
     except Exception:
         pass
 
-    access_token = create_access_token(data={"sub": user.username, "user_id": user.id, "role": user.role, "name": user.name})
-    new_refresh_token = create_refresh_token(data={"sub": user.username, "user_id": user.id, "role": user.role, "name": user.name})
+    access_token = create_access_token(data=token_claims(user))
+    new_refresh_token = create_refresh_token(data=token_claims(user))
 
     return Token(access_token=access_token, refresh_token=new_refresh_token)
 
@@ -225,10 +228,17 @@ async def change_password(
         )
 
     _validate_new_password(password_data.new_password)
-    user.hashed_password = get_password_hash(password_data.new_password)
+    set_password(user, password_data.new_password)
     await db.commit()
 
-    return {"message": "Password changed successfully"}
+    # Every earlier session, this one included, has ended. A fresh pair keeps
+    # the person making the change logged in.
+    claims = token_claims(user)
+    return {
+        "message": "Password changed successfully",
+        "access_token": create_access_token(data=claims),
+        "refresh_token": create_refresh_token(data=claims),
+    }
 
 
 # User Management Schemas
@@ -319,7 +329,7 @@ async def update_user(
         user.role = user_data.role
     if user_data.password is not None:
         _validate_new_password(user_data.password)
-        user.hashed_password = get_password_hash(user_data.password)
+        set_password(user, user_data.password)
     # Used to be accepted and silently ignored, so "deactivate" did nothing.
     if user_data.is_active is not None:
         user.is_active = user_data.is_active

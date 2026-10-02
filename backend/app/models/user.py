@@ -10,6 +10,9 @@ class User(Base):
     username = Column(String, unique=True, index=True, nullable=False)
     name = Column(String, nullable=False)
     hashed_password = Column(String, nullable=False)
+    # Goes up by one on every password change. Tokens carry the number they were
+    # issued with, so a change ends every session made before it.
+    password_version = Column(Integer, nullable=False, default=0, server_default="0")
     role = Column(String, default="trader")
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

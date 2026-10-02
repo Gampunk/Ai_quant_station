@@ -20,6 +20,7 @@ interface AuthState {
   login: (username: string, password: string) => Promise<void>
   logout: () => void
   refreshAccessToken: () => Promise<void>
+  setTokens: (accessToken: string, refreshToken: string) => void
   checkAuth: () => void
 }
 
@@ -100,6 +101,11 @@ export const useAuthStore = create<AuthState>()(
         } catch {
           get().logout()
         }
+      },
+
+      // After a password change the server ends every older session and hands back a new pair.
+      setTokens: (accessToken: string, refreshToken: string) => {
+        set({ accessToken, storedRefreshToken: refreshToken })
       },
 
       checkAuth: async () => {
