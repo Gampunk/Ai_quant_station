@@ -1,0 +1,13 @@
+# Development and test dependencies. Not installed in production images.
+#
+# requirements-dev.txt is generated from this file, held to the exact versions
+# in requirements.txt. Regenerate it after requirements.txt:
+#
+#   uv pip compile requirements-dev.in -c requirements.txt -o requirements-dev.txt \
+#     --python-version 3.11 --extra-index-url https://download.pytorch.org/whl/cpu \
+#     --emit-index-url --generate-hashes
+-r requirements.in
+
+pytest>=8.0
+pytest-asyncio>=0.24
+pytest-timeout>=2.3

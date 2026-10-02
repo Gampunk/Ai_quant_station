@@ -1,40 +1,39 @@
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
+# Patterns here match from the repository root only, so "**/" is needed to
+# reach backend/ and frontend/. Without it backend/.env (the signing key and
+# admin password) and the local database were copied into the image.
+
+# Secrets and local state
+**/.env
+**/.env.*
+!**/.env.example
+**/*.db
+**/*.sqlite
+**/*.db.*
+**/*.bak
+
+# Environments and caches
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+**/node_modules/
+**/dist/
+**/build/
 *.egg-info/
-dist/
-build/
 
-# Node
-node_modules/
-npm-debug.log
-
-# Git
+# Not part of the server
 .git
 .gitignore
-
-# IDE
 .idea/
 .vscode/
 *.swp
 *.swo
-
-# Environment
-.env
-.env.local
-
-# Database
-*.db
-*.sqlite
-
-# Docs
-README.md
+mt5_connector/
+data_archive/
+backtest-expert/
+scripts/
 docs/
-
-# Test
-test/
-tests/
-*.test.py
+README.md
+**/tests/

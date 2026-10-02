@@ -1,0 +1,9 @@
+# Settings for `uv pip ...` run from this folder.
+#
+# requirements.txt names two indexes: PyPI, and PyTorch's for the CPU build of
+# torch. uv normally takes each package from the first index that has it, and
+# PyTorch's index carries old copies of common packages, so installs fail.
+# Considering both is safe here because every line in requirements.txt carries
+# a hash: a package that does not match it byte for byte is refused.
+[pip]
+index-strategy = "unsafe-best-match"

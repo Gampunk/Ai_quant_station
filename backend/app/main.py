@@ -25,7 +25,7 @@ from .models.user import User
 
 def _setup_logging():
     """Configure structured logging — JSON formatter for production, human-readable for dev."""
-    if os.getenv("APP_ENV", "development") != "production":
+    if not settings.is_production:
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
@@ -60,10 +60,14 @@ _setup_logging()
 # Import all models to register them with SQLAlchemy Base before database creation
 from . import models  # noqa: F401
 
+# In production the API map is not published: /docs, /redoc and /openapi.json return 404.
 app = FastAPI(
     title="The Finance Engine API",
     description="Professional Quantitative Trading Platform API",
-    version="2.0.0"
+    version="2.0.0",
+    docs_url=None if settings.is_production else "/docs",
+    redoc_url=None if settings.is_production else "/redoc",
+    openapi_url=None if settings.is_production else "/openapi.json",
 )
 
 # ── Rate Limiting Setup ──────────────────────────────────────────────────────
@@ -136,6 +140,13 @@ async def startup_event():
     # Refuse to start if the configured connector is not local or private
     from .core.connector_guard import check_connector_url
     check_connector_url(settings.MT5_CONNECTOR_URL)
+
+    # Refuse to start on a malformed proxy list rather than fail on every login
+    from .core.client_ip import _networks
+    try:
+        _networks(settings.FORWARDED_ALLOW_IPS)
+    except ValueError as exc:
+        raise ValueError(f"FORWARDED_ALLOW_IPS is not a list of addresses or networks: {exc}") from None
 
     # Create, upgrade or adopt the database, and refuse to start if it does not
     # match the models. See core/schema.py.
@@ -215,6 +226,15 @@ app.include_router(historical_lab.router, prefix="/api")
 app.include_router(backtest.router, prefix="/api")
 app.include_router(risk.router, prefix="/api")
 
+# Registered before the frontend's catch-all route, which would otherwise answer it.
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+
+# Paths the frontend must not answer: the API, and the API map that production hides.
+_NOT_FRONTEND = ("api/", "docs", "redoc", "openapi.json")
+
 # Mount static files (React build) - ONLY if frontend is built
 # In development, frontend runs on separate dev server (Vite)
 frontend_dist_path = Path(__file__).parent.parent.parent / "frontend" / "dist"
@@ -227,7 +247,7 @@ if frontend_dist_path.exists() and frontend_dist_path.is_dir():
     @app.get("/{full_path:path}")
     async def serve_react_app(full_path: str):
         # Don't interfere with API routes
-        if full_path.startswith("api/"):
+        if full_path.startswith(_NOT_FRONTEND):
             raise HTTPException(status_code=404, detail="Not Found")
         
         # Serve index.html for client-side routing (React Router)
@@ -242,17 +262,3 @@ else:
             "frontend_dev_server": "http://localhost:5173",
             "note": "To enable single-server deployment: Run 'npm run build' in frontend directory, then restart this server"
         }
-
-@app.get("/health")
-async def health():
-    return {"status": "healthy"}
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", "8002"))
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=(os.getenv("ENV", "production") == "development")
-    )

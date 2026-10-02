@@ -4,13 +4,23 @@ After=network.target postgresql.service
 
 [Service]
 Type=simple
-User=root
+# A dedicated account, never root: sudo useradd --system --home /opt/impulse_analyst impulse
+User=impulse
+Group=impulse
 WorkingDirectory=/opt/impulse_analyst/backend
 Environment="PATH=/opt/impulse_analyst/backend/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="APP_ENV=production"
+# Listen only locally; nginx on this machine is the way in, and the only proxy believed.
+Environment="HOST=127.0.0.1"
+Environment="PORT=8002"
+Environment="FORWARDED_ALLOW_IPS=127.0.0.1"
+# One worker only: see run.py.
 ExecStart=/opt/impulse_analyst/backend/venv/bin/python /opt/impulse_analyst/backend/run.py
 Restart=always
 RestartSec=10
 StartLimitIntervalSec=0
+NoNewPrivileges=true
+PrivateTmp=true
 
 # Logs
 StandardOutput=journal

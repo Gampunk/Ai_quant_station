@@ -1,5 +1,11 @@
 """
-Run the FastAPI server directly without module imports.
+Start the backend: one process, one worker.
+
+Autopilot state and login throttling live in this process's memory, so a second
+worker would run a second autopilot and keep its own login counts. Never add workers.
+
+    PORT     port to listen on, default 8002
+    HOST     address to listen on, default 0.0.0.0
 """
 import os
 import sys
@@ -8,16 +14,15 @@ import sys
 backend_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, backend_dir)
 
-# Now import the app
-from app.main import app
+import uvicorn  # noqa: E402
 
-# Run with uvicorn
-import uvicorn
+from app.main import app  # noqa: E402
 
 if __name__ == "__main__":
     uvicorn.run(
         app,
-        host="0.0.0.0",
-        port=8002,
-        log_level="info"
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", "8002")),
+        workers=1,
+        log_level="info",
     )
