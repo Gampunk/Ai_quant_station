@@ -373,6 +373,22 @@ def _classify_exit_reason(close_deals: list[dict], profit: float):
     return classification, exit_reason, source
 
 
+def _classify_execution_error(message: str) -> str:
+    """Return a safe, stable category for analysis without exporting raw errors."""
+    text = (message or "").lower()
+    if "wrong side" in text:
+        return "INVALID_LEVEL_GEOMETRY"
+    if "risk cap" in text or "stop-distance" in text:
+        return "STOP_DISTANCE_LIMIT"
+    if "reward/risk" in text:
+        return "REWARD_RISK_LIMIT"
+    if "http 400" in text or "order failed" in text:
+        return "BROKER_REJECTED"
+    if any(marker in text for marker in ("timeout", "connect", "network", "http 5")):
+        return "CONNECTOR_UNAVAILABLE"
+    return "EXECUTION_ERROR"
+
+
 async def _finish_autopilot_cycle(user_id: int, cycle_id: str, outcome: str, reason: str = None, **values):
     values.update(
         status="completed",
@@ -442,7 +458,8 @@ def _build_order_action(direction: str, order_type: str) -> str:
 
 async def execute_trade(user_id: int, symbol: str, direction: str, volume: float, entry_price: float = None,
                        sl: float = None, tp: float = None, comment: str = "[AUTOPILOT]", prompt_num: int = None,
-                       connector_url: str = None, order_type: str = "market", cycle_id: str = None):
+                       connector_url: str = None, order_type: str = "market", cycle_id: str = None,
+                       max_sl_distance: float = None, min_reward_risk: float = None):
     try:
         connector_url = (connector_url or settings.MT5_CONNECTOR_URL or "").strip() or None
         if prompt_num:
@@ -461,11 +478,16 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
 
         # Fetch symbol info for min stop distance + current price
         price = None
+        submitted_quote = None
         min_dist = None
         digits = None
         try:
             sym_data = await async_request("GET", f"{connector_url}/symbol/{symbol}")
-            price = sym_data.get("bid") or sym_data.get("ask")
+            # Match the connector's executable quote convention (BUY at ask,
+            # SELL at bid). For pending orders the requested entry is the
+            # relevant reference for stop/target geometry.
+            submitted_quote = sym_data.get("ask") if direction.upper() == "BUY" else sym_data.get("bid")
+            price = submitted_quote or sym_data.get("ask") or sym_data.get("bid")
             stops_level = sym_data.get("trade_stops_level") or sym_data.get("stops_level")
             point = sym_data.get("point")
             if stops_level is not None and point:
@@ -475,12 +497,21 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
             add_log(user_id, f"Could not fetch symbol info for {symbol}: {str(e)}", "ERROR")
 
         # Reference price for stop distance checks (current market for pending orders too)
-        ref_price = price or entry_price
+        ref_price = (entry_price if is_pending else price) or entry_price
 
         # Default SL/TP (0.2% of ref price) when the AI setup omits them or
         # returns 0.0 — no autopilot trade is ever sent naked. Runs before the
         # min-distance safeguards below so broker rules still apply after.
         sl, tp = apply_default_sl_tp(direction, ref_price, sl, tp, digits)
+
+        # Validate before sending. Do not silently repair a model-provided SL
+        # or TP that is on the wrong side of the trade.
+        if ref_price is not None:
+            is_buy = direction.upper() == "BUY"
+            if sl is not None and ((is_buy and sl >= ref_price) or (not is_buy and sl <= ref_price)):
+                return {"success": False, "error": "Stop loss is on the wrong side of the order price"}
+            if tp is not None and ((is_buy and tp <= ref_price) or (not is_buy and tp >= ref_price)):
+                return {"success": False, "error": "Take profit is on the wrong side of the order price"}
 
         # Apply minimum stop distance safeguard to SL
         if sl and sl > 0 and min_dist and ref_price and digits:
@@ -512,6 +543,16 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
                     add_log(user_id, f"TP {tp} too close, adjusted to {adjusted}", "WARNING")
                     tp = adjusted
 
+        risk_ref_price = (entry_price if is_pending else submitted_quote) or ref_price
+        if sl and max_sl_distance is not None and risk_ref_price is not None:
+            if abs(risk_ref_price - sl) > max_sl_distance + 10 ** (-(digits or 5)):
+                return {"success": False, "error": "Broker stop-distance requirement exceeds the configured ATR risk cap"}
+        if sl and tp and min_reward_risk is not None and risk_ref_price is not None:
+            risk_distance = abs(risk_ref_price - sl)
+            reward_distance = abs(tp - risk_ref_price)
+            if risk_distance <= 0 or reward_distance < risk_distance * min_reward_risk:
+                return {"success": False, "error": "Broker stop-distance adjustment violates the minimum reward/risk ratio"}
+
         payload = {"symbol": symbol, "action": action, "volume": volume, "comment": trade_comment}
         if is_pending:
             payload["price"] = entry_price
@@ -519,6 +560,10 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
             payload["sl"] = sl
         if tp and tp > 0:
             payload["tp"] = tp
+        if max_sl_distance is not None:
+            payload["max_sl_distance"] = max_sl_distance
+        if min_reward_risk is not None:
+            payload["min_reward_risk"] = min_reward_risk
 
         data = await async_request("POST", f"{connector_url}/order", json=payload)
         if data.get("success"):
@@ -530,11 +575,24 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
                 "position_ticket": data.get("position"),
                 "order_status": data.get("order_status") or ("placed" if is_pending else "filled"),
                 "price": data.get("price"),
+                "submitted_quote": data.get("submitted_quote"),
+                "stop_loss": data.get("sl"),
+                "take_profit": data.get("tp"),
             }
-        return {"success": False, "error": "Order failed"}
+        return {
+            "success": False,
+            "error": data.get("detail") or data.get("error") or "Order failed",
+            "submitted_quote": data.get("submitted_quote", submitted_quote),
+            "broker_stop_loss": data.get("sl"),
+            "broker_take_profit": data.get("tp"),
+        }
     except Exception as e:
         add_log(user_id, f"Trade execution failed: {str(e)}", "ERROR")
-        return {"success": False, "error": str(e)}
+        return {
+            "success": False,
+            "error": str(e),
+            "submitted_quote": locals().get("submitted_quote"),
+        }
 
 
 async def _update_model_usage(user_id: int, usage: dict):
@@ -1849,9 +1907,24 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
     reasoning = setup.get("reasoning", "")
     confidence = setup.get("confidence", 70)
 
+    # Capture the AI-proposed values before any safety adjustments.
+    proposed_entry_price = entry_price
+    proposed_sl = sl
+    proposed_tp = tp
+
+    raw_geometry_error = None
+    if entry_price and entry_price > 0:
+        is_buy = direction == "BUY"
+        if sl not in (None, 0) and ((is_buy and sl >= entry_price) or (not is_buy and sl <= entry_price)):
+            raw_geometry_error = "AI stop loss is on the wrong side of its proposed entry"
+        elif tp not in (None, 0) and ((is_buy and tp <= entry_price) or (not is_buy and tp >= entry_price)):
+            raw_geometry_error = "AI take profit is on the wrong side of its proposed entry"
+
     # ── SL/TP post-processing: clamp unreasonably wide stops ──
-    if entry_price and sl and atr_value and atr_value > 0:
-        sl_dist = abs(entry_price - sl)
+    max_sl_distance = None
+    min_reward_risk = None
+    if not raw_geometry_error and atr_value and atr_value > 0:
+        min_reward_risk = 1.5
         max_sl_by_atr = atr_value * 1.5
         if "XAU" in symbol or "GOLD" in symbol:
             hard_cap = 30.0
@@ -1862,13 +1935,15 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
         else:
             hard_cap = max_sl_by_atr
         max_sl_dist = min(max_sl_by_atr, hard_cap)
-        if sl_dist > max_sl_dist:
+        max_sl_distance = max_sl_dist
+        if entry_price and sl and abs(entry_price - sl) > max_sl_dist:
+            sl_dist = abs(entry_price - sl)
             if direction == "BUY":
                 sl = entry_price - max_sl_dist
             else:
                 sl = entry_price + max_sl_dist
             add_log(user_id, f"SL clamped from {sl_dist:.2f}pts to {max_sl_dist:.2f}pts (1.5x ATR={max_sl_by_atr:.2f}, hard cap={hard_cap})", "WARNING")
-    if entry_price and tp and sl and atr_value and atr_value > 0:
+    if not raw_geometry_error and entry_price and tp and sl and atr_value and atr_value > 0:
         tp_dist = abs(entry_price - tp)
         sl_dist = abs(entry_price - sl)
         min_tp_dist = sl_dist * 1.5
@@ -1881,11 +1956,16 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
 
     add_log(user_id, f"TRADE SETUP - {direction} ({order_type}) | Entry: {entry_price} SL: {sl} TP: {tp} Lot: {lot} Confidence: {confidence}%")
 
-    result = await execute_trade(
-        user_id, symbol, direction, lot, entry_price, sl, tp,
-        prompt_num=prompt_num, connector_url=connector_url,
-        order_type=order_type, cycle_id=cycle_id,
-    )
+    if raw_geometry_error:
+        result = {"success": False, "error": raw_geometry_error}
+        add_log(user_id, f"Trade setup rejected: {raw_geometry_error}", "WARNING")
+    else:
+        result = await execute_trade(
+            user_id, symbol, direction, lot, entry_price, sl, tp,
+            prompt_num=prompt_num, connector_url=connector_url,
+            order_type=order_type, cycle_id=cycle_id, max_sl_distance=max_sl_distance,
+            min_reward_risk=min_reward_risk,
+        )
     state["last_trade_time"] = datetime.now(timezone.utc)
 
     if result.get("success"):
@@ -1902,12 +1982,24 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
             state["stats"]["daily_trade_count"] += 1
 
         # For market orders, use actual MT5 fill price as entry_price
+        submitted_quote = result.get("submitted_quote")
+        requested_sl = sl
+        requested_tp = tp
+        broker_sl = result.get("stop_loss")
+        broker_tp = result.get("take_profit")
+        requested_entry = submitted_quote if order_type == "market" else entry_price
+        slippage = None
+        if submitted_quote is not None and exec_price is not None:
+            # Positive values mean the fill was worse for the strategy direction.
+            slippage = round(
+                (exec_price - submitted_quote) if direction == "BUY" else (submitted_quote - exec_price),
+                8,
+            )
         if order_type == "market":
             entry_price = exec_price
-
-        slippage = None
-        if order_type == "market" and entry_price and exec_price:
-            slippage = round(abs(exec_price - entry_price), 2)
+        # Persist the levels reported by the connector as broker-accepted.
+        sl = broker_sl
+        tp = broker_tp
 
         market_snap = {
             "regime": market_regime.get("regime") if market_regime else None,
@@ -1917,16 +2009,25 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
             "entry_price": entry_price,
             "sl": sl,
             "tp": tp,
+            "submitted_quote": submitted_quote,
         }
 
         async with AsyncSessionLocal() as db:
             trade = AutopilotTrade(
                 user_id=user_id, prompt_number=prompt_num, prompt_text=prompt_text,
                 symbol=symbol, direction=direction, order_type=order_type, entry_price=entry_price,
+                proposed_entry_price=proposed_entry_price,
                 stop_loss=sl, take_profit=tp, lot_size=lot,
                 mt5_ticket=position_ticket or (None if is_pending_order else ticket),
                 mt5_order_ticket=order_ticket, order_status=order_status,
                 execution_price=exec_price,
+                requested_entry_price=requested_entry,
+                submitted_quote=submitted_quote,
+                slippage_price=slippage,
+                requested_stop_loss=requested_sl,
+                requested_take_profit=requested_tp,
+                broker_stop_loss=broker_sl,
+                broker_take_profit=broker_tp,
                 execution_status="pending" if is_pending_order else "executed",
                 reasoning=reasoning, confidence=confidence, ai_response=ai_response,
                 raw_thinking=full_raw_response if isinstance(full_raw_response, dict) else None,
@@ -1945,7 +2046,6 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
                 call_tokens=_call_tokens if _call_tokens > 0 else None,
                 decision_type="TRADE",
                 market_snapshot=market_snap,
-                slippage_pips=slippage,
                 cycle_number=state["stats"]["total_runs"],
                 cycle_id=cycle_id,
             )
@@ -1963,7 +2063,7 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
                 "order_ticket": order_ticket,
                 "position_id": position_ticket,
                 "volume": lot,
-                "price": exec_price if exec_price is not None else entry_price,
+                "price": submitted_quote if submitted_quote is not None else entry_price,
                 "broker_time": datetime.now(timezone.utc),
                 "comment": f"[AUTOPILOT] prompt={prompt_num} cycle={cycle_id}",
             })
@@ -1993,6 +2093,18 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
                 symbol=symbol, direction=direction, order_type=order_type,
                 entry_price=entry_price, stop_loss=sl, take_profit=tp, lot_size=lot,
                 outcome="rejected", error_message=error_msg[:500],
+                error_category=_classify_execution_error(error_msg),
+                source=_source,
+                proposed_entry_price=proposed_entry_price,
+                proposed_stop_loss=proposed_sl,
+                proposed_take_profit=proposed_tp,
+                requested_entry_price=entry_price,
+                requested_stop_loss=sl,
+                requested_take_profit=tp,
+                requested_lot_size=requested_lot,
+                submitted_quote=result.get("submitted_quote"),
+                broker_stop_loss=result.get("broker_stop_loss"),
+                broker_take_profit=result.get("broker_take_profit"),
                 market_regime=market_regime.get("regime") if market_regime else None,
                 provider=(_last_usage.get("provider") if _last_usage else None),
                 model=(_last_usage.get("model") if _last_usage else None),
@@ -2412,6 +2524,10 @@ async def _sync_trade_results_unlocked(user_id: int, connector_url: str = None) 
                 broker_order = orders_by_ticket.get(str(trade.mt5_order_ticket)) if trade.mt5_order_ticket is not None else None
                 if not broker_order:
                     continue
+                if broker_order.get("sl") is not None:
+                    trade.broker_stop_loss = trade.stop_loss = float(broker_order["sl"])
+                if broker_order.get("tp") is not None:
+                    trade.broker_take_profit = trade.take_profit = float(broker_order["tp"])
                 broker_status = (broker_order.get("status") or "unknown").lower()
                 if broker_status == "partially_filled" and broker_order.get("is_active"):
                     broker_status = "partially_filled_active"
@@ -2472,6 +2588,13 @@ async def _sync_trade_results_unlocked(user_id: int, connector_url: str = None) 
                             trade.mt5_ticket = int(matching_open["position_id"])
                         if matching_open.get("price") is not None:
                             trade.execution_price = float(matching_open["price"])
+                            if trade.order_type != "market" and trade.requested_entry_price is not None:
+                                trade.slippage_price = round(
+                                    (trade.execution_price - trade.requested_entry_price)
+                                    if trade.direction == "BUY"
+                                    else (trade.requested_entry_price - trade.execution_price),
+                                    8,
+                                )
                         opened_at = matching_open.get("time")
                         if opened_at:
                             try:
@@ -2495,6 +2618,13 @@ async def _sync_trade_results_unlocked(user_id: int, connector_url: str = None) 
                             trade.mt5_ticket = int(matching_open["position_id"])
                         if matching_open.get("price") is not None:
                             trade.execution_price = float(matching_open["price"])
+                            if trade.order_type != "market" and trade.requested_entry_price is not None:
+                                trade.slippage_price = round(
+                                    (trade.execution_price - trade.requested_entry_price)
+                                    if trade.direction == "BUY"
+                                    else (trade.requested_entry_price - trade.execution_price),
+                                    8,
+                                )
                 if was_unfilled and trade.execution_status == "executed":
                     state = _get_state(user_id)
                     today = datetime.now(timezone.utc).date().isoformat()
@@ -2520,6 +2650,11 @@ async def _sync_trade_results_unlocked(user_id: int, connector_url: str = None) 
                 return 0
             open_position_ids = {
                 str(position.get("ticket"))
+                for position in positions_data.get("positions", [])
+                if position.get("ticket") is not None
+            }
+            positions_by_ticket = {
+                str(position.get("ticket")): position
                 for position in positions_data.get("positions", [])
                 if position.get("ticket") is not None
             }
@@ -2602,6 +2737,25 @@ async def _sync_trade_results_unlocked(user_id: int, connector_url: str = None) 
                     # residual volume is still waiting to fill.
                     continue
                 if trade_ids.intersection(open_position_ids):
+                    matching_position = next(
+                        (positions_by_ticket[ticket_id] for ticket_id in trade_ids if ticket_id in positions_by_ticket),
+                        None,
+                    )
+                    if matching_position:
+                        actual_position_entry = matching_position.get("entry_price")
+                        if actual_position_entry is not None:
+                            trade.execution_price = float(actual_position_entry)
+                            if trade.order_type != "market" and trade.requested_entry_price is not None:
+                                trade.slippage_price = round(
+                                    (trade.execution_price - trade.requested_entry_price)
+                                    if trade.direction == "BUY"
+                                    else (trade.requested_entry_price - trade.execution_price),
+                                    8,
+                                )
+                        if matching_position.get("sl") is not None:
+                            trade.broker_stop_loss = trade.stop_loss = float(matching_position["sl"])
+                        if matching_position.get("tp") is not None:
+                            trade.broker_take_profit = trade.take_profit = float(matching_position["tp"])
                     # Clear any stale partial-close classification from earlier sync versions.
                     if trade.result is not None or trade.profit is not None:
                         trade.profit = None

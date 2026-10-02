@@ -314,8 +314,11 @@ async def build_report(user_id: int, days: int | None, output_root: Path) -> Pat
             **_profit_metrics(rows),
         })
 
+    cycles_by_id = {cycle.cycle_id: cycle for cycle in cycles}
     decision_rows = []
     for t in trades:
+        linked_cycle = cycles_by_id.get(t.cycle_id) if t.cycle_id else None
+        proposed_setup = (linked_cycle.setup or {}) if linked_cycle else {}
         decision_rows.append({
             "id": t.id,
             "cycle_id": t.cycle_id,
@@ -323,6 +326,7 @@ async def build_report(user_id: int, days: int | None, output_root: Path) -> Pat
             "prompt_id": f"#{t.prompt_number}" if t.prompt_number > 0 else f"Custom-{abs(t.prompt_number)}",
             "prompt_text": t.prompt_text,
             "symbol": t.symbol,
+            "execution_path": t.source,
             "decision_type": t.decision_type,
             "execution_status": t.execution_status,
             "mt5_order_ticket": t.mt5_order_ticket,
@@ -333,7 +337,17 @@ async def build_report(user_id: int, days: int | None, output_root: Path) -> Pat
             "market_regime": t.market_regime,
             "decision_score": t.decision_score,
             "confidence": t.confidence,
+            "proposed_entry_price": proposed_setup.get("entry_price"),
+            "proposed_stop_loss": proposed_setup.get("stop_loss"),
+            "proposed_take_profit": proposed_setup.get("take_profit"),
             "entry_price": t.entry_price,
+            "execution_price": t.execution_price,
+            "submitted_quote": t.submitted_quote,
+            "adverse_slippage_price": t.slippage_price,
+            "requested_stop_loss": t.requested_stop_loss,
+            "requested_take_profit": t.requested_take_profit,
+            "broker_stop_loss": t.broker_stop_loss,
+            "broker_take_profit": t.broker_take_profit,
             "stop_loss": t.stop_loss,
             "take_profit": t.take_profit,
             "exit_price": t.exit_price,
@@ -354,9 +368,22 @@ async def build_report(user_id: int, days: int | None, output_root: Path) -> Pat
         "cycle_id": a.cycle_id,
         "cycle_number": a.cycle_number,
         "symbol": a.symbol,
+        "execution_path": a.source,
         "direction": a.direction,
         "order_type": a.order_type,
+        "proposed_entry_price": a.proposed_entry_price,
+        "requested_entry_price": a.requested_entry_price,
+        "submitted_quote": a.submitted_quote,
+        "adverse_slippage_price": a.slippage_price,
+        "proposed_stop_loss": a.proposed_stop_loss,
+        "proposed_take_profit": a.proposed_take_profit,
+        "requested_stop_loss": a.requested_stop_loss,
+        "requested_take_profit": a.requested_take_profit,
+        "broker_stop_loss": a.broker_stop_loss,
+        "broker_take_profit": a.broker_take_profit,
+        "requested_lot_size": a.requested_lot_size,
         "outcome": a.outcome,
+        "error_category": a.error_category,
         "market_regime": a.market_regime,
         "provider": a.provider,
         "model": a.model,
@@ -501,6 +528,12 @@ async def build_report(user_id: int, days: int | None, output_root: Path) -> Pat
         "orders_cancelled": sum(1 for t in trades if (t.order_status or "").lower() in ("cancelled", "canceled")),
         "orders_expired": sum(1 for t in trades if (t.order_status or "").lower() == "expired"),
         "orders_rejected": sum(1 for t in trades if (t.order_status or "").lower() == "rejected"),
+        "market_orders_with_quote_and_fill": sum(
+            1 for t in trades if t.order_type == "market" and t.submitted_quote is not None and t.execution_price is not None
+        ),
+        "trades_with_broker_reported_sl_tp": sum(
+            1 for t in trades if t.broker_stop_loss is not None and t.broker_take_profit is not None
+        ),
         "broker_order_event_rows": len(order_events),
         "close_deal_events_with_native_reason": sum(
             1 for event in order_events
@@ -515,7 +548,7 @@ async def build_report(user_id: int, days: int | None, output_root: Path) -> Pat
         "coverage_note": (
             "New cycles have durable UUID-linked outcome rows. Pending broker orders have distinct order tickets and are reconciled against active and historical MT5 orders; actual fills and closes are matched through MT5 deals and positions. Log-only legacy cycles are still inferred from persisted messages. "
             "Legacy cycle-number joins remain approximate. New execution attempts are attributed by cycle UUID. "
-            "Cycle records omit raw provider and broker error messages."
+            "Cycle records omit raw provider and broker error messages. Decision records separate AI-proposed levels, the executable submission quote, fill price, and connector-reported SL/TP. adverse_slippage_price is a direction-adjusted price difference (not pips); positive means a worse fill and negative means price improvement. Market orders compare fill with executable quote; pending orders compare fill with requested entry. Broker protection levels are refreshed from live positions when available."
         ),
         "files": [
             "prompt_summary.csv",
@@ -548,14 +581,20 @@ async def build_report(user_id: int, days: int | None, output_root: Path) -> Pat
     ])
     _write_csv(output_dir / "decision_records.csv", decision_rows, [
         "id", "cycle_id", "prompt_number", "prompt_id", "prompt_text", "symbol", "decision_type",
-        "execution_status", "direction", "market_regime", "decision_score", "confidence",
+        "execution_status", "execution_path", "direction", "market_regime", "decision_score", "confidence",
         "mt5_order_ticket", "mt5_position_ticket", "order_status", "order_completed_at",
-        "entry_price", "stop_loss", "take_profit", "exit_price", "profit", "result",
+        "proposed_entry_price", "proposed_stop_loss", "proposed_take_profit",
+        "entry_price", "execution_price", "submitted_quote", "adverse_slippage_price",
+        "requested_stop_loss", "requested_take_profit", "broker_stop_loss", "broker_take_profit",
+        "stop_loss", "take_profit", "exit_price", "profit", "result",
         "exit_reason", "exit_reason_source",
         "reasoning", "executed_at", "closed_at", "cycle_number", "provider", "model",
     ])
     _write_csv(output_dir / "execution_attempts.csv", attempt_rows, [
-        "id", "cycle_id", "cycle_number", "symbol", "direction", "order_type", "outcome",
+        "id", "cycle_id", "cycle_number", "symbol", "execution_path", "direction", "order_type",
+        "proposed_entry_price", "requested_entry_price", "submitted_quote", "adverse_slippage_price",
+        "proposed_stop_loss", "proposed_take_profit", "requested_stop_loss", "requested_take_profit",
+        "broker_stop_loss", "broker_take_profit", "requested_lot_size", "outcome", "error_category",
         "market_regime", "provider", "model", "created_at",
     ])
     _write_csv(output_dir / "ai_calls.csv", call_rows, [

@@ -180,6 +180,14 @@ class AutopilotTrade(Base):
     order_completed_at = Column(DateTime(timezone=True), nullable=True)
     executed_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     execution_price = Column(Float, nullable=True)
+    proposed_entry_price = Column(Float, nullable=True)
+    requested_entry_price = Column(Float, nullable=True)
+    submitted_quote = Column(Float, nullable=True)
+    slippage_price = Column(Float, nullable=True)
+    requested_stop_loss = Column(Float, nullable=True)
+    requested_take_profit = Column(Float, nullable=True)
+    broker_stop_loss = Column(Float, nullable=True)
+    broker_take_profit = Column(Float, nullable=True)
     execution_status = Column(String, default="pending")
 
     result = Column(String, nullable=True)
@@ -364,21 +372,33 @@ class AutopilotExecutionAttempt(Base):
     direction = Column(String, nullable=False)
     order_type = Column(String, default="market")
     entry_price = Column(Float, nullable=True)
+    proposed_entry_price = Column(Float, nullable=True)
+    requested_entry_price = Column(Float, nullable=True)
+    submitted_quote = Column(Float, nullable=True)
+    slippage_price = Column(Float, nullable=True)
     stop_loss = Column(Float, nullable=True)
     take_profit = Column(Float, nullable=True)
     lot_size = Column(Float, nullable=False)
+    proposed_stop_loss = Column(Float, nullable=True)
+    proposed_take_profit = Column(Float, nullable=True)
+    requested_stop_loss = Column(Float, nullable=True)
+    requested_take_profit = Column(Float, nullable=True)
+    requested_lot_size = Column(Float, nullable=True)
+    broker_stop_loss = Column(Float, nullable=True)
+    broker_take_profit = Column(Float, nullable=True)
     outcome = Column(String, nullable=False)
+    error_category = Column(String, nullable=True, index=True)
+    source = Column(String, nullable=True)
     mt5_ticket = Column(BigInteger, nullable=True)
     error_message = Column(String, nullable=True)
     market_regime = Column(String, nullable=True)
     provider = Column(String, nullable=True)
     model = Column(String, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
-
     __table_args__ = (
         Index("ix_autopilot_exec_attempts_user_cycle", "user_id", "cycle_number"),
         Index("ix_autopilot_exec_attempts_user_outcome", "user_id", "outcome"),
     )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
 
 
 class AutopilotCycle(Base):

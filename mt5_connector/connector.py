@@ -110,6 +110,8 @@ class OrderRequest(BaseModel):
     price: Optional[float] = None
     sl: Optional[float] = None
     tp: Optional[float] = None
+    max_sl_distance: Optional[float] = None
+    min_reward_risk: Optional[float] = None
     comment: str = "[IMPULSE_CONNECTOR]"
     magic: int = 0
 
@@ -332,6 +334,15 @@ async def place_order(order: OrderRequest, authorization: str = Header("")):
         raise HTTPException(status_code=500, detail="Cannot get price")
     
     price = round(price, digits)
+
+    # Reject malformed protection geometry instead of silently moving a stop or
+    # target across the entry. Broker-distance adjustments below only handle
+    # levels that are on the correct side but too close.
+    is_buy = "BUY" in order.action
+    if order.sl is not None and ((is_buy and order.sl >= price) or (not is_buy and order.sl <= price)):
+        raise HTTPException(status_code=400, detail="Stop loss is on the wrong side of the order price")
+    if order.tp is not None and ((is_buy and order.tp <= price) or (not is_buy and order.tp >= price)):
+        raise HTTPException(status_code=400, detail="Take profit is on the wrong side of the order price")
     
     min_dist = max(symbol_info.trade_stops_level, 10) * point
     
@@ -354,6 +365,19 @@ async def place_order(order: OrderRequest, authorization: str = Header("")):
         else:
             if tp >= price - min_dist:
                 tp = round(price - min_dist, digits)
+
+    if sl is not None and ((is_buy and sl >= price) or (not is_buy and sl <= price)):
+        raise HTTPException(status_code=400, detail="Adjusted stop loss is on the wrong side of the order price")
+    if tp is not None and ((is_buy and tp <= price) or (not is_buy and tp >= price)):
+        raise HTTPException(status_code=400, detail="Adjusted take profit is on the wrong side of the order price")
+    if sl is not None and order.max_sl_distance is not None:
+        if abs(price - sl) > order.max_sl_distance + point:
+            raise HTTPException(status_code=400, detail="Broker stop-distance requirement exceeds the configured risk cap")
+    if sl is not None and tp is not None and order.min_reward_risk is not None:
+        risk_distance = abs(price - sl)
+        reward_distance = abs(tp - price)
+        if risk_distance <= 0 or reward_distance < risk_distance * order.min_reward_risk:
+            raise HTTPException(status_code=400, detail="Broker stop-distance adjustment violates the minimum reward/risk ratio")
     
     filling_mode = symbol_info.filling_mode
     if filling_mode & 1:
@@ -410,6 +434,7 @@ async def place_order(order: OrderRequest, authorization: str = Header("")):
         "symbol": order.symbol,
         "volume": volume,
         "price": result.price,
+        "submitted_quote": None if is_pending else price,
         "sl": sl,
         "tp": tp,
         "comment": result.comment,
@@ -543,6 +568,7 @@ async def get_positions(authorization: str = Header("")):
                 "volume": pos.volume,
                 "entry_price": pos.price_open,
                 "current_price": pos.price_current,
+                "sl": pos.sl if pos.sl != 0 else None,
                 "tp": pos.tp if pos.tp != 0 else None,
                 "position_id": pos.ticket,
                 "profit": pos.profit,
