@@ -10,7 +10,7 @@ export function DataPreviewTable({ data }: DataPreviewTableProps) {
   if (lines.length < 1) return null
 
   // Find where the actual table starts (skip "Last X rows:" etc)
-  let tableStartIndex = lines.findIndex(l => {
+  const tableStartIndex = lines.findIndex(l => {
     const trimmed = l.trim()
     return trimmed && !trimmed.includes('DataFrame shape:') && !trimmed.includes('rows:')
   })

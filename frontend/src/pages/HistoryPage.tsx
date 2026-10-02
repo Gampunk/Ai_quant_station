@@ -33,6 +33,7 @@ export default function HistoryPage() {
   const [scores, setScores] = useState<StrategyScore[]>([])
   const [scoresLoading, setScoresLoading] = useState(true)
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- the fetch reads exactly the inputs listed; adding the function itself would refetch on every render
   useEffect(() => { fetchHistory() }, [hours])
 
   useEffect(() => { fetchScores() }, [])

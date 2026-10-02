@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
-import axios from 'axios'
+import axios, { type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
 
 interface User {
   id: number
@@ -146,18 +146,7 @@ export const useAuthStore = create<AuthState>()(
 // Ask the server to revoke both tokens, so they stop working immediately rather
 // than when they expire. Best effort: logout always completes locally.
 // Uses fetch, not axios, so the 401-refresh interceptor can never fire on logout.
-function revokeOnServer(stateAccess: string | null, stateRefresh: string | null) {
-  // The dashboard's API client writes refreshed tokens straight to storage, so
-  // storage can be newer than this store's memory. Prefer it.
-  let access = stateAccess
-  let refresh = stateRefresh
-  try {
-    const stored = JSON.parse(sessionStorage.getItem('auth-storage') || '{}').state || {}
-    access = stored.accessToken || access
-    refresh = stored.storedRefreshToken || refresh
-  } catch {
-    // ignore unreadable storage
-  }
+function revokeOnServer(access: string | null, refresh: string | null) {
   if (!access && !refresh) return
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (access) headers.Authorization = `Bearer ${access}`
@@ -187,56 +176,68 @@ const getTokenFromStorage = (): string | null => {
       const parsed = JSON.parse(stored)
       return parsed.state?.accessToken || null
     }
-  } catch (e) {
-    // Ignore
+  } catch {
+    // unreadable storage: treated as logged out
   }
   return null
 }
 
-// Axios interceptor for adding auth token
-axios.interceptors.request.use((config) => {
-  const state = useAuthStore.getState()
-  let { accessToken } = state
-  
-  // Fall back to sessionStorage if not in state (for initial load)
-  if (!accessToken) {
-    accessToken = getTokenFromStorage()
-  }
-  
-  // Add JWT token for ALL API calls
-  if (accessToken && config.url?.startsWith('/api')) {
-    config.headers.Authorization = `Bearer ${accessToken}`
-  }
-  
-  return config
-})
+type RetriableConfig = InternalAxiosRequestConfig & { _authRetried?: boolean }
 
-// Token refresh queue to prevent concurrent refresh attempts
+const fullUrl = (config: { baseURL?: string; url?: string }) => (config.baseURL || '') + (config.url || '')
+
+// These never trigger a refresh: a 401 from them means the login itself failed.
+const AUTH_ENDPOINTS = ['/api/auth/login', '/api/auth/refresh', '/api/auth/logout']
+
+// One refresh at a time, shared by every client, so ten requests failing
+// together cause one refresh, not ten.
 let refreshPromise: Promise<void> | null = null
 
-// Response interceptor for handling 401
-axios.interceptors.response.use(
-  (response) => response,
-  async (error) => {
-    if (error.response?.status === 401) {
-      const storedRefreshToken = useAuthStore.getState().storedRefreshToken
-      if (storedRefreshToken) {
-        try {
-          if (!refreshPromise) {
-            refreshPromise = useAuthStore.getState().refreshAccessToken()
-          }
-          await refreshPromise
-          refreshPromise = null
-          // Retry the original request
-          return axios(error.config)
-        } catch {
-          refreshPromise = null
-          useAuthStore.getState().logout()
-        }
-      } else {
-        useAuthStore.getState().logout()
-      }
+/**
+ * The one place login tokens are attached and refreshed. Used by the global
+ * axios and by the dashboard's client in lib/api.ts. Tokens live only in this
+ * store; nothing else writes them.
+ *
+ * On a 401: refresh once, then retry the request once. If the refresh fails the
+ * store logs out and the request fails; it is not retried. A retried request
+ * that gets 401 again is not refreshed a second time, so it can never loop.
+ */
+export function attachAuth(instance: AxiosInstance): void {
+  instance.interceptors.request.use((config) => {
+    const accessToken = useAuthStore.getState().accessToken || getTokenFromStorage()
+    if (accessToken && fullUrl(config).startsWith('/api')) {
+      config.headers.Authorization = `Bearer ${accessToken}`
     }
-    return Promise.reject(error)
-  }
-)
+    return config
+  })
+
+  instance.interceptors.response.use(
+    (response) => response,
+    async (error) => {
+      const config = error.config as RetriableConfig | undefined
+      const url = config ? fullUrl(config) : ''
+      if (
+        error.response?.status !== 401 || !config || config._authRetried ||
+        AUTH_ENDPOINTS.some((p) => url.startsWith(p))
+      ) {
+        return Promise.reject(error)
+      }
+      if (!useAuthStore.getState().storedRefreshToken) {
+        useAuthStore.getState().logout()
+        return Promise.reject(error)
+      }
+      if (!refreshPromise) {
+        refreshPromise = useAuthStore.getState().refreshAccessToken().finally(() => { refreshPromise = null })
+      }
+      await refreshPromise
+      // refreshAccessToken logs out instead of throwing when the refresh fails.
+      if (!useAuthStore.getState().accessToken) {
+        return Promise.reject(error)
+      }
+      config._authRetried = true
+      return instance(config)
+    }
+  )
+}
+
+attachAuth(axios)

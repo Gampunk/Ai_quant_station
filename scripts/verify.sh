@@ -21,6 +21,9 @@ run "connector tests, Python 3.14, fake MT5" \
 run "frontend unit tests" \
   bash -c "cd '$ROOT/frontend' && npx vitest run"
 
+run "frontend lint" \
+  bash -c "cd '$ROOT/frontend' && npm run --silent lint && echo 'no lint problems'"
+
 run "frontend type check" \
   bash -c "cd '$ROOT/frontend' && ./node_modules/.bin/tsc --noEmit && echo 'no type errors'"
 

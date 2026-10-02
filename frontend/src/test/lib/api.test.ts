@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+
+type AnyFn = (...args: any[]) => any
 import axios from 'axios'
 import api from '@/lib/api'
+import { useAuthStore } from '@/store/authStore'
 
 // A fake transport, so no test ever reaches the network. Real calls made these
 // tests depend on a connection being refused quickly, which stopped being true
@@ -45,7 +48,7 @@ describe('API client', () => {
       handlers = (api.interceptors.request as any).handlers
     })
 
-    function extractRequestHandler(): Function {
+    function extractRequestHandler(): AnyFn {
       const handler = handlers[0]?.fulfilled
       if (!handler) throw new Error('No request handler found')
       return handler
@@ -84,9 +87,10 @@ describe('API client', () => {
 
     beforeEach(() => {
       handlers = (api.interceptors.response as any).handlers
+      useAuthStore.setState({ accessToken: null, storedRefreshToken: null, isAuthenticated: false, user: null })
     })
 
-    function extractErrorHandler(): Function {
+    function extractErrorHandler(): AnyFn {
       const handler = handlers[0]?.rejected
       if (!handler) throw new Error('No response error handler found')
       return handler
@@ -94,57 +98,48 @@ describe('API client', () => {
 
     it('passes through non-401 errors unchanged', async () => {
       const handler = extractErrorHandler()
-      const error = { response: { status: 403 }, config: {} }
+      const error = { response: { status: 403 }, config: { baseURL: '/api', url: '/mt5/positions', headers: {} } }
       await expect(handler(error)).rejects.toBe(error)
     })
 
-    it('passes through 401 when no sessionStorage data', async () => {
+    it('logs out on 401 when there is no refresh token', async () => {
+      useAuthStore.setState({ accessToken: 'tok', isAuthenticated: true })
       const handler = extractErrorHandler()
-      const error = { response: { status: 401 }, config: {} }
+      const error = { response: { status: 401 }, config: { baseURL: '/api', url: '/mt5/positions', headers: {} } }
       await expect(handler(error)).rejects.toBe(error)
+      expect(useAuthStore.getState().isAuthenticated).toBe(false)
     })
 
-    it('passes through 401 when no refresh token in storage', async () => {
-      sessionStorage.setItem('auth-storage', JSON.stringify({
-        state: { accessToken: 'tok' },
-      }))
-      const handler = extractErrorHandler()
-      const error = { response: { status: 401 }, config: {} }
-      await expect(handler(error)).rejects.toBe(error)
-    })
-
-    it('refreshes token and retries on 401', async () => {
-      sessionStorage.setItem('auth-storage', JSON.stringify({
-        state: { accessToken: 'old-tok', storedRefreshToken: 'refresh-me' },
-      }))
+    it('refreshes through the auth store and retries once', async () => {
+      useAuthStore.setState({ accessToken: 'old-tok', storedRefreshToken: 'refresh-me', isAuthenticated: true })
       const post = vi.spyOn(axios, 'post').mockResolvedValue({
         data: { access_token: 'new-tok', refresh_token: 'new-refresh' },
       } as any)
       const adapter = fakeTransport()
 
       const handler = extractErrorHandler()
-      const result = await handler({ response: { status: 401 }, config: { adapter } })
+      const result = await handler({ response: { status: 401 }, config: { baseURL: '/api', url: '/mt5/positions', headers: {}, adapter } })
 
       expect(post).toHaveBeenCalledWith('/api/auth/refresh', { refresh_token: 'refresh-me' })
-      const stored = JSON.parse(sessionStorage.getItem('auth-storage')!)
-      expect(stored.state.accessToken).toBe('new-tok')
-      expect(stored.state.storedRefreshToken).toBe('new-refresh')
+      expect(useAuthStore.getState().accessToken).toBe('new-tok')
+      expect(useAuthStore.getState().storedRefreshToken).toBe('new-refresh')
       expect(adapter).toHaveBeenCalledOnce()
+      expect(adapter.mock.calls[0][0].headers.Authorization).toBe('Bearer new-tok')
       expect(result.data).toEqual({ retried: true })
     })
 
-    it('removes auth-storage and redirects on refresh failure', async () => {
-      sessionStorage.setItem('auth-storage', JSON.stringify({
-        state: { accessToken: 'old-tok', storedRefreshToken: 'bad-refresh' },
-      }))
+    it('logs out and does not retry when the refresh fails', async () => {
+      useAuthStore.setState({ accessToken: 'old-tok', storedRefreshToken: 'bad-refresh', isAuthenticated: true })
       vi.spyOn(axios, 'post').mockRejectedValue(new Error('refresh rejected'))
-      Object.defineProperty(window, 'location', { value: { href: '/current' }, writable: true })
+      const adapter = fakeTransport()
 
       const handler = extractErrorHandler()
-      await handler({ response: { status: 401 }, config: { adapter: fakeTransport() } })
+      const error = { response: { status: 401 }, config: { baseURL: '/api', url: '/mt5/positions', headers: {}, adapter } }
+      await expect(handler(error)).rejects.toBe(error)
 
-      expect(sessionStorage.getItem('auth-storage')).toBeNull()
-      expect(window.location.href).toBe('/login')
+      expect(adapter).not.toHaveBeenCalled()
+      expect(useAuthStore.getState().isAuthenticated).toBe(false)
+      expect(useAuthStore.getState().accessToken).toBeNull()
     })
   })
 })

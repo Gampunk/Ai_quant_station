@@ -132,15 +132,17 @@ export default function AutopilotPage() {
     fetchStatus()
     fetchPromptStats()
     fetchPrompts()
+    checkMt5()
     // Poll only for status/running state, not settings
     const intervalId: ReturnType<typeof setInterval> = setInterval(() => {
       axios.get('/api/autopilot/status').then(res => {
-        const data = res.data
-        setStatus(data)
-        setMt5Connected(data.settings?.mt5_connected || false)
+        setStatus(res.data)
       }).catch(console.error)
     }, 5000)
-    return () => clearInterval(intervalId)
+    // The badge shows whether the connector and terminal answer now, not a saved flag.
+    const mt5IntervalId: ReturnType<typeof setInterval> = setInterval(checkMt5, 15000)
+    return () => { clearInterval(intervalId); clearInterval(mt5IntervalId) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- loads once on mount and starts the pollers
   }, [])
 
   // Sync model list when provider changes
@@ -152,6 +154,7 @@ export default function AutopilotPage() {
   // Fetch log history
   useEffect(() => {
     fetchHistoryLogs()
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- the fetch reads exactly the inputs listed; adding the function itself would refetch on every render
   }, [historyPage, historyLevelFilter])
 
   const fetchHistoryLogs = async () => {
@@ -199,7 +202,6 @@ export default function AutopilotPage() {
         setSymbol(res.data.settings.symbol)
         setProvider(res.data.settings.provider)
         setModel(res.data.settings.model)
-        setMt5Connected(res.data.settings.mt5_connected || false)
         setMaxTradesPerDay(String(res.data.settings.max_trades_per_day ?? 10))
         setMaxDailyLoss(String(res.data.settings.max_daily_loss ?? -50))
         setLossLimitOn(res.data.settings.daily_loss_limit_enabled ?? true)
@@ -261,16 +263,22 @@ export default function AutopilotPage() {
     }
   }
 
+  const checkMt5 = () => {
+    axios.get('/api/mt5/health')
+      .then(res => setMt5Connected(!!res.data?.mt5_initialized))
+      .catch(() => setMt5Connected(false))
+  }
+
   const connectMT5 = async () => {
     try {
       const res = await axios.post('/api/autopilot/connect-mt5')
       if (res.data.success) {
-        setMt5Connected(true)
         toast({ title: 'MT5 Connected', description: 'Connected successfully' })
       } else {
         toast({ title: 'MT5 Connection Failed', description: res.data.message, variant: 'destructive' })
       }
       fetchStatus()
+      checkMt5()
     } catch (error: any) {
       toast({ title: 'MT5 Connection Error', description: error.response?.data?.detail || error.message, variant: 'destructive' })
     }

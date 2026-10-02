@@ -47,6 +47,7 @@ export default function DashboardPage() {
       }
     }
     fetchData()
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- loads once on mount
   }, [])
 
   if (loading) {

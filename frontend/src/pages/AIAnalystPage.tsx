@@ -8,6 +8,7 @@ import { createChart, CandlestickSeries, CandlestickData, Time } from 'lightweig
 import { DataPreviewTable } from '@/components/ui/data-preview-table'
 import { MiniChart } from '@/components/ui/mini-chart'
 import { useToast } from '@/hooks/use-toast'
+import { useLatest } from '@/hooks/useLatest'
 import { useAIAnalystStore } from '@/store/aiAnalystStore'
 
 interface AIProvider {
@@ -104,6 +105,19 @@ export default function AIAnalystPage() {
   const [tradeExecMsgIdx, setTradeExecMsgIdx] = useState<number | null>(null)
   const [symbolDigits, setSymbolDigits] = useState(5)
 
+  const getSymbolValue = () => {
+    if (symbol === 'custom' && customSymbol.trim()) {
+      return customSymbol.trim().toUpperCase()
+    }
+    if (symbol === undefined || symbol === '' || symbol === 'none') {
+      return ''
+    }
+    return symbol
+  }
+
+  // The symbol in use, for effects that should rerun when it changes.
+  const currentSymbol = getSymbolValue()
+
   // Fetch providers from backend on mount
   useEffect(() => {
     const fetchProviders = async () => {
@@ -127,19 +141,21 @@ export default function AIAnalystPage() {
         setModel(selectedProv.models[0])
       }
     }
-  }, [provider, availableProviders])
+  }, [provider, availableProviders, model, setModel])
 
+  // The timer calls the latest handleLoadData without being restarted on every render.
+  const loadLatest = useLatest(() => handleLoadData())
   useEffect(() => {
     let interval: any
-    if (liveMode && loadData !== 'none' && getSymbolValue()) {
+    if (liveMode && loadData !== 'none' && currentSymbol) {
       interval = setInterval(() => {
-        handleLoadData()
+        loadLatest.current()
       }, 60000)
     }
     return () => {
       if (interval) clearInterval(interval)
     }
-  }, [liveMode, loadData, symbol, customSymbol, dataPeriod, timeframe])
+  }, [liveMode, loadData, currentSymbol, dataPeriod, timeframe, loadLatest])
 
   useEffect(() => {
     if (!chartContainerRef.current) return
@@ -214,6 +230,8 @@ export default function AIAnalystPage() {
       chartRef.current = null
       seriesRef.current = null
     }
+  // Built once; the effect that follows updates the price format when the symbol changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- the chart is created once on mount
   }, [])
 
   useEffect(() => {
@@ -273,25 +291,15 @@ export default function AIAnalystPage() {
     if (loadData !== 'none' && getSymbolValue() && candleData.length === 0) {
       handleLoadData()
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once on mount, to reload a symbol kept from the last visit
   }, [])
 
   // Derive decimal precision from symbol name
   useEffect(() => {
-    const sym = getSymbolValue()
-    if (sym) {
-      setSymbolDigits(getDigitsForSymbol(sym))
+    if (currentSymbol) {
+      setSymbolDigits(getDigitsForSymbol(currentSymbol))
     }
-  }, [symbol, customSymbol])
-
-  const getSymbolValue = () => {
-    if (symbol === 'custom' && customSymbol.trim()) {
-      return customSymbol.trim().toUpperCase()
-    }
-    if (symbol === undefined || symbol === '' || symbol === 'none') {
-      return ''
-    }
-    return symbol
-  }
+  }, [currentSymbol])
 
   const MAX_CONVERSATION_TURNS = 20  // Sliding window: only last N turns sent to AI
 
@@ -376,7 +384,7 @@ const detectRequiredCandles = (query: string): number => {
     setSymbol(undefined)
     setLoadedData(null)
     setCandleData([])
-  }, [loadData])
+  }, [loadData, setSymbol, setLoadedData])
 
   useEffect(() => {
     const fetchSymbols = async () => {

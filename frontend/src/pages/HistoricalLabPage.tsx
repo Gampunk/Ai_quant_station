@@ -151,7 +151,7 @@ export default function HistoricalLabPage() {
         setModel(selectedProv.models[0])
       }
     }
-  }, [provider, availableProviders])
+  }, [provider, availableProviders, model, setModel])
   
   // Chat specific state
   const [chatInput, setChatInput] = useState('')
@@ -180,6 +180,9 @@ export default function HistoricalLabPage() {
     }
     
     return () => { if (interval) clearInterval(interval) }
+  // Restarts only when the job or its status changes. Depending on the whole result
+  // object would restart the poll on every reply; the setters never change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- see the lines above
   }, [backtestResult?.id, backtestResult?.status, analysisResult?.id, analysisResult?.status, mode])
 
   useEffect(() => {

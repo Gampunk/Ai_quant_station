@@ -19,6 +19,8 @@ interface DailySummary {
 
 interface ReportsData {
   today: TodaySummary; daily_history: DailySummary[]; prompts: PromptStats[]; trades: TradeResult[]
+  // Set when the broker's trade history could not be read: the figures below are incomplete.
+  mt5_error?: string | null
 }
 
 interface TradeResult {
@@ -85,7 +87,9 @@ export default function ReportsPage() {
   const [journalData, setJournalData] = useState<JournalData | null>(null)
   const [journalLoading, setJournalLoading] = useState(false)
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- loads once on mount
   useEffect(() => { fetchReports() }, [])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- the fetch reads exactly the inputs listed; adding the function itself would refetch on every render
   useEffect(() => { fetchJournal() }, [journalFromDate, journalToDate, journalPage])
 
   const fetchReports = async () => {
@@ -216,6 +220,12 @@ export default function ReportsPage() {
           <Calendar className="w-4 h-4 inline mr-1.5" />Trade Journal
         </button>
       </div>
+
+      {data?.mt5_error && (
+        <div className="mb-4 p-3 rounded text-sm bg-red-500/10 text-red-500">
+          {data.mt5_error}. The figures below leave out every trade from the broker, so they are incomplete.
+        </div>
+      )}
 
       {/* ════════════════ OVERVIEW TAB ════════════════ */}
       {tab === 'overview' && (() => {

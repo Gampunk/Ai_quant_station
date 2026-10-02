@@ -1,17 +1,8 @@
-import { test, expect, Page } from '@playwright/test'
+import { test, expect } from '@playwright/test'
 import { adminPassword } from './credentials'
 
 const ADMIN_PW = adminPassword()
 const NAV_TIMEOUT = 20000
-
-async function login(page: Page) {
-  await page.goto('/login')
-  await page.waitForURL('**/login', { timeout: 5000 })
-  await page.fill('#username', 'admin')
-  await page.fill('#password', ADMIN_PW)
-  await page.click('button:has-text("Sign In")')
-  await page.getByRole('link', { name: 'Dashboard' }).waitFor({ state: 'visible', timeout: NAV_TIMEOUT })
-}
 
 test.describe('Login Flow', () => {
   test('shows login page and signs in with valid credentials', async ({ page }) => {

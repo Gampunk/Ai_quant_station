@@ -50,4 +50,7 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
 )
 Button.displayName = "Button"
 
+// shadcn/ui convention: the style helper is exported beside the component. It only
+// affects hot reload in development.
+// eslint-disable-next-line react-refresh/only-export-components
 export { Button, buttonVariants }

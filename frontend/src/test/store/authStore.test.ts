@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+
+type AnyFn = (...args: any[]) => any
 import { useAuthStore } from '@/store/authStore'
 
 vi.mock('axios', () => {
-  const handlers: { request: Function[]; responseSuccess: Function[]; responseError: Function[] } = {
+  const handlers: { request: AnyFn[]; responseSuccess: AnyFn[]; responseError: AnyFn[] } = {
     request: [],
     responseSuccess: [],
     responseError: [],
@@ -17,10 +19,10 @@ vi.mock('axios', () => {
       defaults: {},
       interceptors: {
         request: {
-          use: vi.fn((fn: Function) => { handlers.request.push(fn) }),
+          use: vi.fn((fn: AnyFn) => { handlers.request.push(fn) }),
         },
         response: {
-          use: vi.fn((fn: Function, fn2?: Function) => {
+          use: vi.fn((fn: AnyFn, fn2?: AnyFn) => {
             handlers.responseSuccess.push(fn)
             if (fn2) handlers.responseError.push(fn2)
           }),
@@ -172,23 +174,6 @@ describe('authStore', () => {
       expect(JSON.parse(init.body as string)).toEqual({ refresh_token: 'the-refresh' })
     })
 
-    it('prefers newer tokens written straight to storage', () => {
-      const fetchMock = vi.mocked(fetch)
-      fetchMock.mockClear()
-      // Login fills the store, which persists itself. Later the dashboard's API
-      // client refreshes and writes newer tokens straight to storage.
-      useAuthStore.setState({ accessToken: 'stale-access', storedRefreshToken: 'stale-refresh' })
-      sessionStorage.setItem('auth-storage', JSON.stringify({
-        state: { accessToken: 'newer-access', storedRefreshToken: 'newer-refresh' },
-      }))
-
-      useAuthStore.getState().logout()
-
-      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-      expect(JSON.parse(init.body as string)).toEqual({ refresh_token: 'newer-refresh' })
-      sessionStorage.clear()
-    })
-
     it('makes no request when there is nothing to revoke', () => {
       const fetchMock = vi.mocked(fetch)
       fetchMock.mockClear()
@@ -307,7 +292,7 @@ describe('authStore', () => {
   })
 
   describe('axios request interceptor', () => {
-    let requestHandler: Function
+    let requestHandler: AnyFn
 
     beforeEach(async () => {
       const axios = (await import('axios')).default as any
@@ -351,8 +336,8 @@ describe('authStore', () => {
   })
 
   describe('axios response interceptor', () => {
-    let responseSuccessHandler: Function
-    let responseErrorHandler: Function
+    let responseSuccessHandler: AnyFn
+    let responseErrorHandler: AnyFn
 
     beforeEach(async () => {
       const axios = (await import('axios')).default as any
@@ -384,8 +369,9 @@ describe('authStore', () => {
       expect(useAuthStore.getState().user).toBeNull()
     })
 
-    it('retries original request even when refresh API call fails', async () => {
+    it('does not retry the request when the refresh fails', async () => {
       useAuthStore.setState({
+        accessToken: 'old-access',
         storedRefreshToken: 'bad-token',
         isAuthenticated: true,
         user: { id: 1, username: 'test', name: 'T', role: 'trader' },
@@ -393,13 +379,34 @@ describe('authStore', () => {
 
       const axios = (await import('axios')).default as any
       axios.post.mockRejectedValueOnce(new Error('Refresh failed'))
+      axios.mockClear()
 
-      const error = { response: { status: 401 }, config: { url: '/api/test' } }
-      const result = await responseErrorHandler(error)
-      // refreshAccessToken() catches errors internally and never throws,
-      // so the interceptor always proceeds to retry the original request
-      expect(result).toEqual({ data: 'ok' })
+      const error = { response: { status: 401 }, config: { url: '/api/test', headers: {} } }
+      await expect(responseErrorHandler(error)).rejects.toBe(error)
+      expect(axios).not.toHaveBeenCalled()
       expect(useAuthStore.getState().isAuthenticated).toBe(false)
+    })
+
+    it('never refreshes twice for the same request', async () => {
+      useAuthStore.setState({ accessToken: 'a', storedRefreshToken: 'refresh-me' })
+      const axios = (await import('axios')).default as any
+      axios.post.mockClear()
+
+      const error = { response: { status: 401 }, config: { url: '/api/test', headers: {}, _authRetried: true } }
+      await expect(responseErrorHandler(error)).rejects.toBe(error)
+      expect(axios.post).not.toHaveBeenCalled()
+    })
+
+    it('does not refresh when the login or refresh call itself is refused', async () => {
+      useAuthStore.setState({ accessToken: 'a', storedRefreshToken: 'refresh-me' })
+      const axios = (await import('axios')).default as any
+      axios.post.mockClear()
+
+      for (const url of ['/api/auth/login', '/api/auth/refresh']) {
+        const error = { response: { status: 401 }, config: { url, headers: {} } }
+        await expect(responseErrorHandler(error)).rejects.toBe(error)
+      }
+      expect(axios.post).not.toHaveBeenCalled()
     })
 
     it('refreshes token and retries on 401 when refresh token exists', async () => {
@@ -413,7 +420,9 @@ describe('authStore', () => {
         response: { status: 401 },
         config: { url: '/api/test', headers: {} },
       }
-      await responseErrorHandler(error)
+      const result = await responseErrorHandler(error)
+      expect(result).toEqual({ data: 'ok' })
+      expect((error.config as any)._authRetried).toBe(true)
       expect(useAuthStore.getState().accessToken).toBe('new-access')
       expect(useAuthStore.getState().storedRefreshToken).toBe('new-refresh')
     })

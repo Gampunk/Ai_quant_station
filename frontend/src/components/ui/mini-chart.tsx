@@ -95,7 +95,9 @@ export function MiniChart({ title, data, color = '#2563eb' }: { title: string; d
       window.removeEventListener('resize', handleResize)
       chart.remove()
     }
-  }, [chartData.data, chartData.color, chartData.type, chartData.title])
+  // isExpanded only sets the starting height; the effect below resizes without rebuilding.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- see the line above
+  }, [chartData.data, chartData.color, chartData.type, chartData.title, chartData.multi_series, color])
 
   useEffect(() => {
     if (chartRef.current) {

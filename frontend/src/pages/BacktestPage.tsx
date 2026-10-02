@@ -61,10 +61,11 @@ export default function BacktestPage() {
         setModel(selectedProv.models[0])
       }
     }
-  }, [provider, availableProviders])
+  }, [provider, availableProviders, model, setModel])
 
   useEffect(() => {
     fetchPrompts()
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- loads once on mount
   }, [])
 
   const fetchPrompts = async () => {
