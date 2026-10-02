@@ -767,7 +767,7 @@ Checks 5 and 6 were rerun after a password reset and a fresh login: the first at
    ```bash
    cd ~/dev/Ai_quant_station && time ./scripts/verify.sh
    ```
-   Expect six PASS lines: backend 279 passed and 9 skipped, connector 72, frontend lint, frontend 109, type check, build. It took about 18 minutes before this step; expect well under 10.
+   Expect six PASS lines: backend 279 passed and 9 skipped, connector 72, frontend lint, frontend 109, type check, build. The backend tests took about 18 minutes before this step. On GitHub's machine they now take 49 seconds, and the whole workflow, environments included, under 3 minutes (run 37014757860). Your machine will be slower, but should finish in a few minutes when nothing else is running.
 
 2. GitHub runs the same checks. Open https://github.com/Gampunk/Ai_quant_station/actions. The newest run of "verify", for the step 13 commits, should be green. Then prove a broken test turns it red, on a throwaway branch:
    ```bash
