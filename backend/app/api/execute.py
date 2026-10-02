@@ -32,6 +32,7 @@ import re
 from ..core.utils import sanitize_for_json as _sanitize
 
 router = APIRouter(prefix="/execute", tags=["AI"])
+logger = logging.getLogger(__name__)
 
 
 # ── Sandbox session state ──────────────────────────────────────────────────
@@ -184,7 +185,7 @@ def _execute_sandbox_sync(
                 df = df.set_index('time')
                 df.index.name = None
                 df['timestamp'] = df.index
-        except Exception as e:
+        except Exception as e:  # swallow-ok: inside the sandbox process; returned as the run's error
             return {"success": False, "error": f"Failed to create DataFrame: {str(e)}"}
 
     # Guard: reject tiny DataFrames that would crash windowed indicators
@@ -421,7 +422,7 @@ def _execute_sandbox_sync(
             "backtest_result": backtest_result,
         }
 
-    except Exception as e:
+    except Exception as e:  # swallow-ok: AI-written code failed; the error and traceback are the run's result
         error_msg = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
         return {
             "success": False,
@@ -478,6 +479,7 @@ async def run_python_code(
             records = df_for_records.to_dict('records') if hasattr(df_for_records, 'to_dict') else df_for_records
             md = _sanitize(records) if isinstance(records, list) else records
         except Exception:
+            logger.warning("[Sandbox] Could not convert the DataFrame for the sandbox; running without data", exc_info=True)
             md = None
 
     # ── Auto-fetch more candles if data is insufficient ──────────────────────
@@ -486,11 +488,10 @@ async def run_python_code(
             from ..core.mt5_service import fetch_latest_candles
             more = await fetch_latest_candles(symbol, count=10000)
             if more and len(more) > len(md):
-                logger = logging.getLogger(__name__)
                 logger.info(f"[AutoFetch] {symbol}: {len(md)} → {len(more)} candles fetched from MT5")
                 md = more
         except Exception:
-            pass
+            logger.warning("[AutoFetch] Could not fetch more candles for %s; using the %d given", symbol, len(md), exc_info=True)
 
     # ── Always a separate process ───────────────────────────────────────────
     worker_path = _get_worker_path()
@@ -517,11 +518,14 @@ async def run_python_code(
                 "error": f"Sandbox worker crashed (exit {proc.returncode}): {stderr[:500]}",
                 "output": "",
             }
+        # The worker reports failed optional imports and similar on stderr.
+        if proc.stderr and proc.stderr.strip():
+            logger.warning("[Sandbox] Worker stderr: %s", proc.stderr.strip()[-2000:])
         result = json.loads(proc.stdout)
     except subprocess.TimeoutExpired:
         result = {
             "success": False,
-            "error": "Execution timed out (25s limit). Simplify your code or reduce loop iterations.",
+            "error": "Execution timed out (60s limit). Simplify your code or reduce loop iterations.",
             "output": "",
         }
     except json.JSONDecodeError as e:
@@ -531,6 +535,7 @@ async def run_python_code(
             "output": proc.stdout[:500] if proc.stdout else "",
         }
     except Exception as e:
+        logger.exception("[Sandbox] Could not run the sandbox worker")
         result = {
             "success": False,
             "error": f"Subprocess error: {str(e)}",
@@ -607,4 +612,5 @@ async def calculate_indicator(request: CalculateIndicatorRequest, current_user: 
             return {"success": False, "error": f"Unsupported indicator: {request.indicator}"}
 
     except Exception as e:
+        logger.exception("[Indicator] Calculation failed")
         return {"success": False, "error": str(e)}

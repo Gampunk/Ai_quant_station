@@ -17,6 +17,10 @@ from ..models.strategy_score import StrategyScore
 from ..models.ai_memory import AutopilotTrade
 from ..core.trade_outcome import close_result
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/analytics", tags=["User Analytics"])
 
 
@@ -59,6 +63,8 @@ class ReportsResponse(BaseModel):
     daily_history: List[DailySummary]
     prompts: List[dict]
     trades: List[dict]
+    # Set when the broker's trade history could not be read: the figures are then incomplete.
+    mt5_error: Optional[str] = None
 
 
 @router.get("/reports")
@@ -69,6 +75,7 @@ async def get_reports(current_user: dict = Depends(get_current_user)):
     thirty_days_ago = today_start - timedelta(days=30)
 
     trades: list[dict] = []
+    mt5_error: str | None = None
 
     if connector_client.configured:
         try:
@@ -133,8 +140,10 @@ async def get_reports(current_user: dict = Depends(get_current_user)):
                     "reasoning": comment,
                     "confidence": None,
                 })
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.exception("[Reports] Could not read trade history from the connector")
+            mt5_error = f"Trade history unavailable: {exc}"
+            trades = []
 
     # ── Today's summary ──
     today_str = today_start.strftime("%Y-%m-%d")
@@ -230,6 +239,7 @@ async def get_reports(current_user: dict = Depends(get_current_user)):
         daily_history=daily_history,
         prompts=prompt_stats,
         trades=trades_list,
+        mt5_error=mt5_error,
     )
 
 
@@ -240,6 +250,7 @@ async def export_reports(current_user: dict = Depends(get_current_user)):
     thirty_days_ago = today_start - timedelta(days=30)
 
     trades: list[dict] = []
+    mt5_error: str | None = None
 
     if connector_client.configured:
         try:
@@ -304,11 +315,13 @@ async def export_reports(current_user: dict = Depends(get_current_user)):
                     "reasoning": comment,
                     "confidence": None,
                 })
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.exception("[Reports] Could not read trade history from the connector")
+            mt5_error = f"Trade history unavailable: {exc}"
+            trades = []
 
     trades.sort(key=lambda x: x["executed_at"], reverse=True)
-    return {"trades": trades, "total_count": len(trades)}
+    return {"trades": trades, "total_count": len(trades), "mt5_error": mt5_error}
 
 
 # ── Journal Pydantic models ─────────────────────────────────────────────────
@@ -426,7 +439,9 @@ async def _fetch_mt5_trades(from_date: str, to_date: Optional[str] = None) -> tu
                     "mt5_ticket": pid,
                 })
         except Exception:
-            pass
+            logger.exception("[Journal] Could not read trade history from the connector")
+            mt5_available = False
+            trades = []
 
     trades.sort(key=lambda x: x.get("executed_at", ""), reverse=True)
     return trades, mt5_available

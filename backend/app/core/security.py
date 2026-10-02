@@ -21,10 +21,10 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
             password_bytes = password_bytes[:72]
         hashed_bytes = hashed_password.encode('utf-8')
         return bcrypt.checkpw(password_bytes, hashed_bytes)
-    except Exception:
+    except Exception:  # swallow-ok: not a bcrypt hash; passlib's formats are tried next
         try:
             return pwd_context.verify(plain_password, hashed_password)
-        except Exception:
+        except Exception:  # swallow-ok: an unreadable hash counts as a wrong password
             return False
 
 

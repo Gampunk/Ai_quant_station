@@ -69,10 +69,10 @@ PROMPT_FILE = str(Path(__file__).resolve().parent.parent.parent.parent / "backen
 def _capture_raw_response(response) -> dict | None:
     try:
         return response.model_dump(mode='json')
-    except Exception:
+    except Exception:  # swallow-ok: older SDK objects; .dict() is tried next
         try:
             return response.dict()
-        except Exception:
+        except Exception:  # swallow-ok: the raw copy is only kept for debugging
             return None
 
 CONTRACT_MULTIPLIERS = {
@@ -301,9 +301,11 @@ commission_per_lot = {commission}
             messages.append({"role": "assistant", "content": raw})
             messages.append({"role": "user", "content": f"Failed: {error_detail[:500]}. Fix and output ONLY valid Python."})
         except Exception as e:
+            logger.warning("[Backtest] Strategy generation attempt failed", exc_info=True)
             last_error = str(e)
             await asyncio.sleep(1)
-    return {"error": "AI service temporarily unavailable. Please check your API key configuration and try again."}
+    return {"error": "AI service temporarily unavailable. Please check your API key configuration and try again."
+                     + (f" Last error: {last_error[:300]}" if last_error else "")}
 
 
 def run_vectorized_backtest(df, strategy_code, lot_size=0.01, contract_multiplier=100, initial_capital=10000.0, spread=0.0, commission=0.0):
@@ -337,8 +339,7 @@ def run_vectorized_backtest(df, strategy_code, lot_size=0.01, contract_multiplie
             _extra_libs["scipy"] = scipy
             _extra_libs["sklearn"] = sklearn
         except Exception:
-            import traceback as _tb
-            print(f"[backtest] Optional libs unavailable: {_tb.format_exc()}")
+            logger.warning("[Backtest] Optional libraries unavailable", exc_info=True)
         exec_globals = {"__builtins__": safe_builtins, "pd": pd, "np": np, "ta": ta, **_extra_libs}
         exec(strategy_code, exec_globals)
         calculate_signals = exec_globals.get('calculate_signals')
@@ -352,7 +353,7 @@ def run_vectorized_backtest(df, strategy_code, lot_size=0.01, contract_multiplie
         # 2. Get signals
         try:
             signal = calculate_signals(df.copy())
-        except Exception as sig_err:
+        except Exception:  # swallow-ok: AI-written code failed; the traceback goes back to the AI to fix
             return {"error": f"calculate_signals() raised on execution:\n{traceback.format_exc()}"}
 
         if not isinstance(signal, pd.Series):
@@ -451,6 +452,7 @@ def run_vectorized_backtest(df, strategy_code, lot_size=0.01, contract_multiplie
             "trades": trades,
         }
     except Exception as e:
+        logger.exception("[Backtest] Backtest run failed")
         return {"error": str(e)}
 
 @router.post("/run", response_model=BacktestResponse)
@@ -506,7 +508,7 @@ async def run_backtest(request: BacktestRequest, current_user: dict = Depends(re
                 if current_num == p_num and current_lines and not prompt_text:
                     prompt_text = " ".join(current_lines).strip()
             except Exception:
-                pass
+                logger.warning("[Backtest] Could not read prompt #%s from the prompt list", p_num, exc_info=True)
             
             # Check default strategy cache
             result = await db.execute(select(DefaultPromptStrategy).where(DefaultPromptStrategy.prompt_number == p_num))
@@ -534,6 +536,7 @@ async def run_backtest(request: BacktestRequest, current_user: dict = Depends(re
                     db.add(new_cache)
                 await db.commit()
         except Exception as e:
+            logger.exception("[Backtest] Strategy generation failed")
             return BacktestResponse(success=False, error=f"AI Generation failed: {str(e)}")
 
     # 3. Load Market Data

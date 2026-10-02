@@ -10,11 +10,14 @@ Usage:
     cleaned = await cleanup_expired_tokens()
 """
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import create_engine, text
 from ..core.config import settings
+
+logger = logging.getLogger(__name__)
 
 _SYNC_URL = str(settings.DATABASE_URL).replace("+aiosqlite", "").replace("+asyncpg", "")
 
@@ -101,6 +104,6 @@ def init_blacklist_table() -> None:
             bind=_sync_engine,
             tables=[Base.metadata.tables["revoked_tokens"]],
         )
-        print("Revoked token table ensured.")
-    except Exception as e:
-        print(f"Warning: could not ensure revoked_tokens table: {e}")
+    except Exception:
+        # Without this table logout cannot revoke anything.
+        logger.exception("Could not create the revoked_tokens table")

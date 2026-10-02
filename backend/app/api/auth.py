@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from datetime import datetime, timezone
 from collections import defaultdict
+import logging
 import time
 
 from ..core.database import get_db
@@ -19,6 +20,8 @@ from ..core.config import password_problem
 from ..models.user import User
 from ..models.schemas import UserLogin, Token, UserResponse, PasswordChange
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -111,7 +114,7 @@ async def login(request: Request, user_data: UserLogin, db: AsyncSession = Depen
         user.last_login = datetime.now(timezone.utc)
         await db.commit()
     except Exception:
-        pass
+        logger.warning("Could not record the last login of %s", username, exc_info=True)
 
     claims = token_claims(user)
     return Token(access_token=create_access_token(data=claims), refresh_token=create_refresh_token(data=claims))
@@ -147,12 +150,15 @@ async def refresh_token(refresh_data: dict, db: AsyncSession = Depends(get_db)):
     if issued_before_password_change(payload, user):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="The password was changed. Log in again")
 
-    # Blacklist the old refresh token so it can't be reused
+    # Revoke the old refresh token so it can't be reused. If that fails, refuse:
+    # handing out a new pair would leave the old token working too.
     try:
         exp_dt = datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
         await blacklist_token(refresh_token, expires_at=exp_dt)
     except Exception:
-        pass
+        logger.exception("Could not revoke a used refresh token for %s", username)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Could not complete the refresh. Try again.")
 
     access_token = create_access_token(data=token_claims(user))
     new_refresh_token = create_refresh_token(data=token_claims(user))

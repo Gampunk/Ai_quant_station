@@ -34,6 +34,14 @@ def _upload_parquet_to_hf():
         except Exception as e:
             logger.warning(f"[Sync] HF upload failed for {fpath.name}: {e}")
 
+class PriceSyncFailed(Exception):
+    """Raised at the end of a sync run in which one or more symbols failed.
+
+    The scheduler then records the run as failed. It used to log every run as
+    "executed successfully" because each symbol's error was caught and dropped.
+    """
+
+
 async def sync_mt5_to_parquet():
     """
     The MT5 Auto-Sync Bridge:
@@ -52,23 +60,25 @@ async def sync_mt5_to_parquet():
 
     logger.info("--- [Pillar 3] Starting MT5 Auto-Sync Sequence ---")
     
-    current_year = datetime.now().year
+    current_year = datetime.now(timezone.utc).year
+    # With no file for this year yet (every 1 January, or a fresh install), start at
+    # the beginning of the year. It used to start at 1970 and ask the broker for
+    # every one-minute candle since then.
+    year_start = int(datetime(current_year, 1, 1, tzinfo=timezone.utc).timestamp())
     sync_count_total = 0
+    failed: list[str] = []
     
     for symbol in AVAILABLE_SYMBOLS:
         try:
             parquet_path = LOCAL_CACHE / f"{symbol}_{current_year}.parquet"
-            last_timestamp = 0
+            last_timestamp = year_start - 60
             
             # 1. Determine the 'watermark' (last recorded candle)
             if parquet_path.exists():
-                try:
-                    # Only read the last row to save memory
-                    df_check = pd.read_parquet(parquet_path, columns=["timestamp"])
-                    if not df_check.empty:
-                        last_timestamp = df_check["timestamp"].max()
-                except Exception as e:
-                    logger.warning(f"Could not read existing parquet for {symbol}: {e}")
+                # An unreadable file fails this symbol rather than being refetched from scratch.
+                df_check = pd.read_parquet(parquet_path, columns=["timestamp"])
+                if not df_check.empty:
+                    last_timestamp = max(int(df_check["timestamp"].max()), year_start - 60)
             
             # 2. Define range
             # Fetch from last_timestamp + 60 seconds until now
@@ -117,14 +127,19 @@ async def sync_mt5_to_parquet():
             logger.info(f"--- [Sync] SUCCESS: Appended {len(df_new)} rows to {symbol}_{current_year}.parquet ---")
             sync_count_total += len(df_new)
             
-        except Exception as e:
-            logger.error(f"[Sync] CRITICAL ERROR for {symbol}: {e}")
+        except Exception:
+            logger.exception(f"[Sync] {symbol} failed")
+            failed.append(symbol)
 
     if sync_count_total > 0:
         try:
             await asyncio.to_thread(_upload_parquet_to_hf)
-        except Exception as e:
-            logger.error(f"[Sync] Failed to upload parquet to HF: {e}")
+        except Exception:
+            logger.exception("[Sync] Failed to upload parquet to HF")
+            failed.append("Hugging Face upload")
+
+    if failed:
+        raise PriceSyncFailed(f"Price sync failed for: {', '.join(failed)}")
 
 # Global scheduler instance
 scheduler = AsyncIOScheduler()

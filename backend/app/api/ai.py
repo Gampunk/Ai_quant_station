@@ -254,7 +254,7 @@ async def _cache_market_data_internal(symbol: str, timeframe: str, data: List[di
                 if isinstance(dt_time, str):
                     try:
                         dt_time = datetime.strptime(dt_time, '%Y-%m-%d %H:%M:%S')
-                    except Exception:
+                    except ValueError:
                         dt_time = datetime.fromisoformat(dt_time.replace('Z', '+00:00'))
                 elif isinstance(dt_time, (int, float)):
                     # Handle Unix timestamp
@@ -508,7 +508,7 @@ async def chat(request: Request, chat_req: ChatRequest, current_user: dict = Dep
             candle_data_for_ai = chat_req.candle_data or []
             
             if candle_data_for_ai:
-                print(f"[AI] Building market context with {len(candle_data_for_ai)} candles")
+                logger.info("[AI] Building market context with %d candles", len(candle_data_for_ai))
                 # Use the candle data directly from frontend
                 latest = candle_data_for_ai[-1]
                 samples = []
@@ -590,6 +590,7 @@ Last 10 candles:
                             })
                         await _cache_market_data_internal(chat_req.symbol, "1d", yahoo_records, "yahoo")
                 except Exception as e:
+                    logger.warning("[AI] Could not fetch market data for %s", chat_req.symbol, exc_info=True)
                     market_context = f"\n[Note: Could not fetch data for {chat_req.symbol}: {str(e)}]\n"
 
         # Fetch user memory (previous conversations about same symbol)
@@ -819,10 +820,10 @@ def calculate_signals(df): ...
                 # Capture full raw API response
                 try:
                     full_raw_response = response.model_dump(mode='json')
-                except Exception:
+                except Exception:  # swallow-ok: older SDK objects; .dict() is tried next
                     try:
                         full_raw_response = response.dict()
-                    except Exception:
+                    except Exception:  # swallow-ok: the raw copy is only kept for debugging
                         full_raw_response = None
                 
                 logger.info(f"[AI Chat] SUCCESS - Response length: {len(assistant_message)} chars, Tokens: {token_usage}, Latency: {req_elapsed_ms}ms")
@@ -973,7 +974,7 @@ def calculate_signals(df): ...
                         generate_embedding(saved_chat_memory_id, assistant_message)
                     )
                 except Exception:
-                    pass
+                    logger.warning("[AI] Could not queue the embedding for chat %s", saved_chat_memory_id, exc_info=True)
 
                 if chat_req.symbol and detected_setup:
                     result = await db.execute(select(GlobalInsights).where(GlobalInsights.symbol == chat_req.symbol))
@@ -1206,4 +1207,5 @@ async def save_feedback(
             await db.commit()
             return {"success": True, "message": "Feedback saved"}
         except Exception as e:
+            logger.exception("[AI] Could not save feedback")
             return {"success": False, "message": str(e)}

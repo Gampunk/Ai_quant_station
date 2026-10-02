@@ -67,6 +67,7 @@ async def find_similar_analyses(query_embedding: list[float], symbol: str, limit
             score = sim * 0.5 + (min(profit / 100, 1)) * 0.3 + helpful * 0.2
             scored.append((score, row))
         except Exception:
+            logger.debug("Skipped a stored embedding that could not be scored", exc_info=True)
             continue
 
     scored.sort(key=lambda x: x[0], reverse=True)

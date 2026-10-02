@@ -76,6 +76,7 @@ async def _fetch_mt5_trades() -> list[dict] | None:
     try:
         mt5_deals = (await connector_client.get_history(hours=48)).get("deals", [])
     except Exception:
+        logger.warning("[Report] Could not read today's trade history from the connector", exc_info=True)
         return None
 
     # Filter [AUTOPILOT] trades
@@ -149,6 +150,7 @@ async def _fetch_weekly_mt5_trades() -> list[dict] | None:
     try:
         mt5_deals = (await connector_client.get_history(hours=168)).get("deals", [])
     except Exception:
+        logger.warning("[Report] Could not read the week's trade history from the connector", exc_info=True)
         return None
 
     autopilot_pids = {

@@ -20,17 +20,14 @@ def _get_valid_symbols() -> set[str]:
     global _VALIDATED_SYMBOLS
     if _VALIDATED_SYMBOLS is not None:
         return _VALIDATED_SYMBOLS
-    try:
-        raw = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "USDCHF=X",
+    raw = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "USDCHF=X",
                "AUDUSD=X", "USDCAD=X", "NZDUSD=X", "EURGBP=X", "EURJPY=X", "GBPJPY=X",
                "BTC-USD", "ETH-USD", "XRP-USD", "SOL-USD",
                "DOGE-USD", "ADA-USD", "AVAX-USD", "DOT-USD",
                "MATIC-USD", "LINK-USD", "UNI-USD", "ATOM-USD",
                "^GSPC", "^DJI", "^IXIC", "^RUT", "^VIX", "^FTSE", "^GDAXI", "^N225", "^HSI",
                "XAUUSD=X", "XAGUSD=X", "US30=X", "SPX500=X", "NAS100=X", "DAX40=X"]
-        _VALIDATED_SYMBOLS = set(raw)
-    except Exception:
-        _VALIDATED_SYMBOLS = set()
+    _VALIDATED_SYMBOLS = set(raw)
     return _VALIDATED_SYMBOLS
 
 
@@ -137,6 +134,7 @@ async def search_yahoo(
             })
         return {"success": True, "query": query, "results": results}
     except Exception:
+        logger.warning("[Yahoo] Symbol search failed for %r", query, exc_info=True)
         return {"success": True, "query": query, "results": []}
 
 

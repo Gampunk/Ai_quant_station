@@ -199,7 +199,7 @@ def get_available_years(symbol: str) -> list:
                             except ValueError:
                                 pass
         except Exception:
-            pass
+            logger.warning("Could not list the years available for %s on Hugging Face", symbol, exc_info=True)
     # 3. Ultimate fallback: return years that are most commonly available
     if not years:
         years = set(range(2006, 2027))

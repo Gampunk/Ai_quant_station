@@ -91,7 +91,7 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
                         "username": payload.get("sub"),
                         "role": payload.get("role"),
                     }
-            except Exception:
+            except Exception:  # swallow-ok: only picks a rate-limit bucket; the route itself rejects bad tokens
                 pass
         response = await call_next(request)
         return response
@@ -154,26 +154,33 @@ async def startup_event():
     await init_db()
 
     # Initial cleanup of stale revoked tokens
+    log = logging.getLogger("startup")
     removed = await cleanup_expired_tokens()
     if removed:
-        print(f"Cleaned up {removed} expired revoked-token entries.")
+        log.info("Cleaned up %d expired revoked-token entries.", removed)
     await create_default_users()
 
     # Auto-restart autopilot for users who had it enabled before reboot
+    # Each user separately, so one failure does not stop the others restarting.
+    from .core.database import AsyncSessionLocal
+    from .models.ai_memory import AutopilotSettings
+    from .api.autopilot import _start_autopilot_internal
+    from sqlalchemy import select
     try:
-        from .core.database import AsyncSessionLocal
-        from .models.ai_memory import AutopilotSettings
-        from sqlalchemy import select
         async with AsyncSessionLocal() as _db:
             result = await _db.execute(
-                select(AutopilotSettings).where(AutopilotSettings.enabled == True)
+                select(AutopilotSettings.user_id).where(AutopilotSettings.enabled == True)
             )
-            for row in result.scalars().all():
-                from .api.autopilot import _start_autopilot_internal
-                await _start_autopilot_internal(row.user_id)
-                print(f"  Autopilot auto-restarted for user #{row.user_id}")
-    except Exception as e:
-        print(f"  Autopilot auto-restart check: {e}")
+            user_ids = list(result.scalars().all())
+    except Exception:
+        log.exception("Could not read which autopilots to restart")
+        user_ids = []
+    for user_id in user_ids:
+        try:
+            await _start_autopilot_internal(user_id)
+            log.info("Autopilot restarted for user #%s", user_id)
+        except Exception:
+            log.exception("Autopilot restart failed for user #%s", user_id)
 
     start_sync_scheduler()
 
@@ -183,15 +190,15 @@ async def startup_event():
         start_strategy_scorer()
         import asyncio
         asyncio.create_task(update_strategy_scores())
-    except Exception as e:
-        print(f"  Strategy scorer start: {e}")
+    except Exception:
+        log.exception("Strategy scorer did not start")
 
     # Start daily report scheduler (23:50 UTC)
     try:
         from .core.email_reports import start_report_scheduler
         start_report_scheduler()
-    except Exception as e:
-        print(f"  Report scheduler start: {e}")
+    except Exception:
+        log.exception("Daily report scheduler did not start")
 
 @app.on_event("shutdown")
 async def shutdown_event():

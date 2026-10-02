@@ -5,6 +5,7 @@ Reading needs any logged-in user. Initializing the terminal needs a trading role
 An earlier version accepted the shared connector token here, which identifies no
 one, and fell back to the Windows-only MetaTrader5 package in eleven places.
 """
+import logging
 from datetime import datetime
 from typing import List
 
@@ -18,6 +19,8 @@ from ..core.database import get_db
 from ..core.mt5_connector import ConnectorError, connector_client
 from ..core.broker_clock import broker_clock
 from ..core.security import get_current_user, require_trader
+
+logger = logging.getLogger(__name__)
 from ..models.market_data import MarketData
 from ..models.schemas import (
     AccountInfo, DataResponse, HistoryResponse, MT5Symbol, MT5SymbolsResponse,
@@ -75,9 +78,8 @@ async def _cache_market_data(db: AsyncSession, symbol: str, timeframe: str, data
         
         await db.execute(stmt)
         await db.commit()
-    except Exception as e:
-        import traceback
-        print(f"Error caching market data: {e}\n{traceback.format_exc()}")
+    except Exception:
+        logger.exception("Could not cache market data")
 
 
 @router.get("/health")

@@ -39,10 +39,10 @@ logger = logging.getLogger("autopilot")
 def _capture_raw_response(response) -> dict | None:
     try:
         return response.model_dump(mode='json')
-    except Exception:
+    except Exception:  # swallow-ok: older SDK objects; .dict() is tried next
         try:
             return response.dict()
-        except Exception:
+        except Exception:  # swallow-ok: the raw copy is only kept for debugging
             return None
 
 _user_states: Dict[int, dict] = {}
@@ -156,7 +156,7 @@ async def _rebuild_stats(user_id: int):
             # Error count = distinct cycles with error messages (not per-provider noise)
             error_patterns = [
                 "No market data available",
-                "AI code generation failed after retries",
+                "AI code generation failed after retries%",
                 "Trade failed%",
             ]
             for pattern in error_patterns:
@@ -177,7 +177,7 @@ async def _rebuild_stats(user_id: int):
                 state["stats"]["error_count"]
             )
     except Exception:
-        pass
+        logger.warning("[user=%d] Could not restore the autopilot's counters", user_id, exc_info=True)
 
 
 PROMPT_FILE = str(Path(__file__).resolve().parent.parent.parent.parent / "backend" / "prompt_list.txt")
@@ -193,7 +193,8 @@ def load_prompts():
     try:
         with open(PROMPT_FILE, "r", encoding="utf-8") as f:
             lines = f.readlines()
-    except Exception:
+    except OSError:
+        logger.exception("Could not read the prompt list %s", PROMPT_FILE)
         return []
 
     prompts = []
@@ -275,7 +276,8 @@ async def _persist_log(user_id: int, level: str, message: str, cycle_number: int
             db.add(entry)
             await db.commit()
     except Exception:
-        pass  # Log persistence should never crash the calling code
+        # Must never crash the caller, and must not call add_log, which called us.
+        logger.warning("[user=%d] Could not save an autopilot log line", user_id, exc_info=True)
 
 
 # All connector traffic goes through connector_client, which holds the one
@@ -447,7 +449,7 @@ async def _update_model_usage(user_id: int, usage: dict):
                 db.add(mu)
             await db.commit()
     except Exception:
-        pass  # Never crash the autopilot loop
+        logger.warning("[user=%d] Could not update model usage", user_id, exc_info=True)
 
 
 async def _log_ai_call(
@@ -480,6 +482,7 @@ async def _log_ai_call(
             await db.refresh(log)
             return log.id
     except Exception:
+        logger.warning("[user=%s] Could not record an AI call", user_id, exc_info=True)
         return None
 
 
@@ -583,7 +586,7 @@ def _classify_market_regime(market_data: list[dict]) -> dict:
         try:
             adx = ta.trend.adx(high, low, close, window=14)
             adx_value = float(adx.iloc[-1]) if not pd.isna(adx.iloc[-1]) else None
-        except Exception:
+        except Exception:  # swallow-ok: ADX needs enough candles; the regime is judged without it
             adx_value = None
 
         if atr_ratio >= 1.35 or bb_width_pct >= 1.8:
@@ -639,6 +642,7 @@ def _classify_market_regime(market_data: list[dict]) -> dict:
             "adx": round(adx_value, 2) if adx_value is not None else None,
         }
     except Exception as e:
+        logger.warning("Could not classify the market regime", exc_info=True)
         return {
             "regime": "unknown",
             "trend": "unknown",
@@ -742,7 +746,7 @@ async def _choose_prompt_with_context(
                 if (trade.profit or 0.0) > 0:
                     bucket["wins"] += 1
     except Exception:
-        pass
+        logger.warning("Could not read recent results per prompt; prompts are ranked without them", exc_info=True)
 
     ranked = []
     for prompt in prompt_pool:
@@ -853,7 +857,7 @@ async def run_autopilot_cycle(user_id: int):
             p_num = int(line.split(".")[0].strip())
             if not selected_ids or p_num in selected_ids:
                 prompt_pool.append({"id": p_num, "text": line.split(".", 1)[1].strip(), "is_custom": False})
-        except Exception:
+        except (ValueError, IndexError):  # not an "N. text" line
             continue
 
     for p in personal_prompts:
@@ -948,21 +952,30 @@ async def run_autopilot_cycle(user_id: int):
         if log_id:
             _call_log_ids.append(log_id)
 
+    # Why the last _call_ai_with_retry returned nothing, for the cycle's log line.
+    _ai_failure = {"reason": ""}
+
     async def _call_ai_with_retry(messages: list, provider: str, model: str, max_retries: int = 3, stage: str = "initial") -> tuple[str | None, dict | None]:
         """Call AI with exponential backoff on 429, fallback to next provider.
         Returns (content, usage_dict) where usage_dict has prompt_tokens, completion_tokens, total_tokens.
+        On failure returns (None, None) and leaves the reason in _ai_failure.
         """
         from ..core.providers import PROVIDERS, get_provider_names, get_base_url, resolve_api_key
         
         providers = get_provider_names()
         provider_idx = providers.index(provider) if provider in providers else 0
+        no_key: list[str] = []
+        last_error = ""
+        _ai_failure["reason"] = "the reply was empty"  # if a provider answers with nothing
         
         for attempt in range(max_retries):
             for p_idx in range(provider_idx, len(providers)):
                 p = providers[p_idx]
                 api_key = await resolve_api_key(p, settings, user_id, AsyncSessionLocal)
                 if not api_key:
-                    await _log_call("no_key", p, model if p == provider else PROVIDERS[p]["models"][0], stage)
+                    if p not in no_key:
+                        no_key.append(p)
+                        await _log_call("no_key", p, model if p == provider else PROVIDERS[p]["models"][0], stage)
                     continue
                 if p == "nvidia" and not api_key.startswith("nvapi-"):
                     api_key = f"nvapi-{api_key}"
@@ -1001,14 +1014,24 @@ async def run_autopilot_cycle(user_id: int):
                     if "429" in err_str or "too_many_requests" in err_str or "queue_exceeded" in err_str:
                         wait = min(2 ** attempt * 10, 60)
                         add_log(user_id, f"Provider {p} rate limited (429), waiting {wait}s...", "WARNING")
+                        last_error = f"{p} is rate limiting requests"
                         await _log_call("rate_limited", p, actual_model, stage, err=str(e)[:200])
                         await asyncio.sleep(wait)
                         break
                     else:
                         err_msg = str(e)[:200]
                         add_log(user_id, f"Provider {p} error: {err_msg}", "WARNING")
+                        last_error = f"{p} answered with an error: {err_msg}"
                         await _log_call("error", p, actual_model, stage, err=err_msg)
                         continue
+            if not last_error and len(no_key) == len(providers) - provider_idx:
+                break  # no provider has a key: retrying cannot help
+        if last_error:
+            _ai_failure["reason"] = last_error
+        elif no_key:
+            _ai_failure["reason"] = "no AI key is set for any provider. Add one in Settings, AI Providers"
+        else:
+            _ai_failure["reason"] = "no provider answered"
         return None, None
 
     # Detect required timeframe from prompt text and fetch from MT5 directly
@@ -1062,8 +1085,8 @@ async def run_autopilot_cycle(user_id: int):
             if len(valid) > 0:
                 atr_value = float(valid.iloc[-1])
                 avg_atr_20 = float(valid.tail(min(20, len(valid))).mean())
-    except Exception:
-        pass
+    except Exception as e:
+        add_log(user_id, f"Could not compute ATR, using 0: {e}", "WARNING")
     add_log(user_id, f"ATR(14): {atr_value:.2f} | Avg(20): {avg_atr_20:.2f}")
 
     # ── SANDBOX APPROACH ──────────────────────────────────────────────
@@ -1194,7 +1217,7 @@ Strategy:
         stage="initial",
     )
     if not generated_code:
-        add_log(user_id, "AI code generation failed after retries", "ERROR")
+        add_log(user_id, f"AI code generation failed after retries: {_ai_failure['reason']}", "ERROR")
         state["stats"]["error_count"] += 1
         return
     add_log(user_id, f"AI generated code ({len(generated_code)} chars)")
@@ -1229,7 +1252,7 @@ Strategy:
                 stage="failover",
             )
             if not new_code:
-                add_log(user_id, f"{retry_p} code generation returned empty, skipping")
+                add_log(user_id, f"{retry_p} code generation returned nothing ({_ai_failure['reason']}), skipping")
                 continue
             generated_code = new_code
             ai_response = generated_code
@@ -1424,7 +1447,7 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
                 stage="backup",
             )
             if not fallback_response:
-                add_log(user_id, f"Backup {retry_p} returned empty, skipping")
+                add_log(user_id, f"Backup {retry_p} returned nothing ({_ai_failure['reason']}), skipping")
                 continue
             ai_response = fallback_response
             _source = "backup"
@@ -1708,7 +1731,7 @@ async def sync_trade_results(user_id: int):
                 now_utc = datetime.now(timezone.utc)
                 hours_diff = int((now_utc - executed_at).total_seconds() / 3600) + 12  # add 12h buffer
                 sync_hours = max(hours_diff, 24)
-            except Exception:
+            except Exception:  # swallow-ok: no usable trade time; the last 24 hours are checked instead
                 sync_hours = 24
 
             try:
@@ -1848,7 +1871,7 @@ async def autopilot_loop(user_id: int):
             try:
                 s = await _settings_row(user_id)
             except Exception:
-                pass
+                logger.warning("[user=%d] Could not read the cycle interval, waiting 300s", user_id, exc_info=True)
             await asyncio.sleep(s.interval_seconds if s and s.interval_seconds else 300)
     except asyncio.CancelledError:
         add_log(user_id, "Autopilot loop cancelled.", "INFO")
@@ -2144,7 +2167,7 @@ async def get_prompts(current_user: dict = Depends(get_current_user)):
                 text=parts[1].strip(),
                 is_custom=False
             ))
-        except Exception:
+        except IndexError:  # not an "N. text" line
             continue
             
     # 2. Load personal from DB

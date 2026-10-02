@@ -63,10 +63,10 @@ def _validate_backtest_result(bt: dict) -> dict:
 def _capture_raw_response(response) -> dict | None:
     try:
         return response.model_dump(mode='json')
-    except Exception:
+    except Exception:  # swallow-ok: older SDK objects; .dict() is tried next
         try:
             return response.dict()
-        except Exception:
+        except Exception:  # swallow-ok: the raw copy is only kept for debugging
             return None
 
 # ── DataFrame cache for chat follow-ups ────────────────────────────────────

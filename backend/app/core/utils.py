@@ -52,7 +52,7 @@ def sanitize_for_json(obj: Any) -> Any:
     if hasattr(obj, 'item') and callable(obj.item):
         try:
             return sanitize_for_json(obj.item())
-        except Exception:
+        except Exception:  # swallow-ok: not a NumPy scalar after all; returned unchanged
             pass
     return obj
 
