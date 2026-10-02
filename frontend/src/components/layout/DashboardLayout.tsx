@@ -7,6 +7,7 @@ import {
   LogOut, Zap, Users, BarChart3, FlaskConical, Menu, X, FileText
 } from 'lucide-react'
 import { cn } from '@/utils/utils'
+import TradingHaltBanner from '@/components/TradingHaltBanner'
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
@@ -130,6 +131,7 @@ export default function DashboardLayout() {
 
       {/* Main content */}
       <main className="flex-1 overflow-auto min-h-0">
+        <TradingHaltBanner />
         <Outlet />
       </main>
     </div>
