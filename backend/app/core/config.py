@@ -15,10 +15,19 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         return self.APP_ENV.lower() == "production"
 
+    def bcrypt_rounds(self) -> int:
+        """The bcrypt cost to use. Raises if it is weaker than 12 outside tests."""
+        if self.BCRYPT_ROUNDS < 12 and self.APP_ENV.lower() != "test":
+            raise ValueError(f"BCRYPT_ROUNDS={self.BCRYPT_ROUNDS} is too weak; 12 or more outside tests")
+        return self.BCRYPT_ROUNDS
+
     # ── JWT Settings ─────────────────────────────────────────────────────────
     SECRET_KEY: str = ""
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    # bcrypt cost for new password hashes. Below 12 is refused outside tests
+    # (APP_ENV=test), where 4 keeps the suite fast. See bcrypt_rounds().
+    BCRYPT_ROUNDS: int = 12
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # ── Validate SECRET_KEY ──────────────────────────────────────────────────

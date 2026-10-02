@@ -17,6 +17,9 @@ from dotenv import load_dotenv
 load_dotenv(BACKEND_DIR / ".env")
 logging.disable(logging.CRITICAL)
 os.environ["APP_ENV"] = "test"
+# Cheap bcrypt for tests only: hashing and every login are about 250 times faster.
+# The app refuses a cost below 12 outside APP_ENV=test.
+os.environ["BCRYPT_ROUNDS"] = "4"
 # A test-only signing key, used unless the environment already provides one.
 os.environ.setdefault("SECRET_KEY", "test-only-signing-key-" + "x" * 40)
 
@@ -50,16 +53,34 @@ test_engine = create_async_engine(
 TestSessionLocal = async_sessionmaker(test_engine, expire_on_commit=False)
 
 
+_tables_created = False
+_TEST_PASSWORD_HASH = get_password_hash(TEST_PASSWORD)  # once per run, not per test
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def setup_database():
+    """Every test starts with empty tables and the three test accounts.
+
+    The tables are created once per run and emptied before each test. Rebuilding
+    them for every test, plus hashing three passwords, took about 3 s per test.
+    """
+    global _tables_created
     # Clear login rate limiter so tests don't get 429
     from app.api.auth import reset_login_limits
     reset_login_limits()
     async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    init_blacklist_table()
+        if not _tables_created:
+            await conn.run_sync(Base.metadata.create_all)
+        for table in reversed(Base.metadata.sorted_tables):
+            await conn.execute(table.delete())
+        # Ids restart at 1, as they did with freshly built tables.
+        if (await conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE name='sqlite_sequence'")).first():
+            await conn.exec_driver_sql("DELETE FROM sqlite_sequence")
+    if not _tables_created:
+        init_blacklist_table()
+        _tables_created = True
     async with TestSessionLocal() as session:
-        pw = get_password_hash(TEST_PASSWORD)
+        pw = _TEST_PASSWORD_HASH
         users = [
             User(username="admin", name="Admin", hashed_password=pw, role="admin"),
             User(username="test_trader", name="Test Trader", hashed_password=pw, role="trader"),
@@ -69,8 +90,6 @@ async def setup_database():
             session.add(u)
         await session.commit()
     yield
-    async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
 
 
 @pytest.fixture(scope="session", autouse=True)

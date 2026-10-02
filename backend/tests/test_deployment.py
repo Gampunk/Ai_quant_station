@@ -172,6 +172,7 @@ def _docs_status(app_env: str) -> str:
         "print(c.get('/docs').status_code, c.get('/openapi.json').status_code, c.get('/health').status_code)"
     )
     env = {**os.environ, "APP_ENV": app_env, "DATABASE_URL": "sqlite+aiosqlite:///:memory:"}
+    env.pop("BCRYPT_ROUNDS", None)  # the tests' cheap cost is refused outside APP_ENV=test
     out = subprocess.run([sys.executable, "-c", code], cwd=BACKEND_DIR, env=env,
                          capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
@@ -184,6 +185,14 @@ def test_production_hides_docs():
 
 def test_development_shows_docs():
     assert _docs_status("development") == "200 200 200"
+
+
+def test_weak_password_hashing_is_refused_outside_tests():
+    from app.core.config import Settings
+    with pytest.raises(ValueError, match="too weak"):
+        Settings(APP_ENV="production", BCRYPT_ROUNDS=4).bcrypt_rounds()
+    assert Settings(APP_ENV="production", BCRYPT_ROUNDS=12).bcrypt_rounds() == 12
+    assert Settings(APP_ENV="test", BCRYPT_ROUNDS=4).bcrypt_rounds() == 4
 
 
 # ── Every package version is pinned (finding 13) ────────────────────────────
