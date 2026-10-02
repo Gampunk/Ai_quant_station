@@ -52,7 +52,7 @@ npm run dev
 ### First Run
 
 On first startup with a fresh database, the backend auto-creates:
-- All 25 database tables
+- All 27 database tables
 - One `admin` account, only if `DEFAULT_ADMIN_PASSWORD` is set and strong
 
 **Delete old `finance_engine.db` if upgrading from an older version** (schema changed).
@@ -81,6 +81,8 @@ Optional:
 | `MT5_CONNECTOR_URL` | — | External MT5 connector URL |
 | `MT5_BROKER_UTC_OFFSET` | 0 | Broker timezone offset (e.g., 2 for UTC+2) |
 | `ALLOW_REMOTE_CONNECTOR` | False | Allow a connector address outside local and private networks |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | — | Where heartbeat alerts are sent. Empty: alerts are only logged and listed on the Risk Limits card |
+| `BCRYPT_ROUNDS` | 12 | Password hashing cost. Below 12 is refused outside `APP_ENV=test` |
 | `HUGGINGFACE_API_KEY` | — | For data archiving |
 | `CORS_ORIGINS` | `http://localhost:5173,http://localhost:3000` | Allowed CORS origins |
 | `APP_ENV` | development | `production` switches on JSON logs and hides `/docs`, `/redoc`, `/openapi.json` |
@@ -100,7 +102,7 @@ Add people or reset a password with `python create_admin.py`. It prompts for the
 | trader | Trade, run the autopilot, run anything that executes AI-written code |
 | viewer | Read dashboards, history, reports and settings |
 
-## Database Tables (25)
+## Database Tables (27)
 
 | Table | Purpose |
 |---|---|
@@ -127,8 +129,10 @@ Add people or reset a password with `python create_admin.py`. It prompts for the
 | `strategy_scores` | Win rate, profit factor and cost per prompt, updated hourly |
 | `chat_embeddings` | Vectors of past AI Analyst answers, used for retrieval |
 | `risk_settings` | Every version of the risk limits, with who changed them and why. The newest is in force |
-| `risk_days` | Equity at the first order check of each UTC day, the baseline for the daily loss limit |
+| `risk_days` | Equity at the start of each UTC day, the baseline for the daily loss limit: recorded at 00:00 UTC, or at the first order check if that run was missed (`source`) |
 | `risk_decisions` | Every order the risk gate checked: refused, sent or failed, with the numbers and the settings version |
+| `trading_halts` | Every switch of the kill switch, on or off, with who and why. The newest is in force |
+| `alerts` | Heartbeat alerts: a check going down or coming back, and whether Telegram delivered it |
 
 ## Authentication Flow
 
@@ -425,7 +429,7 @@ Flow:
   → Cannot delete "admin" user
 ```
 
-## API Routes (68 total)
+## API Routes (72 total)
 
 ```
 AUTH:
@@ -516,6 +520,10 @@ RISK:
   GET    /api/risk/settings/history   Every version of the limits
   GET    /api/risk/status             Today's equity, loss, margin level and open trades
   GET    /api/risk/decisions          Recent order decisions, filter by outcome or source
+  GET    /api/risk/halt               Kill switch state (every page polls it for its banner)
+  POST   /api/risk/halt               Stop trading (admin or trader) or resume it (admin, reason required)
+  POST   /api/risk/close-all          Close every open position; body must say "CLOSE ALL"
+  GET    /api/risk/alerts             Recent heartbeat alerts
 
 BACKTEST:
   POST   /api/backtest/run            Run prompt backtest
@@ -615,6 +623,9 @@ with summer time). The backend works in real UTC throughout.
 | bcrypt directly (not passlib) | passlib incompatible with bcrypt 5.x. Use `bcrypt.hashpw()` and `bcrypt.checkpw()` directly |
 | `ta` library (not `pandas_ta`) | `pandas_ta` not available for Python 3.11+. Use `ta` (technical-analysis-library-python) |
 | One connector client | Every broker action and MT5 data request goes through `core/mt5_connector.py`. The backend never imports MetaTrader5, and tests fail if a second route appears |
+| Kill switch | `trading_halts`, checked inside the risk gate's lock, so no order already being checked slips out after it goes on. It also stops every autopilot and blocks restarts at boot. Closing and moving stops stay allowed. Anyone who can trade switches it on; only an admin switches it off |
+| One order at a time | `submit_order` runs under `order_lock()`, one lock per event loop. Single worker, so a process lock is enough |
+| Heartbeat | `core/heartbeat.py` checks every minute: connector and terminal, prices moving in market hours, each autopilot cycling. One alert when a check fails, one when it recovers, over Telegram (`core/alerts.py`). A dead backend is caught from outside, by upstream's `monitor.py` after step 14 |
 | One risk gate | `core/risk.py` `submit_order` is the only caller of `place_order`, and a test enforces it. The rules live in the pure `evaluate()` function. Limits are versioned rows, not constants, so they can be tuned, later by agents, and every decision names the version it used |
 | Connector lot cap | `MT5_MAX_VOLUME` on the connector machine (default 1.0 lot) refuses larger orders whatever the backend sends. Nothing on the website can raise it |
 | Per-user autopilot state | `_user_states[user_id]` dict instead of global singleton |
@@ -623,6 +634,7 @@ with summer time). The backend works in real UTC throughout.
 | `chat_memory_id` in trade link | Enables win-rate tracking per strategy prompt (RAG pipeline) |
 | `PRAGMA foreign_keys=ON` for SQLite | Required for CASCADE deletes to work on SQLite |
 | No silent errors | A handler that catches `Exception` must log, re-raise, or carry `# swallow-ok: <reason>` on its `except` line. Code in `app/` logs instead of printing. `tests/test_error_handling.py` enforces both. The price sync ends a run with failed symbols in `PriceSyncFailed` |
+| Continuous checks | `.github/workflows/verify.yml` builds the same environments and runs `scripts/verify.sh` on every push to the fork. Green there means green locally |
 | Frontend lint | `.eslintrc.cjs`, run by `npm run lint` and `verify.sh`. A disabled hook-dependency warning must say why on the same line |
 | Prompt refinement before AI call | `_refine_query()` rewrites vague user queries into structured analysis requests using a fast/cheap model (`mistralai/mistral-7b-instruct-v0.3`), falls back to the user's main model if unavailable. Controlled by `refine_prompt: bool` on `ChatRequest` (default: True). Adds ~300ms latency per query. |
 

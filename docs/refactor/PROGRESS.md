@@ -595,7 +595,7 @@ Checks 5 and 6 were rerun after a password reset and a fresh login: the first at
 
 ## Step 11. Deployment fixes
 
-**Status:** built. You chose to run its checks together with step 12's. Check 1 is shared: one `verify.sh` run covers both steps.
+**Status:** built. You chose to run its checks together with steps 12 and 13. Check 1 is shared: one `verify.sh` run covers all three.
 
 **Commits:** `3cb6788` password changes and proxy address, `1634776` Docker, nginx and pinned dependencies, and the docs commit after them
 
@@ -613,7 +613,7 @@ Checks 5 and 6 were rerun after a password reset and a fresh login: the first at
 
 **Your checks.** T1 runs the fake broker, T2 the local backend, T3 the commands.
 
-1. Covered by step 12's check 1.
+1. Covered by step 13's check 1.
 
 2. The local database update. T1 and T2 as in step 10:
    ```bash
@@ -685,7 +685,7 @@ Checks 5 and 6 were rerun after a password reset and a fresh login: the first at
 
 ## Step 12. Errors are logged, one login handler, lint
 
-**Status:** built. Checks to do, together with step 11's.
+**Status:** built. Checks to do, together with steps 11 and 13.
 
 **Commits:** `eab947f` backend errors, price sync and AI reason, `4ab54be` login handler, badge and lint, and the docs commit after them
 
@@ -703,10 +703,7 @@ Checks 5 and 6 were rerun after a password reset and a fresh login: the first at
 
 **Your checks.** T1 runs the fake broker, T2 the backend, T3 the frontend, T4 the commands.
 
-1. Six PASS lines for both steps: backend 261 passed and 9 skipped (about 20 minutes), connector 72, frontend lint, frontend 109, type check, build.
-   ```bash
-   cd ~/dev/Ai_quant_station && ./scripts/verify.sh
-   ```
+1. Covered by step 13's check 1.
 
 2. Start the app as in step 11's check 2 (T1 fake broker, T2 backend), then the frontend in T3:
    ```bash
@@ -749,3 +746,67 @@ Checks 5 and 6 were rerun after a password reset and a fresh login: the first at
 - Put a `print` in `app/`: 2 failures.
 - In the frontend, drop the retried-once guard: `never refreshes twice for the same request` fails. Retry after a failed refresh: 2 failures.
 - One control run also showed a single test setup error that did not come back in three more runs. Probably the fake broker starting slowly; worth watching.
+
+## Step 13. Safety net
+
+**Status:** built. Checks to do, together with steps 11 and 12. One `verify.sh` run covers all three.
+
+**Commits:** `52ae04a` faster tests, `166c1d2` kill switch, order lock, midnight equity and heartbeat, `55e5ae2` Risk Limits card and banner, `b603c1c` GitHub Actions, and the docs commit after them
+
+**What changed**
+- Faster tests (finding 18). The tables are created once per run and emptied before each test, and test passwords use bcrypt cost 4. Side by side on the same machine, setup per test went from 20.2 s to 0.62 s, and a login check from 3.7 s to 0.012 s (the machine was swapping, so both numbers are inflated; the ratio holds). A cost below 12 is refused outside tests.
+- GitHub Actions. `.github/workflows/verify.yml` builds the same environments and runs `scripts/verify.sh` on every push to your fork.
+- Kill switch. "Stop all trading" on the Risk Limits card: every new order is refused, every autopilot stops, none restarts at boot or by hand, and a red banner appears on every page. Closing trades and moving stops still work. Anyone who can trade can switch it on; only an admin can switch it off, and must give a reason. Every switch is recorded. "Close all trades" next to it needs the words CLOSE ALL typed in.
+- One order at a time (finding 24). The check and the send happen under one lock, which the kill switch also takes.
+- Starting equity at 00:00 UTC (finding 25), by a scheduled job. If it is missed, the first check of the day records it as before, and the card says which one was used.
+- Heartbeat alerts. Every minute: the connector and terminal answer, prices move during market hours, each switched-on autopilot is cycling. One alert when something breaks, one when it recovers, sent to Telegram when `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set, and always listed on the Risk Limits card and in the log.
+
+**Your checks.** Stop other heavy work first (finding 42): your WSL has 4.8 GB of memory, and another project's tests running alongside made every timing here meaningless. T1 runs the fake broker, T2 the backend, T3 the frontend, T4 the commands.
+
+1. Every check for steps 11, 12 and 13, and how long it takes:
+   ```bash
+   cd ~/dev/Ai_quant_station && time ./scripts/verify.sh
+   ```
+   Expect six PASS lines: backend 279 passed and 9 skipped, connector 72, frontend lint, frontend 109, type check, build. It took about 18 minutes before this step; expect well under 10.
+
+2. GitHub runs the same checks. Open https://github.com/Gampunk/Ai_quant_station/actions. The newest run of "verify", for the step 13 commits, should be green. Then prove a broken test turns it red, on a throwaway branch:
+   ```bash
+   cd ~/dev/Ai_quant_station
+   git switch -c ci-red-check
+   printf '\ndef test_ci_must_fail():\n    assert False\n' >> backend/tests/test_deployment.py
+   git commit -qam "ci check: must fail" && git push -u origin ci-red-check
+   ```
+   Within about 20 minutes that run shows red, failing on `test_ci_must_fail`. Then remove the branch everywhere:
+   ```bash
+   git switch refactor/hardening && git branch -D ci-red-check && git push origin --delete ci-red-check
+   ```
+
+3. The kill switch. Start T1, T2 and T3 as in step 12, log in as admin, open Settings, then Risk Limits.
+   - Click **Stop all trading** with a reason, and confirm. A red banner appears on every page.
+   - On the Terminal, place a BUY with a stop loss: refused, naming your reason.
+   - On Autopilot, press Start: refused, "Trading is stopped (kill switch)".
+   - Stop T2 with Ctrl+C and start it again. The banner is still there.
+   - Back on Risk Limits, **Resume trading** without a reason: refused. With a reason: the banner goes within 30 seconds.
+
+4. Each switched-on autopilot is stopped by it. With trading resumed, start the autopilot, then **Stop all trading**. The toast says 1 autopilot stopped, the Autopilot page shows it stopped, and its log says `Autopilot STOPPED by the kill switch`. Resume trading again afterwards.
+
+5. Close all trades. Place two small BUY orders with stops on the Terminal. On Risk Limits, the **Close all trades** button stays disabled until you type `CLOSE ALL`. Press it: "2 trade(s) closed", and the Dashboard shows none open.
+
+6. Alerts. Keep the app running and stop T1. Within about two minutes, Risk Limits shows `Problem: The MT5 connector is unreachable` under Recent alerts (with "not sent: Telegram is not set up"), and T2's log shows the same as an ERROR, once, not every minute. Start T1 again: within a minute, `Recovered: The MT5 connector and terminal are back`.
+
+7. Optional, Telegram. Create a bot with @BotFather, put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `backend/.env` (see `.env.example`), restart T2, and repeat check 6. Both messages arrive on your phone.
+
+8. The rest is shown by tests, since it needs midnight or a race:
+   ```bash
+   cd ~/dev/Ai_quant_station/backend
+   .venv/bin/python -m pytest tests/test_safety_net.py -v -p no:cacheprovider -k "one_after_the_other or midnight or missed"
+   ```
+   Expect 4 passed: two orders at once give one sent and one refused; the midnight job records the day; a missed midnight falls back to the first check; a midnight with the connector down records nothing.
+
+**Negative controls.** Claude ran these before handover. Each failed where stated.
+
+- Remove the kill switch check from the risk gate: `test_the_kill_switch_refuses_every_new_order` fails.
+- Send orders without the lock: `test_two_orders_at_once_are_checked_one_after_the_other` fails.
+- Let anyone resume trading: `test_only_an_admin_resumes_and_must_say_why` fails.
+- Let the heartbeat alert on every failed check: `test_a_connector_outage_alerts_once_and_recovery_once` fails.
+- With `APP_ENV=production` and cost 4, the server refused to start: the `/docs` test failed until the cheap cost was kept to tests.

@@ -25,12 +25,13 @@ the colleague's branch in `UPSTREAM_COMPARISON.md`.
 ## State
 
 - Steps 1 to 10: approved by the user.
-- Steps 11 and 12: built and committed. The user chose to run their checks together
-  with step 13's.
-- Step 13: approved, with the recommended options and Telegram for alerts. Building
-  had just started; nothing of it is committed yet.
+- Steps 11, 12 and 13: built and committed. The user runs their checks together;
+  the instructions are in PROGRESS.md. Not approved until those pass.
+- Next: step 14, merging the best of both branches and replacing the live system.
+  Plan it from `UPSTREAM_COMPARISON.md`; nothing is decided yet beyond what that
+  file and the rules above say.
 
-## Step 13 plan (approved)
+## Step 13 as approved (now built)
 
 1. Faster backend tests (finding 18). Each test spends about 3 s in setup, mostly
    rebuilding tables and bcrypt-hashing three passwords. Hash once per session and
