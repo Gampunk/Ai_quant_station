@@ -508,7 +508,7 @@ Checks 5 and 6 were rerun after a password reset and a fresh login: the first at
 
 ## Step 10. Autopilot fixes
 
-**Status:** built. Check 1 passed for you on 2026-09-30. Checks 2 to 6 still to do.
+**Status:** approved by you on 2026-10-02. All six checks passed. In check 6 the AI step failed because no AI key is set, as expected, and the loop carried on to the next cycle.
 
 **Commits:** `b0fe844` connector clock and close reasons, `b6c0941` autopilot and UTC, `b58a64c` Autopilot page, and the docs commit after them
 
