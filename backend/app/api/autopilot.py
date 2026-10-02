@@ -154,39 +154,32 @@ async def _rebuild_stats(user_id: int):
             if last_ts:
                 state["stats"]["last_run"] = last_ts.isoformat()
 
-            # Skipped count = distinct cycles with skip messages (not per-provider noise)
-            skip_patterns = [
-                "Daily trade limit%Skipping%",
-                "All backup providers%NO_SETUP%",
-                "Skipping cycle%",
-            ]
-            for pattern in skip_patterns:
-                result = await db.execute(
-                    select(func.count(func.distinct(AutopilotLog.cycle_number))).where(
-                        AutopilotLog.user_id == user_id,
-                        AutopilotLog.cycle_number.isnot(None),
-                        AutopilotLog.message.ilike(pattern)
-                    )
+            # Count terminal attempt outcomes from the durable ledger. Log text
+            # is best-effort telemetry and must not define persisted totals.
+            skipped_outcomes = (
+                "daily_trade_limit", "daily_loss_limit", "skipped_cooldown",
+                "skipped_no_connector", "skipped_stale_market_data", "no_setup",
+                "no_eligible_prompts", "not_configured",
+            )
+            result = await db.execute(
+                select(func.count(AutopilotCycle.cycle_id)).where(
+                    AutopilotCycle.user_id == user_id,
+                    AutopilotCycle.outcome.in_(skipped_outcomes),
                 )
-                cnt = result.scalar() or 0
-                state["stats"]["skipped_count"] += cnt
+            )
+            state["stats"]["skipped_count"] = result.scalar() or 0
 
-            # Error count = distinct cycles with error messages (not per-provider noise)
-            error_patterns = [
-                "No market data available",
-                "AI code generation failed after retries",
-                "Trade failed%",
-            ]
-            for pattern in error_patterns:
-                result = await db.execute(
-                    select(func.count(func.distinct(AutopilotLog.cycle_number))).where(
-                        AutopilotLog.user_id == user_id,
-                        AutopilotLog.cycle_number.isnot(None),
-                        AutopilotLog.message.ilike(pattern)
-                    )
+            error_outcomes = (
+                "no_market_data", "ai_generation_failed", "ai_provider_or_response_failed",
+                "execution_rejected", "cycle_crashed", "mt5_connection_failed",
+            )
+            result = await db.execute(
+                select(func.count(AutopilotCycle.cycle_id)).where(
+                    AutopilotCycle.user_id == user_id,
+                    AutopilotCycle.outcome.in_(error_outcomes),
                 )
-                cnt = result.scalar() or 0
-                state["stats"]["error_count"] += cnt
+            )
+            state["stats"]["error_count"] = result.scalar() or 0
 
             # Total runs = sum of all three (every cycle ends as trade, skip, or error)
             state["stats"]["total_runs"] = (
@@ -961,22 +954,25 @@ async def _choose_prompt_with_context(
     return selected["prompt"], context
 
 
-async def run_autopilot_cycle(user_id: int):
+async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
     state = _get_state(user_id)
-    state["stats"]["total_runs"] += 1
-    state["stats"]["last_run"] = datetime.now(timezone.utc).isoformat()
-    cycle_id = str(uuid.uuid4())
-    state["active_cycle_id"] = cycle_id
+    # The loop creates the durable cycle before its cooldown/health gates. Keep
+    # direct callers backwards-compatible by creating a cycle here when needed.
+    if cycle_id is None:
+        state["stats"]["total_runs"] += 1
+        state["stats"]["last_run"] = datetime.now(timezone.utc).isoformat()
+        cycle_id = str(uuid.uuid4())
+        state["active_cycle_id"] = cycle_id
+        async with AsyncSessionLocal() as db:
+            db.add(AutopilotCycle(
+                cycle_id=cycle_id,
+                user_id=user_id,
+                cycle_number=state["stats"]["total_runs"],
+                symbol="unknown",
+                status="running",
+            ))
+            await db.commit()
     cycle_number = state["stats"]["total_runs"]
-    async with AsyncSessionLocal() as db:
-        db.add(AutopilotCycle(
-            cycle_id=cycle_id,
-            user_id=user_id,
-            cycle_number=cycle_number,
-            symbol="unknown",
-            status="running",
-        ))
-        await db.commit()
     add_log(user_id, f"=== Starting Cycle #{cycle_number} ===")
 
     default_prompts = load_prompts()
@@ -2731,15 +2727,48 @@ async def autopilot_loop(user_id: int):
     try:
         while state["enabled"]:
             if state["running"]:
+                # Treat every scheduled check as an attempt, including checks
+                # rejected by cooldown, risk, connector, or freshness gates.
+                state["stats"]["total_runs"] += 1
+                state["stats"]["last_run"] = datetime.now(timezone.utc).isoformat()
+                cycle_id = str(uuid.uuid4())
+                state["active_cycle_id"] = cycle_id
+                cycle_number = state["stats"]["total_runs"]
+                try:
+                    async with AsyncSessionLocal() as db:
+                        db.add(AutopilotCycle(
+                            cycle_id=cycle_id,
+                            user_id=user_id,
+                            cycle_number=cycle_number,
+                            symbol="unknown",
+                            status="running",
+                        ))
+                        await db.commit()
+                except Exception as exc:
+                    # Never place an order if its attempt cannot be audited.
+                    state["active_cycle_id"] = None
+                    state["stats"]["error_count"] += 1
+                    logger.exception("Could not persist autopilot attempt for user %s", user_id)
+                    add_log(user_id, f"Attempt tracking unavailable; skipping cycle ({type(exc).__name__})", "ERROR")
+                    await asyncio.sleep(300)
+                    continue
+
                 state["stats"]["daily_pnl"] = state["stats"].get("daily_pnl", 0)
                 max_loss = None
                 cooldown_mins = 0
+                interval = 300
+                _symbol = "XAUUSD"
+                _connector_url = None
                 async with AsyncSessionLocal() as db:
                     result = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
                     s = result.scalar_one_or_none()
                     if s:
                         max_loss = s.max_daily_loss
                         cooldown_mins = s.cooldown_minutes or 0
+                        interval = s.interval_seconds or 300
+                        _symbol = s.symbol or "XAUUSD"
+                        _connector_url = (s.mt5_connector_url or settings.MT5_CONNECTOR_URL or "").strip() or None
+                await _update_autopilot_cycle(cycle_id, symbol=_symbol)
 
                 # Cooldown check
                 last_trade = state.get("last_trade_time")
@@ -2748,6 +2777,10 @@ async def autopilot_loop(user_id: int):
                     if elapsed_mins < cooldown_mins:
                         add_log(user_id, f"Cooldown ({elapsed_mins:.0f}/{cooldown_mins} min). Skipping cycle.", "INFO")
                         state["stats"]["skipped_count"] += 1
+                        await _finish_autopilot_cycle(
+                            user_id, cycle_id, "skipped_cooldown",
+                            f"Cooldown active ({elapsed_mins:.0f}/{cooldown_mins} minutes)",
+                        )
                         async with AsyncSessionLocal() as db:
                             result = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
                             s = result.scalar_one_or_none()
@@ -2762,27 +2795,32 @@ async def autopilot_loop(user_id: int):
                     add_log(user_id, f"Daily loss limit (${max_loss}) reached. Stopping.", "WARNING")
                     state["running"] = False
                     hit_loss_limit = True
+                    await _finish_autopilot_cycle(
+                        user_id, cycle_id, "daily_loss_limit",
+                        f"Daily realized P&L {state['stats']['daily_pnl']:.2f} reached limit {max_loss:.2f}",
+                    )
+                    await asyncio.sleep(interval)
+                    continue
 
                 # Live tick check — skip if no fresh market data
-                _symbol = "XAUUSD"
-                _connector_url = None
-                try:
-                    async with AsyncSessionLocal() as db:
-                        _res = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
-                        _s = _res.scalar_one_or_none()
-                        if _s:
-                            _symbol = _s.symbol or "XAUUSD"
-                            _connector_url = (_s.mt5_connector_url or settings.MT5_CONNECTOR_URL or "").strip() or None
-                except Exception:
-                    pass
                 if not _connector_url:
                     add_log(user_id, "No MT5 connector URL configured. Skipping cycle.", "WARNING")
                     state["stats"]["skipped_count"] += 1
+                    await _finish_autopilot_cycle(
+                        user_id, cycle_id, "skipped_no_connector",
+                        "No MT5 connector URL configured",
+                        symbol=_symbol,
+                    )
                     await asyncio.sleep(300)
                     continue
                 if not await _has_live_ticks(user_id, _symbol, _connector_url):
                     add_log(user_id, f"Market paused — no live ticks for {_symbol}. Waiting...", "INFO")
                     state["stats"]["skipped_count"] += 1
+                    await _finish_autopilot_cycle(
+                        user_id, cycle_id, "skipped_stale_market_data",
+                        f"No fresh one-minute candle for {_symbol}",
+                        symbol=_symbol,
+                    )
                     await asyncio.sleep(60)
                     continue
 
@@ -2795,15 +2833,14 @@ async def autopilot_loop(user_id: int):
                     pass
                 if not hit_loss_limit:
                     try:
-                        await run_autopilot_cycle(user_id)
+                        await run_autopilot_cycle(user_id, cycle_id=cycle_id)
                     except Exception as e:
-                        failed_cycle_id = state.get("active_cycle_id")
                         add_log(user_id, f"Cycle crashed (recovering): {type(e).__name__}: {e}", "ERROR")
                         state["stats"]["error_count"] += 1
-                        if failed_cycle_id:
+                        if state.get("active_cycle_id") == cycle_id:
                             await _finish_autopilot_cycle(
                                 user_id,
-                                failed_cycle_id,
+                                cycle_id,
                                 "cycle_crashed",
                                 type(e).__name__,
                             )
