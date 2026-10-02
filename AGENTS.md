@@ -83,6 +83,9 @@ Optional:
 | `ALLOW_REMOTE_CONNECTOR` | False | Allow a connector address outside local and private networks |
 | `HUGGINGFACE_API_KEY` | — | For data archiving |
 | `CORS_ORIGINS` | `http://localhost:5173,http://localhost:3000` | Allowed CORS origins |
+| `APP_ENV` | development | `production` switches on JSON logs and hides `/docs`, `/redoc`, `/openapi.json` |
+| `FORWARDED_ALLOW_IPS` | — | Proxies whose `X-Forwarded-For` is believed, comma separated, addresses or networks. Empty: no proxy |
+| `HOST`, `PORT` | 0.0.0.0, 8002 | Where `run.py` listens |
 
 ## Accounts and roles
 
@@ -166,8 +169,15 @@ On every request, the backend:
   → Reads the user's role and active status from the database
   → So demoting or disabling someone applies on their next request
 
+On a password change (own, by an admin, or create_admin.py --reset):
+  → users.password_version goes up by one; every token carries the version it was issued with
+  → Every older access and refresh token is refused, on every device
+  → The person changing their own password gets a new pair back and stays logged in
+
 Login throttling (in memory, single worker):
   → 10 attempts per address per minute
+  → The address comes from X-Forwarded-For only when the request is from a proxy
+    listed in FORWARDED_ALLOW_IPS (core/client_ip.py). Otherwise the header is ignored
   → 5 failures lock an account for 15 minutes
 ```
 
@@ -615,8 +625,8 @@ with summer time). The backend works in real UTC throughout.
 
 ## Known Limitations
 
-1. **No HTTPS** in the nginx config. Needed before anything is exposed.
-2. **Single worker only.** Autopilot state and login throttling live in process memory.
+1. **No HTTPS** in the nginx config. Needed before anything is exposed. Planned with the domain in step 14.
+2. **Single worker only.** Autopilot state and login throttling live in process memory. `run.py` fixes it at one.
 3. **The sandbox is not a security boundary.** See the sandbox section above.
 4. **Records made before step 10 keep broker time.** Autopilot close times and durations stored earlier are a few hours off. They were left as they are; the live database's history is handled in the step 14 plan.
 5. **`pandas_ta` replaced with `ta`**: different API, AI prompts updated accordingly.
@@ -637,16 +647,27 @@ backend/.env                      # Environment variables (not in git)
 
 ### Docker
 ```bash
-docker-compose up --build
-# Backend: http://localhost:8000
-# Requires .env file to be configured
+echo "POSTGRES_PASSWORD=<letters and digits>" > .env   # next to docker-compose.yml, git ignores it
+docker compose up --build
+# Open http://localhost:8080 (HTTP_PORT changes it)
 ```
 
-### Render (cloud)
-See `render.yaml` for configuration. Requires:
-- Python 3.11 + Node.js (for frontend build)
-- PostgreSQL database
-- Environment variables set in dashboard
+- Three containers: Postgres, the backend, nginx. Only nginx has a port on the host.
+- The backend runs as a normal user with `APP_ENV=production`: JSON logs, and no `/docs` or `/openapi.json`.
+- nginx's address is fixed (172.30.57.10) and is the only one whose `X-Forwarded-For` the backend believes.
+- `backend/.env` supplies `SECRET_KEY` and `DEFAULT_ADMIN_PASSWORD`. The connector is reached at
+  `host.docker.internal:5001` unless `MT5_CONNECTOR_URL` is set in the root `.env`.
+- `data_archive/` is mounted into the backend for the Historical Lab and price sync.
+
+### Linux server (systemd)
+`deploy/impulse-analyst.service` runs `run.py` as the `impulse` account on 127.0.0.1:8002,
+behind nginx on the same machine. Render was dropped in step 11: it was never used.
+
+### Dependencies
+`backend/requirements.in` is the hand-edited list. `requirements.txt` is generated from it with
+every version exact and hashed, and is what Docker installs. `requirements-dev.txt` adds the test
+tools at the same versions. The commands to regenerate both are at the top of each `.in` file.
+`backend/uv.toml` lets uv read both indexes (PyPI and PyTorch's CPU builds); the hashes make that safe.
 
 ## RAG & Self-Improvement Architecture
 

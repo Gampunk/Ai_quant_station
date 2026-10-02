@@ -79,6 +79,7 @@ Its test environment is set up as described in [docs/refactor/BASELINE.md](docs/
 
 Runs the backend, connector and frontend tests, the type check and a production build.
 Install the test tools first with `requirements-dev.txt` instead of `requirements.txt`.
+Both files are generated, with exact versions: edit `requirements.in` and regenerate (see the top of that file).
 
 ## More
 

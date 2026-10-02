@@ -15,6 +15,7 @@ cp .env.example .env
 ```
 
 Without `uv`, `python3.11 -m venv .venv` then `.venv/bin/pip install -r requirements.txt` works too.
+Every version is exact and hashed. Run uv from `backend/` so it reads `uv.toml`.
 
 Set these in `backend/.env`:
 

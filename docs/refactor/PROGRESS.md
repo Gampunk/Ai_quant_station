@@ -592,3 +592,96 @@ Checks 5 and 6 were rerun after a password reset and a fresh login: the first at
 - In `backend/app/core/broker_clock.py`, make `epoch_to_utc` return its input: 2 failures.
 - In `backend/app/api/execute.py`, drop `unit='s'`: `test_sandbox_candles_are_in_this_century` fails.
 - In `mt5_connector/connector.py`: trusting a price that has not moved, dropping the 5-minute tolerance, or dropping the deal reason each fail 1 test.
+
+## Step 11. Deployment fixes
+
+**Status:** built. Checks 1 to 6 still to do.
+
+**Commits:** `3cb6788` password changes and proxy address, `1634776` Docker, nginx and pinned dependencies, and the docs commit after them
+
+**What changed**
+- Changing a password ends every other session (finding 19): your own change, an admin's reset, or `create_admin.py --reset`. Each token carries the password version it was issued with, and older versions are refused. Whoever changes their own password gets a new login back on the Settings page and stays logged in. A new `users.password_version` column, with its migration.
+- Behind nginx each visitor has their own login limit (finding 20). The backend reads `X-Forwarded-For` only when the request comes from an address in `FORWARDED_ALLOW_IPS`. Sent from anywhere else, the header is ignored, so nobody can dodge the limit by writing a new address in it. A malformed list stops the server at startup.
+- Every package version is exact and hashed (finding 13). You edit `requirements.in`; `requirements.txt` is generated from it with your current versions, so nothing was upgraded. `requirements-dev.txt` is generated the same way, at the same versions. torch comes as the CPU build. `backend/uv.toml` lets uv read both indexes, which is safe because of the hashes.
+- Docker: one port (8000 inside), one worker, a normal user rather than root, `APP_ENV=production`, and a health check. In production, `/docs`, `/redoc` and `/openapi.json` return 404, and logs are JSON.
+- `.dockerignore` only matched the repository root, so `backend/.env`, the local database and its backup went into the image (finding 30). Now none of them do.
+- With the frontend built, `/health` and `/docs` were answered by the web page (finding 31). Fixed.
+- `nginx.conf` had two `http` blocks and could not start. It is rewritten and switched on in compose. Only nginx has a port on your machine (8080). Postgres and the backend are reachable only inside Docker.
+- Postgres refuses to start without a `POSTGRES_PASSWORD` you choose. The default `postgres` password is gone.
+- The systemd file runs as an `impulse` account on 127.0.0.1, behind nginx.
+- `render.yaml` is deleted. It was never used, and it generated a connector token that could never match.
+
+**Your checks.** T1 runs the fake broker, T2 the local backend, T3 the commands.
+
+1. Five PASS lines: backend 250 passed and 9 skipped (about 19 minutes), connector 72, frontend 109.
+   ```bash
+   cd ~/dev/Ai_quant_station && ./scripts/verify.sh
+   ```
+
+2. The local database update. T1 and T2 as in step 10:
+   ```bash
+   cd ~/dev/Ai_quant_station
+   mt5_connector/.venv/bin/python mt5_connector/testing/run_fake_connector.py --port 5001 --token mytoken --server-offset 3
+   ```
+   ```bash
+   cd ~/dev/Ai_quant_station/backend
+   MT5_CONNECTOR_URL=http://127.0.0.1:5001 MT5_API_TOKEN=mytoken .venv/bin/python -m uvicorn app.main:app --port 8002
+   ```
+   Expect `Upgrading database from c5e8f2a4d6b9 to b3d6f9a2c8e1`.
+
+3. A password change ends old sessions. T3 creates a throwaway account, changes its password, and deletes it again:
+   ```bash
+   cd ~/dev/Ai_quant_station/backend
+   B=localhost:8002; J="content-type: application/json"; ADMIN_PW=$(grep ^DEFAULT_ADMIN_PASSWORD .env | cut -d= -f2-)
+   tok() { python3 -c "import sys,json; print(json.load(sys.stdin)['$1'])"; }
+   H="Authorization: Bearer $(curl -s -X POST $B/api/auth/login -H "$J" -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PW\"}" | tok access_token)"
+   ID=$(curl -s -X POST $B/api/auth/users -H "$H" -H "$J" -d '{"username":"step11","name":"Step 11","password":"first-password-2026","role":"viewer"}' | tok id)
+   P=$(curl -s -X POST $B/api/auth/login -H "$J" -d '{"username":"step11","password":"first-password-2026"}')
+   OLD_A=$(echo "$P" | tok access_token); OLD_R=$(echo "$P" | tok refresh_token)
+   N=$(curl -s -X PUT $B/api/auth/password -H "Authorization: Bearer $OLD_A" -H "$J" -d '{"current_password":"first-password-2026","new_password":"second-password-2026"}')
+   echo "old access:  $(curl -s -o /dev/null -w '%{http_code}' $B/api/auth/me -H "Authorization: Bearer $OLD_A")"
+   echo "old refresh: $(curl -s -o /dev/null -w '%{http_code}' -X POST $B/api/auth/refresh -H "$J" -d "{\"refresh_token\":\"$OLD_R\"}")"
+   echo "new access:  $(curl -s -o /dev/null -w '%{http_code}' $B/api/auth/me -H "Authorization: Bearer $(echo "$N" | tok access_token)")"
+   curl -s -X DELETE $B/api/auth/users/$ID -H "$H" -o /dev/null -w "deleted: %{http_code}\n"
+   curl -s -o /dev/null -w "local /docs: %{http_code}\n" $B/docs
+   ```
+   Expect old access 401, old refresh 401, new access 200, deleted 200, and local `/docs` 200 (development still shows it).
+
+4. Docker from scratch. Stop T2 first (Ctrl+C); T1 can keep running. In T3, from the repository root:
+   ```bash
+   cd ~/dev/Ai_quant_station
+   echo "POSTGRES_PASSWORD=$(python3 -c 'import secrets; print(secrets.token_hex(16))')" > .env
+   docker compose up -d --build
+   docker compose ps --format '{{.Name}}  {{.Status}}  {{.Ports}}'
+   for p in /health /docs /openapi.json /; do echo "$p $(curl -s -o /dev/null -w '%{http_code} %{content_type}' localhost:8080$p)"; done
+   docker compose exec -T postgres psql -U impulse -d impulse_analyst -tc "select version_num from alembic_version"
+   docker compose logs backend | grep -E "Admin account|startup complete"
+   ```
+   The first build downloads about 1 GB and takes several minutes. Expect three containers, `healthy`, with a host port (`0.0.0.0:8080`) only on `impulse_nginx`. Then `/health 200 application/json`, `/docs 404`, `/openapi.json 404`, `/ 200 text/html`, the version `b3d6f9a2c8e1`, and JSON log lines for the admin account and startup. Then open http://localhost:8080 and log in as admin with your usual password. This is a new, empty Postgres database, so the Dashboard's MT5 figures may show an error: the container cannot use your local connector token unless it is the same as in `backend/.env`.
+
+5. Each visitor has their own login limit, and nobody can fake one:
+   ```bash
+   docker compose restart backend && until [ "$(docker inspect -f '{{.State.Health.Status}}' impulse_backend)" = healthy ]; do sleep 3; done
+   NET=$(docker network ls --format '{{.Name}}' | grep impulse_network)
+   visit() { docker run --rm --network $NET --ip $1 --entrypoint sh ai_quant_station-backend -c "for i in \$(seq $2); do curl -s -o /dev/null -w '%{http_code} ' http://nginx/api/auth/login -H 'content-type: application/json' -d \"{\\\"username\\\":\\\"nobody\$i-$1\\\",\\\"password\\\":\\\"wrong-password-1\\\"}\"; done"; echo; }
+   echo -n "visitor A, 11 tries: "; visit 172.30.57.101 11
+   echo -n "visitor B, 1 try:    "; visit 172.30.57.102 1
+   echo -n "you, 11 made-up addresses: "; for i in $(seq 11); do curl -s -o /dev/null -w '%{http_code} ' localhost:8080/api/auth/login -H "X-Forwarded-For: 203.0.113.$i" -H 'content-type: application/json' -d "{\"username\":\"fake$i\",\"password\":\"wrong-password-1\"}"; done; echo
+   ```
+   Expect visitor A: ten 401s, then 429. Visitor B: 401, so A's limit did not block B. You: ten 401s, then 429, because the made-up `X-Forwarded-For` addresses were ignored.
+
+6. Refusals, and what is inside the image:
+   ```bash
+   POSTGRES_PASSWORD= docker compose config > /dev/null
+   docker run --rm --entrypoint sh ai_quant_station-backend -c 'whoami; find / \( -name .env -o -name "*.db" -o -name "*.bak" -o -name .venv \) -not -path "/proc/*" 2>/dev/null; echo end'
+   docker compose down -v
+   ```
+   Expect `required variable POSTGRES_PASSWORD is missing a value`, then `app` and `end` with nothing between them. `down -v` removes the containers and the test database. The root `.env` stays; delete it if you like.
+
+**Negative controls.** Claude ran these before handover. Each failed where stated.
+
+- In `get_current_user`, delete the password version check: 2 failures (old access tokens work again).
+- In `set_password`, stop raising `password_version`: 3 failures.
+- In `client_ip`, believe the first `X-Forwarded-For` entry from anyone: 4 failures, including the login limit test.
+- In `requirements.txt`, change one `==` to `>=`: the pin test fails. Remove one package's hashes: the hash test fails.
+- In Docker, the two-container visitor test and the made-up address test were run against the real stack, with the results in check 5.
