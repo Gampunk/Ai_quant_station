@@ -12,7 +12,13 @@ rule can be tested with plain numbers. submit_order() gathers those numbers.
 The limits are rows in risk_settings, changed through /api/risk/settings. Each
 change adds a row; the newest is in force. The connector has its own lot cap,
 MT5_MAX_VOLUME, set on its machine, which nothing here can raise.
+
+Orders are checked one at a time (order_lock), so two orders arriving together
+cannot both pass a limit that only one of them fits. The kill switch
+(trading_halts) is checked inside the same lock. The lock is per process: the
+app runs as a single worker.
 """
+import asyncio
 import logging
 import math
 from dataclasses import dataclass, field
@@ -24,7 +30,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .database import AsyncSessionLocal
 from .mt5_connector import ConnectorError, connector_client
-from ..models.risk import RiskDay, RiskDecision, RiskSettings
+from ..models.risk import RiskDay, RiskDecision, RiskSettings, TradingHalt
 
 log = logging.getLogger("risk")
 
@@ -276,8 +282,8 @@ def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-async def start_of_day_equity(db, account: Dict[str, Any]) -> Optional[float]:
-    """The equity at the first check today (UTC), recorded now if this is the first."""
+async def _day_row(db, account: Dict[str, Any], source: str) -> Optional[RiskDay]:
+    """Today's baseline row, recorded from this account reading if there is none yet."""
     login, equity = account.get("login"), account.get("equity")
     if login is None or not equity:
         return None
@@ -285,13 +291,77 @@ async def start_of_day_equity(db, account: Dict[str, Any]) -> Optional[float]:
     query = select(RiskDay).where(RiskDay.day == day, RiskDay.account_login == login)
     row = (await db.execute(query)).scalar_one_or_none()
     if row is None:
-        db.add(RiskDay(day=day, account_login=login, start_equity=equity))
+        db.add(RiskDay(day=day, account_login=login, start_equity=equity, source=source))
         try:
             await db.commit()
         except IntegrityError:
             await db.rollback()  # another request recorded it first
         row = (await db.execute(query)).scalar_one()
-    return row.start_equity
+    return row
+
+
+async def start_of_day_equity(db, account: Dict[str, Any]) -> Optional[float]:
+    """Today's starting equity (UTC). Normally recorded at midnight by record_day_start;
+    if that run was missed, the first check of the day records it now."""
+    row = await _day_row(db, account, "first_check")
+    return row.start_equity if row else None
+
+
+async def day_start_source(db, account: Dict[str, Any]) -> Optional[str]:
+    row = await _day_row(db, account, "first_check")
+    return row.source if row else None
+
+
+async def record_day_start() -> Optional[float]:
+    """Run at 00:00 UTC: record the equity the day starts with (finding 25).
+
+    It used to be recorded only at the first order check, so losses on positions
+    held overnight, before that check, never counted toward the daily limit.
+    """
+    try:
+        account = await connector_client.get_account()
+    except ConnectorError as exc:
+        log.warning("Could not record today's starting equity at midnight: %s. "
+                    "The first order check will record it instead.", exc.detail)
+        return None
+    async with AsyncSessionLocal() as db:
+        row = await _day_row(db, account, "midnight")
+    if row is not None:
+        log.info("Day %s starts at equity %.2f (%s)", row.day, row.start_equity, row.source)
+    return row.start_equity if row else None
+
+
+# ── Kill switch ─────────────────────────────────────────────────────────────
+async def current_halt(db) -> Optional[TradingHalt]:
+    """The newest kill switch row, or None if it has never been used."""
+    return (await db.execute(select(TradingHalt).order_by(TradingHalt.id.desc()).limit(1))).scalar_one_or_none()
+
+
+async def trading_halted() -> bool:
+    async with AsyncSessionLocal() as db:
+        row = await current_halt(db)
+    return bool(row and row.halted)
+
+
+def halt_dict(row: Optional[TradingHalt]) -> Dict[str, Any]:
+    if row is None:
+        return {"halted": False, "changed_by_name": None, "reason": None, "created_at": None}
+    return {"halted": row.halted, "changed_by_name": row.changed_by_name, "reason": row.reason,
+            "created_at": row.created_at.isoformat() if row.created_at else None}
+
+
+async def set_halt(halted: bool, user: Dict[str, Any], reason: Optional[str]) -> TradingHalt:
+    """Switch the kill switch on or off. Taken under the order lock, so no order
+    that has already started its check can be sent after the switch goes on."""
+    async with order_lock():
+        async with AsyncSessionLocal() as db:
+            row = TradingHalt(halted=halted, changed_by=user.get("id"), changed_by_name=user.get("username"),
+                              reason=(reason or "").strip() or None)
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+    log.warning("Trading %s by %s: %s", "STOPPED" if halted else "resumed", user.get("username"), reason)
+    return row
 
 
 async def _record(**fields) -> Optional[int]:
@@ -314,14 +384,46 @@ def _decision_fields(order, ev: Evaluation, source, user_id, settings_id, contex
                 settings_id=settings_id, context={**(context or {}), **ev.extra} or None)
 
 
+_lock_state: Dict[str, Any] = {"loop": None, "lock": None}
+
+
+def order_lock() -> asyncio.Lock:
+    """The lock every new order and every kill switch change takes.
+
+    One per event loop: the server has one, tests get a fresh loop each. A lock made
+    at import would be tied to the first loop that waited on it.
+    """
+    loop = asyncio.get_running_loop()
+    if _lock_state["loop"] is not loop:
+        _lock_state.update(loop=loop, lock=asyncio.Lock())
+    return _lock_state["lock"]
+
+
 async def submit_order(order: Dict[str, Any], *, source: str, user_id: Optional[int],
                        context: Optional[Dict[str, Any]] = None, size_from_risk: bool = False) -> Dict[str, Any]:
     """Check one new order and send it if it passes. The only caller of connector_client.place_order.
 
     Raises RiskRefused when a rule stops it, and ConnectorError when the connector
     is unreachable or the broker refuses it. Returns the connector's reply plus `risk`.
+    One order at a time: the next one is checked only after this one is sent or refused.
     """
+    async with order_lock():
+        return await _submit_order_locked(order, source=source, user_id=user_id,
+                                          context=context, size_from_risk=size_from_risk)
+
+
+async def _submit_order_locked(order, *, source, user_id, context, size_from_risk) -> Dict[str, Any]:
     async with AsyncSessionLocal() as db:
+        halt = await current_halt(db)
+        if halt and halt.halted:
+            settings_row = await current_settings(db)
+            fields = _decision_fields(order, Evaluation(False), source, user_id, settings_row.id, context)
+            message = f"Trading is stopped by {halt.changed_by_name or 'an operator'}"
+            message += f": {halt.reason}" if halt.reason else "."
+            decision_id = await _record(outcome="refused", reason_code="trading_halted", message=message, **fields)
+            log.info("Refused %s %s from %s: trading is stopped", order.get("action"), order.get("symbol"), source)
+            raise RiskRefused("trading_halted", message, decision_id)
+
         settings_row = await current_settings(db)
         settings = settings_dict(settings_row)
         try:

@@ -1,7 +1,11 @@
 """
 Risk limits: read them, change them, see their history, today's position against
 them, and every order decision. Anyone logged in can read; only an admin changes.
+
+Also the kill switch (/halt), closing every position (/close-all), and the
+heartbeat's alerts (/alerts).
 """
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -10,12 +14,14 @@ from sqlalchemy import select
 
 from ..core.database import AsyncSessionLocal
 from ..core.mt5_connector import ConnectorError, connector_client
-from ..core.risk import DEFAULTS, RANGES, current_settings, save_settings, settings_dict, start_of_day_equity
-from ..core.security import get_current_user, require_role
-from ..models.risk import RiskDecision, RiskSettings
+from ..core.risk import (DEFAULTS, RANGES, current_halt, current_settings, day_start_source, halt_dict,
+                         save_settings, set_halt, settings_dict, start_of_day_equity)
+from ..core.security import get_current_user, require_role, require_trader
+from ..models.risk import Alert, RiskDecision, RiskSettings
 
 router = APIRouter(prefix="/risk", tags=["Risk"])
 require_admin = require_role("admin")
+log = logging.getLogger("risk")
 
 
 class RiskSettingsUpdate(BaseModel):
@@ -69,12 +75,15 @@ async def risk_status(current_user: dict = Depends(get_current_user)):
     async with AsyncSessionLocal() as db:
         settings = settings_dict(await current_settings(db))
         start = await start_of_day_equity(db, account)
+        start_source = await day_start_source(db, account)
     equity = account.get("equity")
     loss_pct = round((start - equity) / start * 100, 4) if start and equity is not None else None
     return {
         "settings_id": settings["id"],
         "equity": equity,
         "start_of_day_equity": start,
+        # midnight: recorded by the 00:00 UTC job. first_check: that run was missed.
+        "start_of_day_source": start_source,
         "daily_loss_pct": loss_pct,
         "daily_loss_limit_pct": settings["daily_loss_pct"],
         "margin_level": account.get("margin_level"),
@@ -101,3 +110,74 @@ async def decisions(limit: int = Query(100, ge=1, le=1000), outcome: Optional[st
         item["created_at"] = r.created_at.isoformat() if r.created_at else None
         out.append(item)
     return {"decisions": out}
+
+
+# ── Kill switch ─────────────────────────────────────────────────────────────
+class HaltChange(BaseModel):
+    halted: bool
+    reason: Optional[str] = None
+
+
+@router.get("/halt")
+async def get_halt(current_user: dict = Depends(get_current_user)):
+    """Whether trading is stopped, by whom and why. Every page polls this for its banner."""
+    async with AsyncSessionLocal() as db:
+        return halt_dict(await current_halt(db))
+
+
+@router.post("/halt")
+async def change_halt(body: HaltChange, current_user: dict = Depends(require_trader)):
+    """Stop all trading, or resume it.
+
+    Anyone who can trade may stop it: in an emergency nobody should wait for an
+    admin. Only an admin may resume, and must say why.
+    """
+    if not body.halted:
+        if current_user.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Only an admin can resume trading")
+        if not (body.reason or "").strip():
+            raise HTTPException(status_code=400, detail="Say why trading is being resumed")
+    row = await set_halt(body.halted, current_user, body.reason)
+    stopped = []
+    if body.halted:
+        from .autopilot import stop_all_autopilots
+        stopped = await stop_all_autopilots(body.reason or "no reason given")
+    return {**halt_dict(row), "autopilots_stopped": stopped}
+
+
+class CloseAll(BaseModel):
+    confirm: str
+
+
+CLOSE_ALL_PHRASE = "CLOSE ALL"
+
+
+@router.post("/close-all")
+async def close_all_positions(body: CloseAll, current_user: dict = Depends(require_trader)):
+    """Close every open position. Needs the typed phrase, so it cannot happen by a stray click."""
+    if body.confirm != CLOSE_ALL_PHRASE:
+        raise HTTPException(status_code=400, detail=f'Type "{CLOSE_ALL_PHRASE}" to confirm')
+    from ..services.trade_service import TradeError, close_position
+    try:
+        positions = (await connector_client.get_positions()).get("positions", [])
+    except ConnectorError as exc:
+        raise HTTPException(status_code=502, detail=f"Could not read open positions: {exc.detail}")
+    closed, failed = [], []
+    for p in positions:
+        try:
+            closed.append(await close_position(p["ticket"], None, current_user["id"]))
+        except TradeError as exc:
+            log.error("Close all: position %s not closed: %s", p.get("ticket"), exc.message)
+            failed.append({"ticket": p.get("ticket"), "error": exc.message})
+    log.warning("Close all by %s: %d closed, %d failed", current_user.get("username"), len(closed), len(failed))
+    return {"closed": closed, "failed": failed}
+
+
+@router.get("/alerts")
+async def alerts(limit: int = Query(20, ge=1, le=200), current_user: dict = Depends(get_current_user)):
+    """The heartbeat's recent alerts, newest first."""
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(select(Alert).order_by(Alert.id.desc()).limit(limit))).scalars().all()
+    return {"alerts": [{"id": a.id, "created_at": a.created_at.isoformat() if a.created_at else None,
+                        "check": a.check, "state": a.state, "message": a.message, "delivered": a.delivered}
+                       for a in rows]}

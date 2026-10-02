@@ -41,7 +41,7 @@ class RiskSettings(Base):
 
 
 class RiskDay(Base):
-    """The equity seen at the first order check of each UTC day, per trading account."""
+    """The equity at the start of each UTC day, per trading account, the daily loss baseline."""
     __tablename__ = "risk_days"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -49,6 +49,9 @@ class RiskDay(Base):
     account_login = Column(BigInteger, nullable=False)
     start_equity = Column(Float, nullable=False)
     created_at = Column(DateTime(timezone=True), default=_now)
+    # "midnight": recorded by the 00:00 UTC job. "first_check": the job missed the day
+    # (connector down at midnight, server off), so the first order check recorded it.
+    source = Column(String, nullable=False, default="first_check", server_default="first_check")
 
     __table_args__ = (UniqueConstraint("day", "account_login", name="uq_risk_days_day_account"),)
 
@@ -81,3 +84,27 @@ class RiskDecision(Base):
     context = Column(JSON, nullable=True)         # prompt, market regime and anything else the caller knows
 
     __table_args__ = (Index("ix_risk_decisions_source_created", "source", "created_at"),)
+
+
+class TradingHalt(Base):
+    """The kill switch. Never edited: each switch on or off adds a row, the newest is in force."""
+    __tablename__ = "trading_halts"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    created_at = Column(DateTime(timezone=True), default=_now, index=True)
+    halted = Column(Boolean, nullable=False)
+    changed_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    changed_by_name = Column(String, nullable=True)
+    reason = Column(Text, nullable=True)
+
+
+class Alert(Base):
+    """A heartbeat alert: a check started failing ("down") or recovered ("up")."""
+    __tablename__ = "alerts"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    created_at = Column(DateTime(timezone=True), default=_now, index=True)
+    check = Column(String, nullable=False, index=True)   # connector, prices, autopilot:<user id>
+    state = Column(String, nullable=False)               # down, up
+    message = Column(Text, nullable=False)
+    delivered = Column(Boolean, nullable=False, default=False)  # sent to Telegram

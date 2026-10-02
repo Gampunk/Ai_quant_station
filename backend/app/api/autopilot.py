@@ -29,7 +29,7 @@ from ..models.ai_memory import AutopilotTrade, AutopilotSettings, UserPrompt, Au
 from ..models.strategy_score import StrategyScore
 from ..core.providers import estimate_cost
 from ..core.mt5_connector import ConnectorError, connector_client
-from ..core.risk import RiskRefused, submit_order
+from ..core.risk import RiskRefused, submit_order, trading_halted
 from ..core.trade_outcome import close_result
 
 router = APIRouter(prefix="/autopilot", tags=["Autopilot"])
@@ -1856,6 +1856,16 @@ async def autopilot_loop(user_id: int):
 
     try:
         while state["enabled"]:
+            # The heartbeat reads this: a pass that skipped its cycle still counts as alive.
+            state["last_beat"] = datetime.now(timezone.utc)
+            if await trading_halted():
+                # The kill switch also stops autopilots directly; this catches any it missed.
+                add_log(user_id, "Trading is stopped (kill switch). Autopilot stopping.", "WARNING")
+                await _disable_in_db(user_id)
+                state["enabled"] = False
+                state["running"] = False
+                state["stats"]["stopped_reason"] = "Trading was stopped with the kill switch."
+                break
             if state["running"]:
                 try:
                     await _loop_iteration(user_id)
@@ -1996,8 +2006,56 @@ class PromptStatsItem(BaseModel):
 
 
 # ── Internal helper: start autopilot without HTTP auth ────────────────────
+async def _disable_in_db(user_id: int) -> None:
+    """Mark the autopilot off in the database, so it is not restarted at boot."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
+        s = result.scalar_one_or_none()
+        if s and s.enabled:
+            s.enabled = False
+            await db.commit()
+
+
+async def _stop_autopilot_internal(user_id: int, message: str = "Autopilot STOPPED",
+                                   stopped_reason: Optional[str] = None) -> None:
+    """Stop one user's autopilot: off in the database, loop cancelled."""
+    state = _get_state(user_id)
+    await _disable_in_db(user_id)
+    state["enabled"] = False
+    state["running"] = False
+    if stopped_reason:
+        state["stats"]["stopped_reason"] = stopped_reason
+    # Cancel the background asyncio task so it cleanly exits the loop
+    existing_task = state.get("task")
+    if existing_task and not existing_task.done() and existing_task is not asyncio.current_task():
+        existing_task.cancel()
+        try:
+            await existing_task
+        except asyncio.CancelledError:
+            pass
+    state["task"] = None
+    add_log(user_id, message)
+
+
+async def stop_all_autopilots(reason: str) -> list[int]:
+    """The kill switch: stop every autopilot, running or merely enabled. Returns the user ids."""
+    async with AsyncSessionLocal() as db:
+        enabled = (await db.execute(select(AutopilotSettings.user_id).where(AutopilotSettings.enabled == True))).scalars().all()  # noqa: E712
+    user_ids = sorted(set(enabled) | {uid for uid, st in _user_states.items() if st.get("enabled") or st.get("task")})
+    for uid in user_ids:
+        try:
+            await _stop_autopilot_internal(uid, f"Autopilot STOPPED by the kill switch: {reason}",
+                                           stopped_reason="Trading was stopped with the kill switch.")
+        except Exception:
+            logger.exception("[user=%s] Could not stop the autopilot for the kill switch", uid)
+    return user_ids
+
+
 async def _start_autopilot_internal(user_id: int) -> bool:
     """Start autopilot for a given user_id. Used for auto-restart on server boot."""
+    if await trading_halted():
+        logger.warning("[user=%d] Not restarting the autopilot: trading is stopped (kill switch)", user_id)
+        return False
     state = _get_state(user_id)
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
@@ -2022,6 +2080,8 @@ async def _start_autopilot_internal(user_id: int) -> bool:
 async def start_autopilot(current_user: dict = Depends(require_trader)):
     user_id = current_user["id"]
     state = _get_state(user_id)
+    if await trading_halted():
+        raise HTTPException(status_code=409, detail="Trading is stopped (kill switch). An admin must resume it first.")
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
@@ -2051,26 +2111,7 @@ async def start_autopilot(current_user: dict = Depends(require_trader)):
 
 @router.post("/stop")
 async def stop_autopilot(current_user: dict = Depends(require_trader)):
-    user_id = current_user["id"]
-    state = _get_state(user_id)
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
-        s = result.scalar_one_or_none()
-        if s:
-            s.enabled = False
-            await db.commit()
-    state["enabled"] = False
-    state["running"] = False
-    # Cancel the background asyncio task so it cleanly exits the loop
-    existing_task = state.get("task")
-    if existing_task and not existing_task.done():
-        existing_task.cancel()
-        try:
-            await existing_task
-        except asyncio.CancelledError:
-            pass
-    state["task"] = None
-    add_log(user_id, "Autopilot STOPPED")
+    await _stop_autopilot_internal(current_user["id"])
     return {"success": True, "message": "Autopilot stopped"}
 
 

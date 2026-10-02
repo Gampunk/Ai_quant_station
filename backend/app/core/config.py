@@ -99,6 +99,11 @@ class Settings(BaseSettings):
     # Yahoo Finance (for market data)
     YAHOO_FINANCE_ENABLED: bool = True
     
+    # Telegram, for heartbeat alerts (core/alerts.py). Same names as upstream's
+    # report delivery. Both empty: alerts are only logged and listed on the page.
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_CHAT_ID: str = ""
+
     # SMTP / Daily Report Email
     SMTP_SERVER: str = "smtp.gmail.com"
     SMTP_PORT: int = 587

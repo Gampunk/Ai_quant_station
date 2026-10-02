@@ -184,6 +184,9 @@ async def startup_event():
 
     start_sync_scheduler()
 
+    from .core.heartbeat import start_heartbeat
+    start_heartbeat()
+
     # Start strategy score aggregator (hourly cron)
     try:
         from .core.strategy_scorer import start_strategy_scorer, update_strategy_scores
@@ -205,9 +208,11 @@ async def shutdown_event():
     from .core.mt5_connector import shutdown_connector
     from .core.mt5_sync import shutdown_scheduler
     from .core.email_reports import shutdown_report_scheduler
+    from .core.heartbeat import shutdown_heartbeat
     await shutdown_connector()
     shutdown_scheduler()
     shutdown_report_scheduler()
+    shutdown_heartbeat()
 
 # Middleware chain: UserIdentity (innermost) → CORS → SlowAPI (outermost)
 app.add_middleware(UserIdentityMiddleware)
