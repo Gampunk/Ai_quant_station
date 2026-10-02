@@ -3575,6 +3575,78 @@ async def get_trade_results(
         ]
 
 
+@router.get("/cycles")
+async def get_cycle_history(
+    skip: int = 0, limit: int = 50, outcome: Optional[str] = None,
+    symbol: Optional[str] = None, current_user: dict = Depends(get_current_user),
+):
+    """Return each scheduled cycle with its linked AI/execution/broker trail."""
+    user_id = current_user["id"]
+    limit, skip = max(1, min(limit, 200)), max(0, skip)
+    async with AsyncSessionLocal() as db:
+        query = select(AutopilotCycle).where(AutopilotCycle.user_id == user_id)
+        if outcome:
+            query = query.where(AutopilotCycle.outcome == outcome)
+        if symbol:
+            query = query.where(AutopilotCycle.symbol == symbol.upper())
+        total = await db.scalar(select(func.count()).select_from(query.subquery())) or 0
+        cycles = list((await db.execute(query.order_by(AutopilotCycle.started_at.desc()).offset(skip).limit(limit))).scalars().all())
+        ids = [c.cycle_id for c in cycles]
+        if not ids:
+            return {"cycles": [], "total": total, "skip": skip, "limit": limit}
+        async def linked(model, timestamp):
+            return (await db.execute(select(model).where(model.user_id == user_id, model.cycle_id.in_(ids)).order_by(timestamp))).scalars().all()
+        calls = await linked(AiCallLog, AiCallLog.created_at)
+        attempts = await linked(AutopilotExecutionAttempt, AutopilotExecutionAttempt.created_at)
+        events = await linked(AutopilotOrderEvent, AutopilotOrderEvent.observed_at)
+        logs = await linked(AutopilotLog, AutopilotLog.timestamp)
+        trades = await linked(AutopilotTrade, AutopilotTrade.executed_at)
+        def group(rows):
+            result = {}
+            for row in rows:
+                result.setdefault(row.cycle_id, []).append(row)
+            return result
+        calls, attempts, events, logs, trades = map(group, (calls, attempts, events, logs, trades))
+        def iso(value): return value.isoformat() if value else None
+        output = []
+        for c in cycles:
+            timeline = [{"timestamp": iso(c.started_at), "stage": "cycle_started", "outcome": None,
+                         "details": {"cycle_number": c.cycle_number, "symbol": c.symbol}}]
+            for row in calls.get(c.cycle_id, []):
+                timeline.append({"timestamp": iso(row.created_at), "stage": f"ai:{row.stage or 'call'}", "outcome": row.outcome,
+                    "details": {"provider": row.provider, "model": row.model, "latency_ms": row.latency_ms, "error": row.error_message}})
+            for row in attempts.get(c.cycle_id, []):
+                timeline.append({"timestamp": iso(row.created_at), "stage": "execution", "outcome": row.outcome,
+                    "details": {"category": row.error_category, "message": row.error_message, "ticket": row.mt5_ticket, "direction": row.direction, "volume": row.lot_size}})
+            for row in events.get(c.cycle_id, []):
+                timeline.append({"timestamp": iso(row.broker_time or row.observed_at), "stage": f"broker:{row.event_type}", "outcome": row.status,
+                    "details": {"reason": row.reason, "reason_code": row.reason_code, "order_ticket": row.order_ticket,
+                        "deal_ticket": row.deal_ticket, "position_id": row.position_id, "price": row.price, "volume": row.volume,
+                        "profit": row.profit, "swap": row.swap, "commission": row.commission}})
+            for row in logs.get(c.cycle_id, []):
+                timeline.append({"timestamp": iso(row.timestamp), "stage": f"log:{row.level}", "outcome": None, "details": {"message": row.message}})
+            for row in trades.get(c.cycle_id, []):
+                timeline.append({"timestamp": iso(row.closed_at or row.order_completed_at or row.executed_at), "stage": "trade_status",
+                    "outcome": row.result or row.execution_status, "details": {"trade_id": row.id, "profit": row.profit,
+                    "closed_at": iso(row.closed_at), "exit_reason": row.exit_reason, "ticket": row.mt5_ticket}})
+            timeline.append({"timestamp": iso(c.completed_at), "stage": "cycle_finished", "outcome": c.outcome,
+                             "details": {"reason": c.outcome_reason}})
+            timeline.sort(key=lambda item: item["timestamp"] or "")
+            output.append({"cycle_id": c.cycle_id, "cycle_number": c.cycle_number, "symbol": c.symbol,
+                "status": c.status, "outcome": c.outcome, "outcome_reason": c.outcome_reason,
+                "started_at": iso(c.started_at), "completed_at": iso(c.completed_at), "prompt_number": c.prompt_number,
+                "prompt_text": c.prompt_text, "prompt_version": c.prompt_version, "provider": c.provider, "model": c.model,
+                "market_regime": c.market_regime, "market_timeframe": c.market_timeframe, "candles_loaded": c.candles_loaded,
+                "market_data_hash": c.market_data_hash, "analysis_prompt_hash": c.analysis_prompt_hash,
+                "decision_source": c.decision_source, "selection_context": c.selection_context, "regime_details": c.regime_details,
+                "setup": c.setup, "requested_lot_size": c.requested_lot_size, "final_lot_size": c.final_lot_size,
+                "execution_status": c.execution_status, "order_status": c.order_status, "mt5_order_ticket": c.mt5_order_ticket,
+                "mt5_ticket": c.mt5_ticket, "trade_result": c.trade_result, "realized_profit": c.realized_profit,
+                "exit_reason": c.exit_reason, "exit_reason_source": c.exit_reason_source,
+                "trade_closed_at": iso(c.trade_closed_at), "duration_minutes": c.duration_minutes, "timeline": timeline})
+        return {"cycles": output, "total": total, "skip": skip, "limit": limit}
+
+
 @router.get("/results/export")
 async def export_trades_csv(current_user: dict = Depends(get_current_user)):
     """Export trade history as CSV."""

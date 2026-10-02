@@ -416,6 +416,7 @@ async def build_report(user_id: int, days: int | None, output_root: Path) -> Pat
         "completed_at": c.completed_at.isoformat() if c.completed_at else "",
         "status": c.status,
         "outcome": c.outcome,
+        "outcome_reason": c.outcome_reason,
         "symbol": c.symbol,
         "prompt_number": c.prompt_number,
         "prompt_version": c.prompt_version,
@@ -602,7 +603,7 @@ async def build_report(user_id: int, days: int | None, output_root: Path) -> Pat
         "prompt_tokens", "completion_tokens", "total_tokens", "cost", "latency_ms", "created_at",
     ])
     _write_csv(output_dir / "cycle_records.csv", cycle_rows, [
-        "cycle_id", "cycle_number", "started_at", "completed_at", "status", "outcome",
+        "cycle_id", "cycle_number", "started_at", "completed_at", "status", "outcome", "outcome_reason",
         "symbol", "prompt_number", "prompt_version", "provider", "model", "market_regime",
         "market_trend", "market_volatility", "directional_bias", "regime_confidence", "selected_prompt_score",
         "selected_prompt_probability", "candidate_count", "selection_candidates",

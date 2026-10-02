@@ -78,6 +78,10 @@ export default function AutopilotPage() {
   const [historyPage, setHistoryPage] = useState(1)
   const [historyLevelFilter, setHistoryLevelFilter] = useState('all')
   const [historyLoading, setHistoryLoading] = useState(false)
+  const [cycleHistory, setCycleHistory] = useState<any[]>([])
+  const [cycleHistoryTotal, setCycleHistoryTotal] = useState(0)
+  const [cycleHistoryLoading, setCycleHistoryLoading] = useState(false)
+  const [cycleHistoryPage, setCycleHistoryPage] = useState(0)
 
   useEffect(() => {
     if (selectedPromptFilter == null) { setPromptTrades([]); return }
@@ -134,6 +138,7 @@ export default function AutopilotPage() {
     fetchStatus()
     fetchPromptStats()
     fetchPrompts()
+    fetchCycleHistory(0)
     // Poll only for status/running state, not settings
     const intervalId: ReturnType<typeof setInterval> = setInterval(() => {
       axios.get('/api/autopilot/status').then(res => {
@@ -142,8 +147,23 @@ export default function AutopilotPage() {
         setMt5Connected(data.settings?.mt5_connected || false)
       }).catch(console.error)
     }, 5000)
-    return () => clearInterval(intervalId)
+    const cycleIntervalId: ReturnType<typeof setInterval> = setInterval(() => fetchCycleHistory(), 30000)
+    return () => { clearInterval(intervalId); clearInterval(cycleIntervalId) }
   }, [])
+
+  async function fetchCycleHistory(page = cycleHistoryPage) {
+    setCycleHistoryLoading(true)
+    try {
+      const res = await axios.get('/api/autopilot/cycles', { params: { limit: 50, skip: page * 50 } })
+      setCycleHistory(res.data?.cycles || [])
+      setCycleHistoryTotal(res.data?.total || 0)
+      setCycleHistoryPage(page)
+    } catch (error) {
+      console.error('Failed to fetch autopilot cycle history', error)
+    } finally {
+      setCycleHistoryLoading(false)
+    }
+  }
 
   // Sync model list when provider changes
   useEffect(() => {
@@ -738,6 +758,74 @@ export default function AutopilotPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Autopilot Cycle History */}
+      <Card className="mt-8">
+        <CardHeader className="flex flex-row items-center justify-between">
+          <div>
+            <CardTitle>Autopilot Cycle History</CardTitle>
+            <p className="text-xs text-muted-foreground mt-1">Each scheduled check, including skips, linked to AI calls, execution, broker events, and eventual trade outcome.</p>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => fetchCycleHistory()} disabled={cycleHistoryLoading}>
+            {cycleHistoryLoading ? 'Refreshing…' : `Refresh (${cycleHistoryTotal})`}
+          </Button>
+        </CardHeader>
+        <CardContent>
+          {cycleHistoryLoading && cycleHistory.length === 0 ? (
+            <div className="text-muted-foreground text-center py-6">Loading cycle history…</div>
+          ) : cycleHistory.length === 0 ? (
+            <div className="text-muted-foreground text-center py-6">No cycle records yet. New checks are recorded after this version is deployed.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead><tr className="border-b border-border text-left">
+                  <th className="py-2 px-2">Started</th><th className="py-2 px-2">Cycle ID</th>
+                  <th className="py-2 px-2">Symbol</th><th className="py-2 px-2">Outcome</th>
+                  <th className="py-2 px-2">Reason</th><th className="py-2 px-2">Trade P&amp;L</th>
+                </tr></thead>
+                <tbody>{cycleHistory.map((cycle) => (
+                  <tr key={cycle.cycle_id} className="border-b border-border/30 align-top">
+                    <td className="py-2 px-2 whitespace-nowrap">{cycle.started_at ? new Date(cycle.started_at).toLocaleString() : '—'}</td>
+                    <td className="py-2 px-2 font-mono text-xs" title={cycle.cycle_id}>{cycle.cycle_id.slice(0, 12)}…</td>
+                    <td className="py-2 px-2">{cycle.symbol}</td>
+                    <td className="py-2 px-2">{cycle.outcome || cycle.status}</td>
+                    <td className="py-2 px-2 max-w-[320px] whitespace-normal text-xs">{cycle.outcome_reason || '—'}</td>
+                    <td className={`py-2 px-2 ${cycle.realized_profit == null ? '' : cycle.realized_profit >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                      {cycle.realized_profit == null ? 'Open / n.a.' : `$${Number(cycle.realized_profit).toFixed(2)}`}
+                    </td>
+                  </tr>
+                ))}</tbody>
+              </table>
+              <div className="mt-3 max-h-[420px] overflow-y-auto space-y-2">
+                {cycleHistory.map((cycle) => (
+                  <details key={`${cycle.cycle_id}-details`} className="rounded border border-border/50 p-3">
+                    <summary className="cursor-pointer text-xs font-medium">Cycle #{cycle.cycle_number} · {cycle.outcome || cycle.status} · {cycle.prompt_text ? cycle.prompt_text.slice(0, 100) : 'No prompt selected'}</summary>
+                    <div className="mt-3 space-y-2 text-xs">
+                      <div className="font-mono break-all text-muted-foreground">Cycle ID: {cycle.cycle_id}</div>
+                      {cycle.setup && <pre className="whitespace-pre-wrap rounded bg-muted/40 p-2">Setup: {JSON.stringify(cycle.setup, null, 2)}</pre>}
+                      <ol className="border-l border-border pl-4 space-y-2">
+                        {(cycle.timeline || []).map((event: any, index: number) => (
+                          <li key={`${event.stage}-${index}`}>
+                            <div className="font-medium">{event.timestamp ? new Date(event.timestamp).toLocaleString() : 'Time unavailable'} · {event.stage}{event.outcome ? ` · ${event.outcome}` : ''}</div>
+                            {event.details && <pre className="mt-1 whitespace-pre-wrap break-words text-muted-foreground">{JSON.stringify(event.details, null, 2)}</pre>}
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
+                  </details>
+                ))}
+              </div>
+              <div className="mt-3 flex items-center justify-between">
+                <p className="text-xs text-muted-foreground">Showing {cycleHistory.length ? cycleHistoryPage * 50 + 1 : 0}–{cycleHistoryPage * 50 + cycleHistory.length} of {cycleHistoryTotal} cycles.</p>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" disabled={cycleHistoryPage === 0 || cycleHistoryLoading} onClick={() => fetchCycleHistory(cycleHistoryPage - 1)}>Previous</Button>
+                  <Button variant="outline" size="sm" disabled={(cycleHistoryPage + 1) * 50 >= cycleHistoryTotal || cycleHistoryLoading} onClick={() => fetchCycleHistory(cycleHistoryPage + 1)}>Next</Button>
+                </div>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Strategy Scoreboard */}
       <Card className="mt-8">
