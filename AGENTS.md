@@ -141,12 +141,13 @@ LoginPage.tsx
   → Tokens stored in sessionStorage via zustand persist
   → Every API request: axios interceptor adds Authorization: Bearer {token}
 
-On 401 response:
-  → Response interceptor catches 401
-  → Queues refresh (prevents concurrent duplicate requests)
+On 401 response (attachAuth in authStore.ts, the one handler for every client):
+  → One refresh at a time, shared by all requests that failed together
   → POST /api/auth/refresh with refresh_token
-  → Gets new token pair → retries original request
-  → If refresh fails → logout()
+  → Gets new token pair → retries the original request once
+  → If refresh fails → logout(), and the request fails without a retry
+  → A retried request that gets 401 again is not refreshed again, so it cannot loop
+  → 401 from login, refresh or logout never triggers a refresh
 
 On page refresh:
   → App.tsx useEffect calls checkAuth()
@@ -621,6 +622,8 @@ with summer time). The backend works in real UTC throughout.
 | `execute.py` sandbox | AI Analyst, Autopilot and Historical Lab code runs through this module, always in a subprocess. Prompt Backtest still has its own runner (to be merged in step B1) |
 | `chat_memory_id` in trade link | Enables win-rate tracking per strategy prompt (RAG pipeline) |
 | `PRAGMA foreign_keys=ON` for SQLite | Required for CASCADE deletes to work on SQLite |
+| No silent errors | A handler that catches `Exception` must log, re-raise, or carry `# swallow-ok: <reason>` on its `except` line. Code in `app/` logs instead of printing. `tests/test_error_handling.py` enforces both. The price sync ends a run with failed symbols in `PriceSyncFailed` |
+| Frontend lint | `.eslintrc.cjs`, run by `npm run lint` and `verify.sh`. A disabled hook-dependency warning must say why on the same line |
 | Prompt refinement before AI call | `_refine_query()` rewrites vague user queries into structured analysis requests using a fast/cheap model (`mistralai/mistral-7b-instruct-v0.3`), falls back to the user's main model if unavailable. Controlled by `refine_prompt: bool` on `ChatRequest` (default: True). Adds ~300ms latency per query. |
 
 ## Known Limitations

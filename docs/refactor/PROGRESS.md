@@ -595,7 +595,7 @@ Checks 5 and 6 were rerun after a password reset and a fresh login: the first at
 
 ## Step 11. Deployment fixes
 
-**Status:** built. Checks 1 to 6 still to do.
+**Status:** built. You chose to run its checks together with step 12's. Check 1 is shared: one `verify.sh` run covers both steps.
 
 **Commits:** `3cb6788` password changes and proxy address, `1634776` Docker, nginx and pinned dependencies, and the docs commit after them
 
@@ -613,10 +613,7 @@ Checks 5 and 6 were rerun after a password reset and a fresh login: the first at
 
 **Your checks.** T1 runs the fake broker, T2 the local backend, T3 the commands.
 
-1. Five PASS lines: backend 250 passed and 9 skipped (about 19 minutes), connector 72, frontend 109.
-   ```bash
-   cd ~/dev/Ai_quant_station && ./scripts/verify.sh
-   ```
+1. Covered by step 12's check 1.
 
 2. The local database update. T1 and T2 as in step 10:
    ```bash
@@ -685,3 +682,70 @@ Checks 5 and 6 were rerun after a password reset and a fresh login: the first at
 - In `client_ip`, believe the first `X-Forwarded-For` entry from anyone: 4 failures, including the login limit test.
 - In `requirements.txt`, change one `==` to `>=`: the pin test fails. Remove one package's hashes: the hash test fails.
 - In Docker, the two-container visitor test and the made-up address test were run against the real stack, with the results in check 5.
+
+## Step 12. Errors are logged, one login handler, lint
+
+**Status:** built. Checks to do, together with step 11's.
+
+**Commits:** `eab947f` backend errors, price sync and AI reason, `4ab54be` login handler, badge and lint, and the docs commit after them
+
+**What changed**
+- No error is dropped silently any more. There were 64 handlers that caught every error and did nothing with it. Each one now logs, or keeps its fallback with a `# swallow-ok: <reason>` note on the line; a few parse fallbacks now catch only the error they expect. A test fails if a new silent one appears. The 12 `print` calls are now log lines, so production's JSON logs see them.
+- The price sync (finding 4): a run where any symbol fails now ends as failed, so the scheduler no longer logs "executed successfully". It also no longer asks for every candle since 1970 when the year's file is missing (finding 33), which would have happened on every 1 January and on the new Docker install.
+- The autopilot says why the AI step failed (finding 28): for example "no AI key is set for any provider. Add one in Settings, AI Providers", or the last provider's error. With no key at all it stops retrying at once.
+- The Autopilot page's MT5 badge shows the live connection (finding 29), checked on load, every 15 seconds, and after Connect.
+- One login handler (finding 34). The dashboard and every other page now share `attachAuth` in the auth store. A request is refreshed and retried at most once. A failed refresh logs out instead of retrying anyway.
+- A refresh that cannot revoke the old refresh token is refused (finding 35), instead of leaving both working.
+- Reports (finding 36): if the broker's history cannot be read, the page shows a red warning that the figures are incomplete, instead of quietly showing no trades. The error is also logged.
+- At startup, each user's autopilot is restarted separately (finding 37).
+- The sandbox's own error output is logged now, and its timeout message says 60 seconds, the real limit (finding 38).
+- Frontend lint works (finding 5). The 31 problems were fixed, or, where the code is deliberate, explained on the line. Two of them were real bugs: the small chart did not redraw when its data series changed, and the model pickers did not re-check when the model changed. The `any` rule is off for now (finding 39). Lint is part of `verify.sh`.
+
+**Your checks.** T1 runs the fake broker, T2 the backend, T3 the frontend, T4 the commands.
+
+1. Six PASS lines for both steps: backend 261 passed and 9 skipped (about 20 minutes), connector 72, frontend lint, frontend 109, type check, build.
+   ```bash
+   cd ~/dev/Ai_quant_station && ./scripts/verify.sh
+   ```
+
+2. Start the app as in step 11's check 2 (T1 fake broker, T2 backend), then the frontend in T3:
+   ```bash
+   cd ~/dev/Ai_quant_station/frontend && npm run dev
+   ```
+   Open http://localhost:5173 and log in as admin.
+
+3. The badge follows the connection. Go to Autopilot. Within 15 seconds the MT5 badge says **Connected**. Stop T1 with Ctrl+C: within 15 seconds it says **Disconnected**. Start T1 again: back to **Connected**.
+
+4. The autopilot names the reason. With no AI key set, start the autopilot, wait for the first cycle, then stop it. The log line reads `AI code generation failed after retries: no AI key is set for any provider. Add one in Settings, AI Providers`. The next cycle is reached without the old run of retries.
+
+5. Reports warn when the broker cannot be read. Stop T1 again and open Reports. A red line says `Trade history unavailable: ...` and that the figures are incomplete. T2's log shows `[Reports] Could not read trade history from the connector` with the full error under it. Start T1 again and reload: the red line is gone.
+
+6. A changed password logs out an open browser, once and cleanly. In T4, create a throwaway account:
+   ```bash
+   cd ~/dev/Ai_quant_station/backend
+   B=localhost:8002; J="content-type: application/json"; ADMIN_PW=$(grep ^DEFAULT_ADMIN_PASSWORD .env | cut -d= -f2-)
+   tok() { python3 -c "import sys,json; print(json.load(sys.stdin)['$1'])"; }
+   H="Authorization: Bearer $(curl -s -X POST $B/api/auth/login -H "$J" -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PW\"}" | tok access_token)"
+   ID=$(curl -s -X POST $B/api/auth/users -H "$H" -H "$J" -d '{"username":"step12","name":"Step 12","password":"first-password-2026","role":"viewer"}' | tok id); echo "user $ID"
+   ```
+   In a private browser window, open http://localhost:5173, log in as `step12` with `first-password-2026`, and open the browser's Network tab. Then in T4 the admin resets that password:
+   ```bash
+   curl -s -X PUT $B/api/auth/users/$ID -H "$H" -H "$J" -d '{"password":"second-password-2026"}' -o /dev/null -w "reset: %{http_code}\n"
+   ```
+   Click History in the private window. Expect to land on the login page, with exactly one `refresh` request in the Network tab (answered 401), not a stream of them. Close the window, then delete the account:
+   ```bash
+   curl -s -X DELETE $B/api/auth/users/$ID -H "$H" -o /dev/null -w "deleted: %{http_code}\n"
+   ```
+
+7. Finding 40, to confirm. In AI Analyst, pick MT5, load XAUUSD, go to Dashboard, then come back to AI Analyst. Tell me whether the symbol and chart are still there. If they are gone, that is finding 40, and I will fix it.
+
+**Negative controls.** Claude ran these before handover. Each failed where stated.
+
+- In the price sync, drop `failed.append(symbol)` and its log line: 3 failures, including the silent handler test.
+- Remove one `# swallow-ok:` note: the silent handler test fails and names `app/core/utils.py:55`.
+- Drop the reason from the autopilot's failure line: `test_with_no_ai_key_the_log_says_so` fails.
+- Let the refresh carry on when revoking fails: `test_refresh_fails_safely_when_the_old_token_cannot_be_revoked` fails.
+- Put `pass` back in the Reports handlers: 2 failures.
+- Put a `print` in `app/`: 2 failures.
+- In the frontend, drop the retried-once guard: `never refreshes twice for the same request` fails. Retry after a failed refresh: 2 failures.
+- One control run also showed a single test setup error that did not come back in three more runs. Probably the fake broker starting slowly; worth watching.
