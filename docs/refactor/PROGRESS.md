@@ -810,3 +810,29 @@ Checks 5 and 6 were rerun after a password reset and a fresh login: the first at
 - Let anyone resume trading: `test_only_an_admin_resumes_and_must_say_why` fails.
 - Let the heartbeat alert on every failed check: `test_a_connector_outage_alerts_once_and_recovery_once` fails.
 - With `APP_ENV=production` and cost 4, the server refused to start: the `/docs` test failed until the cheap cost was kept to tests.
+
+## Version 2 merge (approved decisions of 2026-10-03)
+
+**Status:** built on branch `v2/merge`. Checks to do, together with steps 11 to 13.
+
+**What changed.** Version 1 (`upstream/master`, 24 commits) merged into Version 2, as decided in `V1_V2_DECISIONS.md`:
+- Kept from Version 1: Telegram reports and the outside monitor, live-tick market detection, live model lists with multi-key and payment-error fallback, RAG health and telemetry, the autopilot cycle and order-lifecycle record with the joined cycle history, the profit reconciler, linking Terminal trades to the latest analysis, the prompt performance report, the offline backtest tests.
+- Passed through Version 2's rules on the way in: every order through the risk gate, every broker call through the one connector client, all times UTC, no silent errors, no connector address in the code (findings 44 to 50).
+- The fixed 0.2% stop is replaced by an optional Risk Limits setting, "Default stop (× ATR)", off by default.
+- Both migration chains joined (`e9a2c7f4b1d6`), then the ATR setting (`f3b8d1e6a2c9`).
+- Every page shows which instance it is: "Version 2" in the sidebar (`INSTANCE_LABEL`).
+- Tests: backend 399 passed and 6 skipped, connector 72, frontend 109, lint, type check, build.
+
+**Your checks**
+1. `./scripts/verify.sh`: six PASS lines (this also covers check 1 of steps 11 to 13).
+2. Start T1, T2 and T3 as in step 12. The backend log shows `Upgrading database` to `f3b8d1e6a2c9`. The sidebar says **Version 2**.
+3. Autopilot page: the cycle history list (from Version 1) fills as cycles run, each with its outcome, such as `skipped_stale_market_data` while the fake broker's prices are still.
+4. History page: the RAG Health panel (from Version 1) opens.
+5. Risk Limits: set "Default stop (× ATR)" to 1.5 with a reason. Place a Terminal BUY without a stop: it is sent with a stop below the price, and Recently refused stays empty. Set it back to 0: the same order is refused, "Every order needs a stop loss".
+
+**Negative controls.** Claude ran these; each failed where stated.
+- The autopilot calling the broker directly: `test_only_the_risk_gate_places_orders` fails.
+- The reconciler importing MetaTrader5: `test_no_backend_module_uses_the_windows_only_package` fails.
+- Guessing a target hit from the comment: `test_a_comment_mentioning_tp_does_not_make_a_target_hit` fails.
+- The gate not sending the stop it set: `test_the_atr_default_stop_is_sent_to_the_broker` fails.
+- The monitor repeating an alert: `test_a_failure_is_reported_only_once_and_its_recovery_once` fails.

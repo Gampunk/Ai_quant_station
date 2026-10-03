@@ -14,7 +14,10 @@ import MetaTrader5 as mt5
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from dotenv import load_dotenv
 import uvicorn
+
+load_dotenv()
 
 # Fix Windows console encoding for emoji support
 if sys.platform == 'win32':
@@ -31,7 +34,6 @@ app = FastAPI(
     openapi_url="/openapi.json" if ENABLE_DOCS else None,
 )
 
-CONNECTOR_API_TOKEN = os.getenv("MT5_API_TOKEN", "")
 
 # Listen on this machine only unless told otherwise. A remote deployment must set
 # MT5_CONNECTOR_HOST explicitly, for example to a private tunnel address.
@@ -209,29 +211,44 @@ def get_network_ip():
 
 
 def get_startup_config():
-    """Get configuration from env vars or interactive input."""
+    """Port, terminal path and token, from the environment (or the .env file next to
+    this script), asking at the console only for what is missing.
+
+    The token is never asked for when MT5_ALLOW_NO_TOKEN is on, as for the fake
+    terminal in tests. Without a token the connector refuses every request.
+    """
     port_env = os.getenv("MT5_CONNECTOR_PORT")
     terminal_env = os.getenv("MT5_TERMINAL_PATH")
-    
-    if port_env:
-        return int(port_env), terminal_env
-    
+    token_env = os.getenv("MT5_API_TOKEN", "")
+
+    if port_env and (token_env or ALLOW_NO_TOKEN):
+        return int(port_env), terminal_env, token_env
+
     print("\n" + "=" * 60)
     print("      MT5 Connector Service - Configuration Startup")
     print("=" * 60 + "\n")
-    
-    default_port = os.getenv("MT5_CONNECTOR_PORT", "5001")
-    port_input = input(f"Enter Port [Default {default_port}]: ").strip() or default_port
-    port = int(port_input)
-    
-    print("\nMultiple MT5 Instances Detected?")
-    print("   (Leave empty to use your default/active MT5)")
-    terminal_path = input("Enter MT5 Terminal Path (e.g. C:\\...\\terminal64.exe): ").strip() or None
-    
-    return port, terminal_path
+
+    if port_env:
+        port, terminal_path = int(port_env), terminal_env
+    else:
+        port_input = input("Enter Port [Default 5001]: ").strip() or "5001"
+        port = int(port_input)
+        print("\nMultiple MT5 Instances Detected?")
+        print("   (Leave empty to use your default/active MT5)")
+        terminal_path = input("Enter MT5 Terminal Path (e.g. C:\\...\\terminal64.exe): ").strip() or None
+
+    api_token = token_env
+    if not api_token and not ALLOW_NO_TOKEN:
+        print("\n  MT5_API_TOKEN is required for secure communication.")
+        print("  Generate a strong token: python -c \"import secrets; print(secrets.token_hex(32))\"")
+        api_token = input("  Enter MT5_API_TOKEN: ").strip()
+        if not api_token:
+            print("\n  ERROR: MT5_API_TOKEN cannot be empty. Restart with a valid token.\n")
+            raise SystemExit(1)
+    return port, terminal_path, api_token
 
 
-PORT, STARTUP_PATH = get_startup_config()
+PORT, STARTUP_PATH, CONNECTOR_API_TOKEN = get_startup_config()
 SERVER_IP = get_network_ip()
 
 
@@ -242,6 +259,8 @@ class OrderRequest(BaseModel):
     price: Optional[float] = None
     sl: Optional[float] = None
     tp: Optional[float] = None
+    max_sl_distance: Optional[float] = None
+    min_reward_risk: Optional[float] = None
     comment: str = "[IMPULSE_CONNECTOR]"
     magic: int = 0
 
@@ -483,10 +502,27 @@ async def place_order(order: OrderRequest, _auth: bool = Depends(verify_auth)):
         raise HTTPException(status_code=500, detail="Cannot get price")
     
     price = round(price, digits)
+
+    # Reject malformed protection geometry instead of silently moving a stop or
+    # target across the entry. Broker-distance adjustments below only handle
+    # levels that are on the correct side but too close.
+    is_buy = "BUY" in order.action
+    if order.sl is not None and ((is_buy and order.sl >= price) or (not is_buy and order.sl <= price)):
+        raise HTTPException(status_code=400, detail="Stop loss is on the wrong side of the order price")
+    if order.tp is not None and ((is_buy and order.tp <= price) or (not is_buy and order.tp >= price)):
+        raise HTTPException(status_code=400, detail="Take profit is on the wrong side of the order price")
     
     sl = round(order.sl, digits) if order.sl is not None else None
     tp = round(order.tp, digits) if order.tp is not None else None
     check_stops(order.action, price, sl, tp, min_stop_distance(symbol_info), digits)
+    if sl is not None and order.max_sl_distance is not None:
+        if abs(price - sl) > order.max_sl_distance + point:
+            raise HTTPException(status_code=400, detail="Stop loss is further than the configured risk cap allows")
+    if sl is not None and tp is not None and order.min_reward_risk is not None:
+        risk_distance = abs(price - sl)
+        reward_distance = abs(tp - price)
+        if risk_distance <= 0 or reward_distance < risk_distance * order.min_reward_risk:
+            raise HTTPException(status_code=400, detail="Take profit is below the minimum reward/risk ratio")
     
     filling_mode = symbol_info.filling_mode
     if filling_mode & 1:
@@ -516,8 +552,20 @@ async def place_order(order: OrderRequest, _auth: bool = Depends(verify_auth)):
     
     result = mt5.order_send(request)
     
-    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+    accepted_retcodes = {
+        mt5.TRADE_RETCODE_DONE,
+        getattr(mt5, "TRADE_RETCODE_PLACED", -1),
+        getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", -1),
+    }
+    if result is None or result.retcode not in accepted_retcodes:
         raise HTTPException(status_code=400, detail=f"Order failed: {result.comment if result else 'Unknown'}")
+
+    retcode = result.retcode
+    order_status = (
+        "placed" if retcode == getattr(mt5, "TRADE_RETCODE_PLACED", -1)
+        else "partially_filled" if retcode == getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", -1)
+        else "filled"
+    )
     
     # result.price is what the broker filled at. `price` above was only the quote
     # we saw beforehand, and the two differ by the slippage on the fill.
@@ -525,14 +573,21 @@ async def place_order(order: OrderRequest, _auth: bool = Depends(verify_auth)):
     return {
         "success": True,
         "ticket": result.order,
+        "order_ticket": result.order,
+        "deal": result.deal,
+        "deal_ticket": result.deal,
+        "retcode": retcode,
+        "order_status": order_status,
+        "is_pending": is_pending,
         "symbol": order.symbol,
         "volume": result.volume if getattr(result, "volume", 0) else volume,
         "price": filled_price,
         "requested_price": price,
+        "submitted_quote": None if is_pending else price,
         "sl": sl,
         "tp": tp,
         "comment": result.comment,
-        "position": result.order
+        "position": getattr(result, "position", 0) or None
     }
 
 
@@ -708,12 +763,41 @@ async def get_history(hours: int = 0, _auth: bool = Depends(verify_auth)):
     
     deal_list = []
     for deal in deals:
-        entry_label = {0: "OPEN", 1: "CLOSE", 2: "ROLLOVER", 3: "SPLIT"}.get(deal.entry, "UNKNOWN")
-        if deal.entry not in (0, 1, 2, 3):
+        entry_labels = {
+            getattr(mt5, "DEAL_ENTRY_IN", 0): "OPEN",
+            getattr(mt5, "DEAL_ENTRY_OUT", 1): "CLOSE",
+            getattr(mt5, "DEAL_ENTRY_INOUT", 2): "INOUT",
+            getattr(mt5, "DEAL_ENTRY_OUT_BY", 3): "OUT_BY",
+        }
+        reason_names = {
+            getattr(mt5, "DEAL_REASON_CLIENT", 0): "CLIENT",
+            getattr(mt5, "DEAL_REASON_MOBILE", 1): "MOBILE",
+            getattr(mt5, "DEAL_REASON_WEB", 2): "WEB",
+            getattr(mt5, "DEAL_REASON_EXPERT", 3): "EXPERT",
+            getattr(mt5, "DEAL_REASON_SL", 4): "SL",
+            getattr(mt5, "DEAL_REASON_TP", 5): "TP",
+            getattr(mt5, "DEAL_REASON_SO", 6): "STOP_OUT",
+            getattr(mt5, "DEAL_REASON_ROLLOVER", -99): "ROLLOVER",
+        }
+        entry_label = entry_labels.get(deal.entry)
+        if entry_label is None:
             continue
+        reason_code = int(getattr(deal, "reason", -1))
+        reason_label = reason_names.get(reason_code)
+        if reason_label is None:
+            for code_name in ("DEAL_REASON_VMARGIN", "DEAL_REASON_SPLIT", "DEAL_REASON_CORPORATE_ACTION"):
+                code = getattr(mt5, code_name, None)
+                if code is not None and reason_code == int(code):
+                    reason_label = code_name.removeprefix("DEAL_REASON_")
+                    break
         
         deal_list.append({
             "ticket": deal.order,
+            "deal_ticket": deal.ticket,
+            "order_ticket": deal.order,
+            "reason_code": reason_code,
+            "reason": reason_label or "UNKNOWN",
+            "entry_code": int(deal.entry),
             "symbol": deal.symbol,
             "direction": "BUY" if deal.type == mt5.DEAL_TYPE_BUY else "SELL",
             "volume": deal.volume,
@@ -723,12 +807,84 @@ async def get_history(hours: int = 0, _auth: bool = Depends(verify_auth)):
             "commission": deal.commission,
             "comment": deal.comment or "",
             "position_id": deal.position_id,
+            "magic": int(getattr(deal, "magic", 0) or 0),
             "time": server_time(deal.time),
+            "time_msc": int(getattr(deal, "time_msc", 0) or 0),
             "entry": entry_label,
             "reason": DEAL_REASONS.get(getattr(deal, "reason", None), "unknown"),
         })
     
     return {"success": True, "count": len(deal_list), "deals": deal_list}
+
+
+def _serialize_order(order, is_active: bool = False):
+    state_names = {
+        getattr(mt5, "ORDER_STATE_STARTED", -101): "started",
+        getattr(mt5, "ORDER_STATE_PLACED", -102): "placed",
+        getattr(mt5, "ORDER_STATE_CANCELED", -103): "cancelled",
+        getattr(mt5, "ORDER_STATE_PARTIAL", -104): "partially_filled",
+        getattr(mt5, "ORDER_STATE_FILLED", -105): "filled",
+        getattr(mt5, "ORDER_STATE_REJECTED", -106): "rejected",
+        getattr(mt5, "ORDER_STATE_EXPIRED", -107): "expired",
+        getattr(mt5, "ORDER_STATE_REQUEST_ADD", -108): "request_add",
+        getattr(mt5, "ORDER_STATE_REQUEST_MODIFY", -109): "request_modify",
+        getattr(mt5, "ORDER_STATE_REQUEST_CANCEL", -110): "request_cancel",
+    }
+    type_names = {
+        getattr(mt5, "ORDER_TYPE_BUY", -201): "buy",
+        getattr(mt5, "ORDER_TYPE_SELL", -202): "sell",
+        getattr(mt5, "ORDER_TYPE_BUY_LIMIT", -203): "buy_limit",
+        getattr(mt5, "ORDER_TYPE_SELL_LIMIT", -204): "sell_limit",
+        getattr(mt5, "ORDER_TYPE_BUY_STOP", -205): "buy_stop",
+        getattr(mt5, "ORDER_TYPE_SELL_STOP", -206): "sell_stop",
+        getattr(mt5, "ORDER_TYPE_BUY_STOP_LIMIT", -207): "buy_stop_limit",
+        getattr(mt5, "ORDER_TYPE_SELL_STOP_LIMIT", -208): "sell_stop_limit",
+    }
+    setup_time = getattr(order, "time_setup", None)
+    done_time = getattr(order, "time_done", None)
+    return {
+        "ticket": int(order.ticket), "order_ticket": int(order.ticket),
+        "symbol": order.symbol, "status": state_names.get(order.state, "unknown"),
+        "is_active": is_active,
+        "state_code": int(order.state), "type": type_names.get(order.type, "unknown"),
+        "volume_initial": float(order.volume_initial), "volume_current": float(order.volume_current),
+        "price_open": float(order.price_open), "price_current": float(order.price_current),
+        "sl": float(order.sl) if order.sl else None, "tp": float(order.tp) if order.tp else None,
+        "position_id": int(getattr(order, "position_id", 0) or 0) or None,
+        "magic": int(getattr(order, "magic", 0) or 0), "comment": getattr(order, "comment", "") or "",
+        # Broker server time, like every other endpoint here; the backend converts to UTC.
+        "setup_time": server_time(setup_time) if setup_time else None,
+        "done_time": server_time(done_time) if done_time else None,
+    }
+
+
+@app.get("/orders")
+async def get_orders(_auth: bool = Depends(verify_auth)):
+    """Get currently active MT5 orders, including unfilled pending orders."""
+    if not mt5_initialized:
+        raise HTTPException(status_code=400, detail="MT5 not initialized")
+    orders = mt5.orders_get()
+    if orders is None:
+        error = mt5.last_error()
+        raise HTTPException(status_code=502, detail=f"Could not read active orders: {error}")
+    serialized = [_serialize_order(order, is_active=True) for order in orders]
+    return {"success": True, "count": len(serialized), "orders": serialized}
+
+
+@app.get("/history/orders")
+async def get_order_history(hours: int = 0, _auth: bool = Depends(verify_auth)):
+    """Get historical orders to observe fills, cancellation, rejection, and expiry."""
+    if not mt5_initialized:
+        raise HTTPException(status_code=400, detail="MT5 not initialized")
+    now = datetime.now(timezone.utc)
+    from_time = now - timedelta(hours=hours) if hours > 0 else datetime(2000, 1, 1, tzinfo=timezone.utc)
+    to_time = now + timedelta(days=5)
+    orders = mt5.history_orders_get(from_time, to_time)
+    if orders is None:
+        error = mt5.last_error()
+        raise HTTPException(status_code=502, detail=f"Could not read order history: {error}")
+    serialized = [_serialize_order(order, is_active=False) for order in orders]
+    return {"success": True, "count": len(serialized), "orders": serialized}
 
 
 @app.get("/data/range/{symbol}")

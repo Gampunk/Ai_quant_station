@@ -38,6 +38,8 @@ class RiskSettings(Base):
     # How far a pending order's price may be from the market, in percent. 0 turns it off.
     max_pending_distance_pct = Column(Float, nullable=False)
     require_stop_loss = Column(Boolean, nullable=False)
+    # A missing stop is set this many ATR(14, 15-minute) from the price. 0 is off.
+    default_stop_atr_mult = Column(Float, nullable=False, default=0.0, server_default="0")
 
 
 class RiskDay(Base):

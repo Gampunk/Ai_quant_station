@@ -1,86 +1,116 @@
 """
-Monitor script: checks backend + MT5 connector health, sends email alerts on failure.
-Run every 5 minutes via cron/systemd timer.
+Outside health monitor: checks the backend, the MT5 connector and the systemd
+service, and sends Telegram alerts. Run every 5 minutes by impulse-monitor.timer.
+
+It runs outside the backend on purpose: a crashed backend cannot report itself.
+The backend's own heartbeat (core/heartbeat.py) watches the autopilots and prices.
+
+One message when a check starts failing, one when it recovers. The last state is
+kept in MONITOR_STATE_FILE so a 5-minute timer does not repeat the same alert.
+
+Settings, from the environment (the systemd unit reads backend/.env):
+    MONITOR_BACKEND_URL   default http://127.0.0.1:8002
+    MT5_CONNECTOR_URL     required for the connector check; no default address
+    MT5_API_TOKEN         sent to the connector, which refuses requests without it
+    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+    MONITOR_STATE_FILE    default /var/lib/impulse-monitor/state.json
 """
-import os
-import sys
 import json
-import smtplib
+import os
 import subprocess
 import urllib.request
-from email.mime.text import MIMEText
-from datetime import datetime
+from datetime import datetime, timezone
 
 BACKEND_URL = os.getenv("MONITOR_BACKEND_URL", "http://127.0.0.1:8002")
-CONNECTOR_URL = os.getenv("MONITOR_CONNECTOR_URL", "http://193.38.138.202:5001")
-ALERT_EMAIL = os.getenv("MONITOR_ALERT_EMAIL", "")
-SMTP_USER = os.getenv("MONITOR_SMTP_USER", "")
-SMTP_PASS = os.getenv("MONITOR_SMTP_PASS", "")
-SMTP_SERVER = os.getenv("MONITOR_SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("MONITOR_SMTP_PORT", "587"))
+CONNECTOR_URL = os.getenv("MT5_CONNECTOR_URL", "").rstrip("/")
+CONNECTOR_TOKEN = os.getenv("MT5_API_TOKEN", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+STATE_FILE = os.getenv("MONITOR_STATE_FILE", "/var/lib/impulse-monitor/state.json")
 
-def _send_alert(subject: str, body: str):
-    if not ALERT_EMAIL or not SMTP_USER or not SMTP_PASS:
-        print(f"[MONITOR] No SMTP configured. Would send: {subject}")
+
+def _send_alert(text: str) -> None:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print(f"[MONITOR] Telegram not set up. Would send: {text}")
         return
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["To"] = ALERT_EMAIL
-    msg["From"] = SMTP_USER
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = json.dumps({"chat_id": TELEGRAM_CHAT_ID, "text": text}).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     try:
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as s:
-            s.starttls()
-            s.login(SMTP_USER, SMTP_PASS)
-            s.send_message(msg)
-        print(f"[MONITOR] Alert sent: {subject}")
+        urllib.request.urlopen(req, timeout=15)
+        print(f"[MONITOR] Alert sent: {text}")
     except Exception as e:
         print(f"[MONITOR] Failed to send alert: {e}")
 
-def check_backend():
+
+def check_backend() -> tuple[bool, str]:
     try:
         r = urllib.request.urlopen(f"{BACKEND_URL}/health", timeout=10)
-        return r.status == 200
+        return r.status == 200, f"Backend at {BACKEND_URL} is not answering /health"
     except Exception as e:
-        print(f"[MONITOR] Backend check failed: {e}")
-        return False
+        return False, f"Backend at {BACKEND_URL} is unreachable: {e}"
 
-def check_connector():
+
+def check_connector() -> tuple[bool, str]:
+    if not CONNECTOR_URL:
+        return True, ""  # not configured here: nothing to check
+    req = urllib.request.Request(f"{CONNECTOR_URL}/health",
+                                 headers={"Authorization": f"Bearer {CONNECTOR_TOKEN}"})
     try:
-        r = urllib.request.urlopen(f"{CONNECTOR_URL}/health", timeout=10)
-        data = json.loads(r.read())
-        return data.get("mt5_connected", False) or data.get("mt5_initialized", False)
+        data = json.loads(urllib.request.urlopen(req, timeout=10).read())
+        ok = bool(data.get("mt5_connected") or data.get("mt5_initialized"))
+        return ok, "The MT5 connector answers, but its terminal is not connected"
     except Exception as e:
-        print(f"[MONITOR] Connector check failed: {e}")
-        return False
+        return False, f"The MT5 connector is unreachable: {e}"
 
-def check_systemd():
-    r = subprocess.run(["systemctl", "is-active", "impulse-analyst"], capture_output=True, text=True)
-    return r.stdout.strip() == "active"
+
+def check_systemd() -> tuple[bool, str]:
+    try:
+        r = subprocess.run(["systemctl", "is-active", "impulse-analyst"], capture_output=True, text=True)
+    except FileNotFoundError:
+        return True, ""  # not a systemd machine
+    return r.stdout.strip() == "active", "The impulse-analyst service is not running"
+
+
+def _load_state() -> dict:
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_state(state: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f)
+    except OSError as e:
+        print(f"[MONITOR] Could not save state to {STATE_FILE}: {e}")
+
+
+def run(state: dict, checks: dict) -> list[str]:
+    """Compare each check with its last state and return the messages to send."""
+    messages = []
+    for name, (ok, failing) in checks.items():
+        was_down = state.get(name) == "down"
+        if not ok and not was_down:
+            messages.append(f"🔴 Impulse Analyst: {failing}")
+        elif ok and was_down:
+            messages.append(f"🟢 Impulse Analyst: {name} recovered")
+        state[name] = "up" if ok else "down"
+    return messages
+
 
 def main():
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    failures = []
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    checks = {"service": check_systemd(), "backend": check_backend(), "connector": check_connector()}
+    state = _load_state()
+    for message in run(state, checks):
+        _send_alert(f"{message}\n{ts}")
+    _save_state(state)
+    print(f"[MONITOR] {ts} | " + " ".join(f"{k}={'ok' if v[0] else 'DOWN'}" for k, v in checks.items()))
 
-    systemd_ok = check_systemd()
-    if not systemd_ok:
-        failures.append("Systemd service impulse-analyst is NOT running")
-
-    backend_ok = check_backend()
-    if not backend_ok:
-        failures.append(f"Backend at {BACKEND_URL}/health is unreachable")
-
-    connector_ok = check_connector()
-    if not connector_ok:
-        failures.append(f"MT5 connector at {CONNECTOR_URL}/health is unreachable or not initialized")
-
-    status = "OK" if not failures else "FAIL"
-    print(f"[MONITOR] {ts} | Backend={'✓' if backend_ok else '✗'} Connector={'✓' if connector_ok else '✗'} Systemd={'✓' if systemd_ok else '✗'} => {status}")
-
-    if failures:
-        _send_alert(
-            f"[ALERT] Impulse Analyst - {sum(1 for f in failures)} service(s) down",
-            f"Time: {ts}\n\n" + "\n".join(failures)
-        )
 
 if __name__ == "__main__":
     main()

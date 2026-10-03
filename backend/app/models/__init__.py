@@ -20,11 +20,16 @@ from .ai_memory import (
     DefaultPromptStrategy,
     AutopilotSettings,
     AiCallLog,
+    AutopilotCycle,
+    AutopilotLog,
+    AutopilotExecutionAttempt,
+    AutopilotOrderEvent,
 )
 from .historical_lab import HistoricalBacktest
 from .strategy_score import StrategyScore
 from .chat_embedding import ChatEmbedding
 from .risk import Alert, RiskDay, RiskDecision, RiskSettings, TradingHalt
+from .rag_log import RagLog
 
 __all__ = [
     "User",
@@ -43,11 +48,15 @@ __all__ = [
     "AutopilotSettings",
     "HistoricalBacktest",
     "StrategyScore",
-    "ChatEmbedding",
+    "ChatEmbedding", "RagLog",
     "AiCallLog",
     "RiskSettings",
     "RiskDay",
     "TradingHalt",
     "Alert",
     "RiskDecision",
+    "AutopilotCycle",
+    "AutopilotLog",
+    "AutopilotExecutionAttempt",
+    "AutopilotOrderEvent",
 ]

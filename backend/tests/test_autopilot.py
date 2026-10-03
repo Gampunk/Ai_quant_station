@@ -3,6 +3,8 @@ import asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from app.models.ai_memory import AutopilotCycle, AiCallLog
+from app.models.user import User
 
 
 @pytest.mark.asyncio
@@ -12,6 +14,29 @@ class TestAutopilot:
     Tests settings persistence, prompt management, start/stop lifecycle.
     MT5-dependent tests are conditionally skipped if connector is down.
     """
+
+    async def test_cycle_history_includes_cycle_reason_and_linked_ai_call(
+        self, client: AsyncClient, auth_headers: dict, db_session: AsyncSession
+    ):
+        user = (await db_session.execute(select(User).where(User.username == "admin"))).scalar_one()
+        cycle_id = "11111111-2222-4333-8444-555555555555"
+        db_session.add(AutopilotCycle(
+            cycle_id=cycle_id, user_id=user.id, cycle_number=7, symbol="XAUUSD",
+            status="completed", outcome="no_setup", outcome_reason="AI found no valid setup",
+        ))
+        db_session.add(AiCallLog(
+            user_id=user.id, cycle_id=cycle_id, cycle_number=7, provider="test-provider",
+            model="test-model", stage="analysis", outcome="success", latency_ms=125,
+        ))
+        await db_session.commit()
+
+        response = await client.get("/api/autopilot/cycles", headers=auth_headers)
+        assert response.status_code == 200, response.text
+        data = response.json()
+        matching = next(c for c in data["cycles"] if c["cycle_id"] == cycle_id)
+        assert matching["outcome_reason"] == "AI found no valid setup"
+        assert any(event["stage"] == "ai:analysis" and event["outcome"] == "success"
+                   for event in matching["timeline"])
 
     async def test_autopilot_status_endpoint(self, client: AsyncClient, auth_headers: dict):
         resp = await client.get("/api/autopilot/status", headers=auth_headers)

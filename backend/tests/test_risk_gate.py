@@ -122,6 +122,35 @@ async def test_terminal_order_is_checked_recorded_and_sent(client: AsyncClient, 
     assert decision.volume == 0.05 and decision.settings_id is not None
 
 
+async def test_terminal_order_links_the_latest_analysis(client: AsyncClient, trader_headers, db_session):
+    """From the upstream branch: a Terminal order without a chat id is linked to the
+    trader's latest analysis of the same symbol, so it feeds the RAG scores."""
+    from app.models.ai_memory import ChatMemory, TradeRecord
+    trader_id = (await client.get("/api/auth/me", headers=trader_headers)).json()["id"]
+    chat = ChatMemory(user_id=trader_id, symbol="XAUUSD.p", role="assistant", content="Gold bullish.")
+    db_session.add(chat)
+    await db_session.commit()
+    chat_id = chat.id
+    q = await _quote()
+    resp = await client.post("/api/trade/order", headers=trader_headers, json={
+        "symbol": "XAUUSD", "action": "BUY", "volume": 0.01, "sl": round(q["ask"] - 10, 2)})
+    assert resp.status_code == 200, resp.text
+    db_session.expire_all()
+    record = (await db_session.execute(select(TradeRecord).where(TradeRecord.mt5_ticket == resp.json()["ticket"]))).scalar_one()
+    assert record.ai_message == str(chat_id)
+
+
+async def test_the_atr_default_stop_is_sent_to_the_broker(client: AsyncClient, auth_headers, trader_headers, db_session):
+    await _set_limits(client, auth_headers, default_stop_atr_mult=1.5)
+    resp = await client.post("/api/trade/order", headers=trader_headers, json={
+        "symbol": "XAUUSD", "action": "BUY", "volume": 0.01})
+    assert resp.status_code == 200, resp.text
+    [position] = (await connector_client.get_positions())["positions"]
+    assert position["sl"] and position["sl"] < resp.json()["price"], "the filled stop never reached the broker"
+    [decision] = await _decisions(db_session, outcome="sent")
+    assert decision.sl == position["sl"] and decision.context["stop_filled"]["mult"] == 1.5
+
+
 async def test_terminal_order_without_a_stop_is_refused(client: AsyncClient, trader_headers, db_session):
     resp = await client.post("/api/trade/order", headers=trader_headers,
                              json={"symbol": "XAUUSD", "action": "BUY", "volume": 0.05})

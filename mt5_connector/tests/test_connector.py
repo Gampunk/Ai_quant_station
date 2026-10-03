@@ -18,7 +18,8 @@ from conftest import CONNECTOR_DIR, FAKE_DIR, TEST_TOKEN, buy
 # ── Startup configuration ────────────────────────────────────────────────────
 def _config_in_subprocess(extra_env):
     env = {k: v for k, v in os.environ.items() if not k.startswith("MT5_")}
-    env.update({"MT5_CONNECTOR_PORT": "5999", "PYTHONPATH": os.pathsep.join([FAKE_DIR, CONNECTOR_DIR])})
+    env.update({"MT5_CONNECTOR_PORT": "5999", "MT5_API_TOKEN": "import-time-placeholder",
+                "PYTHONPATH": os.pathsep.join([FAKE_DIR, CONNECTOR_DIR])})
     env.update(extra_env)
     out = subprocess.run(
         [sys.executable, "-c", "import connector; print(connector.BIND_HOST, connector.REQUIRE_DEMO)"],

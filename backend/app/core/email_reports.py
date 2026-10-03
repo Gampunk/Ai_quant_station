@@ -15,11 +15,7 @@ import json
 import logging
 import os
 import re
-import smtplib
 from datetime import datetime, timezone, timedelta
-from email.mime.application import MIMEApplication
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from pathlib import Path
 
 import httpx
@@ -711,120 +707,68 @@ def _generate_weekly_excel(summary: dict, trades: list[dict], prompt_stats: list
     return filepath
 
 
-# ── Step 4: Email ─────────────────────────────────────────────────────────
+# ── Step 4: Send via Telegram ──────────────────────────────────────────────
 
-async def _send_email(filepath: str, summary: dict, report_type: str = "Daily") -> bool:
-    """Send the .xlsx report via SendGrid HTTPS API or SMTP fallback. Returns True on success."""
-    sender = settings.REPORT_EMAIL
-    raw_recipients = settings.REPORT_RECIPIENT_EMAIL
-    recipients = [r.strip() for r in raw_recipients.split(",") if r.strip()] if raw_recipients else []
+async def _send_telegram(filepath: str, summary: dict, report_type: str = "Daily") -> bool:
+    """Send the .xlsx report to Telegram chat. Returns True on success."""
+    token = settings.TELEGRAM_BOT_TOKEN
+    chat_id = settings.TELEGRAM_CHAT_ID
 
-    if not all([sender, recipients]):
-        logger.warning("[Report] Email not configured — skipping")
+    if not token or not chat_id:
+        logger.warning("[Report] Telegram not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) — skipping")
         return False
 
-    subject_text = f"{report_type} Trade Report — {_today_str()}"
-    body_prefix = f"AI Quant Station — {report_type} Trade Report"
     performance_label = "This Week's Performance:" if report_type == "Weekly" else "Today's Performance:"
     log_prefix = report_type.upper()
 
-    # Try SendGrid first (HTTPS API, port 443 — works everywhere)
-    sg_key = settings.SENDGRID_API_KEY
-    if sg_key:
-        try:
-            import base64
-            async with httpx.AsyncClient(timeout=30) as client:
-                with open(filepath, "rb") as f:
-                    file_b64 = base64.b64encode(f.read()).decode()
+    # Build message text
+    text = (
+        f"*AI Quant Station — {report_type} Trade Report*\n"
+        f"_{_day_name()}_\n\n"
+        f"*{performance_label}*\n"
+        f"  Total Trades: {summary['total_trades']}\n"
+        f"  Wins: {summary['wins']}  /  Losses: {summary['losses']}\n"
+        f"  Win Rate: {summary['win_rate']}%\n"
+        f"  P&L: \\${summary['pnl']:.2f}\n\n"
+        f"Report: `{os.path.basename(filepath)}`"
+    )
 
-                for email in recipients:
-                    payload = {
-                        "personalizations": [{"to": [{"email": email}], "subject": subject_text}],
-                        "from": {"email": sender},
-                        "content": [{"type": "text/plain", "value": (
-                            f"{body_prefix}\n"
-                            f"{_day_name()}\n\n"
-                            f"{performance_label}\n"
-                            f"  Total Trades: {summary['total_trades']}\n"
-                            f"  Wins: {summary['wins']}  /  Losses: {summary['losses']}\n"
-                            f"  Win Rate: {summary['win_rate']}%\n"
-                            f"  P&L: ${summary['pnl']:.2f}\n\n"
-                            f"Report attached.\n— AI Quant Station"
-                        )}],
-                        "attachments": [{
-                            "content": file_b64,
-                            "filename": os.path.basename(filepath),
-                            "type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            "disposition": "attachment",
-                        }],
-                    }
-                    resp = await client.post(
-                        "https://api.sendgrid.com/v3/mail/send",
-                        json=payload,
-                        headers={
-                            "Authorization": f"Bearer {sg_key}",
-                            "Content-Type": "application/json",
-                        },
-                    )
-                    if resp.status_code not in (200, 201, 202):
-                        logger.error(f"[{log_prefix}] SendGrid failed for {email}: {resp.status_code} {resp.text[:200]}")
-                        continue
-
-            logger.info(f"[{log_prefix}] Email sent via SendGrid to {', '.join(recipients)}")
-            return True
-        except Exception as e:
-            logger.error(f"[{log_prefix}] SendGrid failed: {e}, falling back to SMTP...")
-
-    # Fallback: SMTP (direct port 587/465)
-    smtp_server = settings.SMTP_SERVER
-    smtp_port = settings.SMTP_PORT
-    password = settings.REPORT_EMAIL_PASSWORD
-
-    if not all([smtp_server, smtp_port, password]):
-        logger.warning(f"[{log_prefix}] SMTP not configured either — email skipped")
-        return False
+    api_base = f"https://api.telegram.org/bot{token}"
 
     try:
-        msg = MIMEMultipart()
-        msg["Subject"] = subject_text
-        msg["From"] = sender
-        msg["To"] = ", ".join(recipients)
-
-        body = (
-            f"{body_prefix}\n"
-            f"{_day_name()}\n\n"
-            f"{performance_label}\n"
-            f"  Total Trades: {summary['total_trades']}\n"
-            f"  Wins: {summary['wins']}  /  Losses: {summary['losses']}\n"
-            f"  Win Rate: {summary['win_rate']}%\n"
-            f"  P&L: ${summary['pnl']:.2f}\n\n"
-            f"Report attached as: {os.path.basename(filepath)}\n"
-            f"— AI Quant Station"
-        )
-        msg.attach(MIMEText(body, "plain"))
-
-        with open(filepath, "rb") as f:
-            attachment = MIMEApplication(f.read(), _subtype="xlsx")
-            attachment.add_header(
-                "Content-Disposition", "attachment",
-                filename=os.path.basename(filepath),
+        # 1) Send text summary
+        async with httpx.AsyncClient(timeout=30) as client:
+            text_resp = await client.post(
+                f"{api_base}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": "Markdown",
+                },
             )
-            msg.attach(attachment)
+            if text_resp.status_code != 200:
+                logger.error(f"[{log_prefix}] Telegram sendMessage failed: {text_resp.status_code} {text_resp.text[:200]}")
+                return False
 
-        if smtp_port == 465:
-            with smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=30) as server:
-                server.login(sender, password)
-                server.send_message(msg)
-        else:
-            with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as server:
-                server.starttls()
-                server.login(sender, password)
-                server.send_message(msg)
+        # 2) Send Excel file as document
+        async with httpx.AsyncClient(timeout=60) as client:
+            with open(filepath, "rb") as f:
+                files = {"document": (os.path.basename(filepath), f, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                data = {
+                    "chat_id": chat_id,
+                    "caption": f"{report_type} Report — {_today_str()}",
+                }
+                doc_resp = await client.post(f"{api_base}/sendDocument", files=files, data=data)
 
-        logger.info(f"[{log_prefix}] Email sent via SMTP to {', '.join(recipients)}")
+            if doc_resp.status_code != 200:
+                logger.error(f"[{log_prefix}] Telegram sendDocument failed: {doc_resp.status_code} {doc_resp.text[:200]}")
+                return False
+
+        logger.info(f"[{log_prefix}] Report sent to Telegram chat {chat_id}")
         return True
+
     except Exception as e:
-        logger.error(f"[{log_prefix}] Email failed: {e}")
+        logger.error(f"[{log_prefix}] Telegram send failed: {e}")
         return False
 
 
@@ -866,12 +810,12 @@ async def run_daily_report():
     # Step 3: Generate Excel
     filepath = _generate_excel(summary, trades, prompt_stats)
 
-    # Step 4: Email
-    await _send_email(filepath, summary)
+    # Step 4: Send via Telegram
+    await _send_telegram(filepath, summary)
 
 
 async def run_weekly_report():
-    """Main entry point for weekly report: MT5 → retry → fallback → Excel → email."""
+    """Main entry point for weekly report: MT5 → retry → fallback → Excel → Telegram."""
     logger.info("[WeeklyReport] === Running Weekly Report ===")
 
     trades = None
@@ -903,36 +847,41 @@ async def run_weekly_report():
 
     filepath = _generate_weekly_excel(summary, trades, prompt_stats, daily_breakdown)
 
-    await _send_email(filepath, summary, report_type="Weekly")
+    # Send via Telegram
+    await _send_telegram(filepath, summary, report_type="Weekly")
 
 
 # ── Scheduler start / stop ────────────────────────────────────────────────
 
 def start_report_scheduler():
-    """Register daily (23:50 UTC) and weekly (Sat 23:50 UTC) report jobs."""
+    """Register daily (Mon-Fri 9AM IST) and weekly (Sat 9AM IST) report jobs.
+    9:00 AM IST = 3:30 AM UTC. Sunday = no reports."""
     if not scheduler.running:
+        # Daily report: Mon-Fri at 3:30 UTC (= 9:00 AM IST)
         scheduler.add_job(
             run_daily_report,
             trigger="cron",
-            hour=23,
-            minute=50,
+            day_of_week="mon-fri",
+            hour=3,
+            minute=30,
             timezone="UTC",
             id="daily_report",
             replace_existing=True,
         )
+        # Weekly report: Saturday at 3:30 UTC (= 9:00 AM IST)
         scheduler.add_job(
             run_weekly_report,
             trigger="cron",
             day_of_week="sat",
-            hour=23,
-            minute=50,
+            hour=3,
+            minute=30,
             timezone="UTC",
             id="weekly_report",
             replace_existing=True,
         )
         scheduler.start()
-        logger.info("[Report] Daily report scheduler started (23:50 UTC)")
-        logger.info("[Report] Weekly report scheduler started (Sat 23:50 UTC)")
+        logger.info("[Report] Daily report scheduler started (Mon-Fri 9:00 AM IST / 3:30 UTC)")
+        logger.info("[Report] Weekly report scheduler started (Sat 9:00 AM IST / 3:30 UTC)")
 
 
 def shutdown_report_scheduler():

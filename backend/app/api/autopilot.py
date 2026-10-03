@@ -3,6 +3,8 @@ Autopilot API - Automatic trading based on AI analysis
 """
 
 import logging
+import hashlib
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -15,7 +17,8 @@ import random
 import os
 import json
 import re
-from sqlalchemy import select, func
+import time
+from sqlalchemy import select, func, or_, and_
 from openai import AsyncOpenAI
 import pandas as pd
 import ta
@@ -24,9 +27,9 @@ import numpy as np
 from ..core.config import settings
 from ..core.security import get_current_user, require_trader
 from ..core.database import AsyncSessionLocal
-from ..core.providers import PROVIDERS, get_api_key as _get_api_key, get_base_url, resolve_api_key
-from ..models.ai_memory import AutopilotTrade, AutopilotSettings, UserPrompt, AutopilotLog, ModelUsage, AiCallLog
-from ..models.strategy_score import StrategyScore
+from ..core.providers import PROVIDERS, get_api_key as _get_api_key, get_base_url, resolve_api_key, resolve_all_api_keys
+from ..core.models_cache import get_live_models as _get_live_models
+from ..models.ai_memory import AutopilotTrade, AutopilotSettings, UserPrompt, AutopilotLog, ModelUsage, AiCallLog, AutopilotExecutionAttempt, AutopilotCycle, AutopilotOrderEvent
 from ..core.providers import estimate_cost
 from ..core.mt5_connector import ConnectorError, connector_client
 from ..core.risk import RiskRefused, submit_order, trading_halted
@@ -47,6 +50,7 @@ def _capture_raw_response(response) -> dict | None:
 
 _user_states: Dict[int, dict] = {}
 _user_locks: Dict[int, asyncio.Lock] = {}
+_trade_sync_locks: Dict[int, asyncio.Lock] = {}
 
 def _get_state(user_id: int) -> dict:
     if user_id not in _user_states:
@@ -55,6 +59,7 @@ def _get_state(user_id: int) -> dict:
             "running": False,
             "logs": [],
             "task": None,
+            "active_cycle_id": None,
             "last_error_feedback": None,
             "stats": {
                 "total_runs": 0,
@@ -136,45 +141,44 @@ async def _rebuild_stats(user_id: int):
             if last_ts:
                 state["stats"]["last_run"] = last_ts.isoformat()
 
-            # Skipped count = distinct cycles with skip messages (not per-provider noise)
-            skip_patterns = [
-                "Daily trade limit%Skipping%",
-                "All backup providers%NO_SETUP%",
-                "Skipping cycle%",
-            ]
-            for pattern in skip_patterns:
-                result = await db.execute(
-                    select(func.count(func.distinct(AutopilotLog.cycle_number))).where(
-                        AutopilotLog.user_id == user_id,
-                        AutopilotLog.cycle_number.isnot(None),
-                        AutopilotLog.message.ilike(pattern)
-                    )
+            # Count terminal attempt outcomes from the durable ledger. Log text
+            # is best-effort telemetry and must not define persisted totals.
+            skipped_outcomes = (
+                "daily_trade_limit", "daily_loss_limit", "skipped_cooldown",
+                "skipped_no_connector", "skipped_stale_market_data", "no_setup",
+                "no_eligible_prompts", "not_configured",
+            )
+            result = await db.execute(
+                select(func.count(AutopilotCycle.cycle_id)).where(
+                    AutopilotCycle.user_id == user_id,
+                    AutopilotCycle.outcome.in_(skipped_outcomes),
                 )
-                cnt = result.scalar() or 0
-                state["stats"]["skipped_count"] += cnt
+            )
+            state["stats"]["skipped_count"] = result.scalar() or 0
 
-            # Error count = distinct cycles with error messages (not per-provider noise)
-            error_patterns = [
-                "No market data available",
-                "AI code generation failed after retries%",
-                "Trade failed%",
-            ]
-            for pattern in error_patterns:
-                result = await db.execute(
-                    select(func.count(func.distinct(AutopilotLog.cycle_number))).where(
-                        AutopilotLog.user_id == user_id,
-                        AutopilotLog.cycle_number.isnot(None),
-                        AutopilotLog.message.ilike(pattern)
-                    )
+            error_outcomes = (
+                "no_market_data", "ai_generation_failed", "ai_provider_or_response_failed",
+                "execution_rejected", "cycle_crashed", "mt5_connection_failed",
+            )
+            result = await db.execute(
+                select(func.count(AutopilotCycle.cycle_id)).where(
+                    AutopilotCycle.user_id == user_id,
+                    AutopilotCycle.outcome.in_(error_outcomes),
                 )
-                cnt = result.scalar() or 0
-                state["stats"]["error_count"] += cnt
+            )
+            state["stats"]["error_count"] = result.scalar() or 0
 
             # Total runs = sum of all three (every cycle ends as trade, skip, or error)
             state["stats"]["total_runs"] = (
                 state["stats"]["trades_executed"] +
                 state["stats"]["skipped_count"] +
                 state["stats"]["error_count"]
+            )
+            latest_cycle_number = (await db.execute(
+                select(func.max(AutopilotCycle.cycle_number)).where(AutopilotCycle.user_id == user_id)
+            )).scalar()
+            state["stats"]["total_runs"] = max(
+                state["stats"]["total_runs"], latest_cycle_number or 0
             )
     except Exception:
         logger.warning("[user=%d] Could not restore the autopilot's counters", user_id, exc_info=True)
@@ -261,10 +265,11 @@ def add_log(user_id: int, message: str, level: str = "INFO"):
         logger.info("[user=%d] %s", user_id, message)
     # Persist to DB (fire-and-forget)
     cycle_number = state.get("stats", {}).get("total_runs")
-    asyncio.create_task(_persist_log(user_id, level, message, cycle_number))
+    cycle_id = state.get("active_cycle_id")
+    asyncio.create_task(_persist_log(user_id, level, message, cycle_number, cycle_id))
 
 
-async def _persist_log(user_id: int, level: str, message: str, cycle_number: int | None = None):
+async def _persist_log(user_id: int, level: str, message: str, cycle_number: int | None = None, cycle_id: str | None = None):
     try:
         async with AsyncSessionLocal() as db:
             entry = AutopilotLog(
@@ -272,6 +277,7 @@ async def _persist_log(user_id: int, level: str, message: str, cycle_number: int
                 level=level,
                 message=message,
                 cycle_number=cycle_number,
+                cycle_id=cycle_id,
             )
             db.add(entry)
             await db.commit()
@@ -280,9 +286,104 @@ async def _persist_log(user_id: int, level: str, message: str, cycle_number: int
         logger.warning("[user=%d] Could not save an autopilot log line", user_id, exc_info=True)
 
 
-# All connector traffic goes through connector_client, which holds the one
-# connector address from the server settings. Autopilot used to keep its own
-# HTTP client and let each user set a different connector address.
+async def _update_autopilot_cycle(cycle_id: str, **values):
+    """Best-effort update of a cycle ledger row; telemetry must not stop trading."""
+    try:
+        async with AsyncSessionLocal() as db:
+            cycle = await db.get(AutopilotCycle, cycle_id)
+            if cycle:
+                for key, value in values.items():
+                    setattr(cycle, key, value)
+                await db.commit()
+    except Exception as exc:
+        logger.warning("Failed to update autopilot cycle telemetry: %s", type(exc).__name__)
+
+
+async def _add_order_event(db, event: dict) -> bool:
+    """Insert one broker lifecycle event unless its stable key was already seen."""
+    exists = await db.execute(
+        select(AutopilotOrderEvent.id).where(AutopilotOrderEvent.event_key == event["event_key"])
+    )
+    if exists.scalar_one_or_none() is not None:
+        return False
+    db.add(AutopilotOrderEvent(**event))
+    return True
+
+
+def _parse_broker_datetime(value):
+    if isinstance(value, datetime):
+        return _ensure_aware(value)
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value / 1000 if value > 10_000_000_000 else value, tz=timezone.utc)
+    if isinstance(value, str):
+        try:
+            return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
+def _classify_exit_reason(close_deals: list[dict], profit: float):
+    """Prefer MT5's deal reason; keep comment and P&L fallbacks explicitly labeled."""
+    reason_map = {
+        "SL": "SL_HIT", "TP": "TP_HIT", "STOP_OUT": "STOP_OUT",
+        "CLIENT": "MANUAL_CLOSE", "MOBILE": "MANUAL_CLOSE", "WEB": "MANUAL_CLOSE",
+        "EXPERT": "EXPERT_CLOSE", "ROLLOVER": "ROLLOVER", "VMARGIN": "MARGIN_CLOSE", "VARIATION_MARGIN": "MARGIN_CLOSE",
+    }
+    # Only the broker's own deal reason decides. Guessing from the comment text
+    # misread any comment containing "sl" or "tp" (finding 10).
+    classifications = []
+    unclassified_count = 0
+    for deal in close_deals:
+        reason = (deal.get("reason") or "UNKNOWN").upper()
+        normalized = reason_map.get(reason)
+        if normalized:
+            classifications.append(normalized)
+        else:
+            unclassified_count += 1
+    distinct = set(classifications)
+    if len(distinct) > 1 or (distinct and unclassified_count):
+        classification = "MIXED_EXIT"
+        source = "mixed"
+    elif distinct:
+        classification = next(iter(distinct))
+        source = "broker"
+    else:
+        classification = "PROFIT" if profit > 0 else "LOSS"
+        source = "unavailable"
+    exit_reason = classification if classification not in ("PROFIT", "LOSS") else "UNKNOWN"
+    return classification, exit_reason, source
+
+
+def _classify_execution_error(message: str) -> str:
+    """Return a safe, stable category for analysis without exporting raw errors."""
+    text = (message or "").lower()
+    if "wrong side" in text:
+        return "INVALID_LEVEL_GEOMETRY"
+    if "risk cap" in text or "stop-distance" in text:
+        return "STOP_DISTANCE_LIMIT"
+    if "reward/risk" in text:
+        return "REWARD_RISK_LIMIT"
+    if "http 400" in text or "order failed" in text:
+        return "BROKER_REJECTED"
+    if any(marker in text for marker in ("timeout", "connect", "network", "http 5")):
+        return "CONNECTOR_UNAVAILABLE"
+    return "EXECUTION_ERROR"
+
+
+async def _finish_autopilot_cycle(user_id: int, cycle_id: str, outcome: str, reason: str = None, **values):
+    values.update(
+        status="completed",
+        outcome=outcome,
+        outcome_reason=reason,
+        completed_at=datetime.now(timezone.utc),
+    )
+    await _update_autopilot_cycle(cycle_id, **values)
+    state = _get_state(user_id)
+    if state.get("active_cycle_id") == cycle_id:
+        state["active_cycle_id"] = None
+
+
 
 
 async def initialize_mt5_connector(user_id: int) -> bool:
@@ -323,7 +424,8 @@ def _build_order_action(direction: str, order_type: str) -> str:
 
 async def execute_trade(user_id: int, symbol: str, direction: str, volume: float = None, entry_price: float = None,
                        sl: float = None, tp: float = None, comment: str = "[AUTOPILOT]", prompt_num: int = None,
-                       order_type: str = "market", context: dict = None):
+                       order_type: str = "market", context: dict = None, cycle_id: str = None,
+                       max_sl_distance: float = None, min_reward_risk: float = None):
     """Send one autopilot order through the risk gate, which sizes it from the stop loss.
 
     `volume`, the AI's suggested lot, is ignored: the size is set so that hitting
@@ -332,9 +434,12 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
     try:
         if prompt_num:
             if isinstance(prompt_num, int) and prompt_num < 0:
-                trade_comment = f"[AUTOPILOT] Custom-{abs(prompt_num)}"
+                trade_comment = f"[AUTOPILOT] C{abs(prompt_num)}"
             else:
                 trade_comment = f"[AUTOPILOT] P{prompt_num}"
+            if cycle_id:
+                # Compact UUID fragment fits typical MT5 comment limits; prompt parsing remains compatible.
+                trade_comment = f"{trade_comment} X{cycle_id[:12]}"
         else:
             trade_comment = comment
 
@@ -343,19 +448,35 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
 
         # Fetch symbol info for min stop distance + current price
         price = None
+        submitted_quote = None
         min_dist = None
         digits = None
         try:
             sym_data = await connector_client.get_symbol(symbol)
             # A buy fills at the ask and a sell at the bid; stops are measured from there.
             price = sym_data.get("ask") if direction.upper() == "BUY" else sym_data.get("bid")
+            submitted_quote = price
             min_dist = sym_data.get("min_stop_distance")
             digits = sym_data.get("digits")
         except Exception as e:
             add_log(user_id, f"Could not fetch symbol info for {symbol}: {str(e)}", "ERROR")
 
         # Reference price for stop distance checks (current market for pending orders too)
-        ref_price = price or entry_price
+        ref_price = (entry_price if is_pending else price) or entry_price
+
+        # A missing stop is not filled in here: the risk gate either sets one by
+        # ATR (default_stop_atr_mult) or refuses the order. No trade is sent naked.
+        sl = sl or None
+        tp = tp or None
+
+        # Validate before sending. Do not silently repair a model-provided SL
+        # or TP that is on the wrong side of the trade.
+        if ref_price is not None:
+            is_buy = direction.upper() == "BUY"
+            if sl is not None and ((is_buy and sl >= ref_price) or (not is_buy and sl <= ref_price)):
+                return {"success": False, "error": "Stop loss is on the wrong side of the order price"}
+            if tp is not None and ((is_buy and tp <= ref_price) or (not is_buy and tp >= ref_price)):
+                return {"success": False, "error": "Take profit is on the wrong side of the order price"}
 
         # Apply minimum stop distance safeguard to SL
         if sl and sl > 0 and min_dist and ref_price and digits:
@@ -387,6 +508,16 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
                     add_log(user_id, f"TP {tp} too close, adjusted to {adjusted}", "WARNING")
                     tp = adjusted
 
+        risk_ref_price = (entry_price if is_pending else submitted_quote) or ref_price
+        if sl and max_sl_distance is not None and risk_ref_price is not None:
+            if abs(risk_ref_price - sl) > max_sl_distance + 10 ** (-(digits or 5)):
+                return {"success": False, "error": "Stop loss is further than the configured ATR risk cap allows"}
+        if sl and tp and min_reward_risk is not None and risk_ref_price is not None:
+            risk_distance = abs(risk_ref_price - sl)
+            reward_distance = abs(tp - risk_ref_price)
+            if risk_distance <= 0 or reward_distance < risk_distance * min_reward_risk:
+                return {"success": False, "error": "Take profit is below the minimum reward/risk ratio"}
+
         payload = {"symbol": symbol, "action": action, "comment": trade_comment}
         if is_pending:
             payload["price"] = entry_price
@@ -394,6 +525,10 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
             payload["sl"] = sl
         if tp and tp > 0:
             payload["tp"] = tp
+        if max_sl_distance is not None:
+            payload["max_sl_distance"] = max_sl_distance
+        if min_reward_risk is not None:
+            payload["min_reward_risk"] = min_reward_risk
 
         ctx = {**(context or {}), "prompt_number": prompt_num, "ai_lot": volume}
         data = await submit_order(payload, source="autopilot", user_id=user_id, context=ctx, size_from_risk=True)
@@ -401,19 +536,34 @@ async def execute_trade(user_id: int, symbol: str, direction: str, volume: float
             risk = data.get("risk") or {}
             add_log(user_id, f"Sized {risk.get('volume')} lots: risks {risk.get('risk_amount')} "
                              f"({risk.get('risk_pct')}% of equity) if the stop is hit")
-            return {"success": True, "ticket": data.get("ticket"), "price": data.get("price"),
-                    "volume": data.get("volume") or risk.get("volume"),
-                    "requested_price": None if is_pending else data.get("requested_price")}
-        return {"success": False, "error": "Order failed"}
+            return {
+                "success": True,
+                "ticket": data.get("ticket"),
+                "order_ticket": data.get("order_ticket", data.get("ticket")),
+                "deal_ticket": data.get("deal_ticket", data.get("deal")),
+                "position_ticket": data.get("position"),
+                "order_status": data.get("order_status") or ("placed" if is_pending else "filled"),
+                "price": data.get("price"),
+                "volume": data.get("volume") or risk.get("volume"),
+                "requested_price": None if is_pending else data.get("requested_price"),
+                "submitted_quote": data.get("submitted_quote"),
+                "stop_loss": data.get("sl"),
+                "take_profit": data.get("tp"),
+            }
+        return {"success": False, "error": "Order failed", "submitted_quote": submitted_quote}
     except RiskRefused as e:
         add_log(user_id, f"Risk check refused the order ({e.code}): {e.message}", "WARNING")
         return {"success": False, "error": e.message, "refused": e.code}
     except ConnectorError as e:
         add_log(user_id, f"Trade execution failed: {e.detail}", "ERROR")
-        return {"success": False, "error": e.detail}
+        return {"success": False, "error": e.detail, "submitted_quote": submitted_quote}
     except Exception as e:
         add_log(user_id, f"Trade execution failed: {str(e)}", "ERROR")
-        return {"success": False, "error": str(e)}
+        return {
+            "success": False,
+            "error": str(e),
+            "submitted_quote": locals().get("submitted_quote"),
+        }
 
 
 async def _update_model_usage(user_id: int, usage: dict):
@@ -458,6 +608,8 @@ async def _log_ai_call(
     outcome: str = "pending",
     prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0,
     error_message: str = None,
+    latency_ms: int = None,
+    cycle_id: str | None = None,
 ) -> int | None:
     """Log every AI API call to AiCallLog. Returns the log ID or None on failure."""
     try:
@@ -470,12 +622,14 @@ async def _log_ai_call(
             log = AiCallLog(
                 user_id=user_id, prompt_number=prompt_number,
                 cycle_number=cycle_number,
+                cycle_id=cycle_id,
                 provider=provider, model=model,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
                 stage=stage, outcome=outcome,
                 error_message=error_message, cost=cost,
+                latency_ms=latency_ms,
             )
             db.add(log)
             await db.commit()
@@ -711,40 +865,37 @@ async def _choose_prompt_with_context(
     symbol: str,
     market_regime: dict,
 ) -> tuple[dict, dict]:
-    """Choose a prompt using regime fit plus historical performance."""
-    scores_by_prompt: dict[str, list[StrategyScore]] = {}
-    recent_by_prompt: dict[str, dict] = {}
+    """Choose prompts using regime fit and this user's outcomes in this regime."""
+    from ..core.strategy_scorer import MIN_TRADES_FOR_BEST
+
+    history_by_prompt: dict[str, dict] = {}
+    current_regime = market_regime.get("regime") or "unknown"
 
     try:
         async with AsyncSessionLocal() as db:
-            score_result = await db.execute(
-                select(StrategyScore).where(
-                    StrategyScore.symbol == symbol,
-                    StrategyScore.total_trades >= 3,
-                )
-            )
-            for score in score_result.scalars().all():
-                scores_by_prompt.setdefault(score.prompt_text, []).append(score)
-
             recent_result = await db.execute(
                 select(AutopilotTrade)
                 .where(
                     AutopilotTrade.user_id == user_id,
                     AutopilotTrade.symbol == symbol,
                     AutopilotTrade.profit.isnot(None),
+                    AutopilotTrade.market_regime == current_regime,
                 )
                 .order_by(AutopilotTrade.executed_at.desc())
-                .limit(200)
+                .limit(500)
             )
             for trade in recent_result.scalars().all():
-                bucket = recent_by_prompt.setdefault(
+                bucket = history_by_prompt.setdefault(
                     trade.prompt_text,
-                    {"trades": 0, "wins": 0, "pnl": 0.0},
+                    {"trades": 0, "wins": 0, "pnl": 0.0, "gross_profit": 0.0, "gross_loss": 0.0},
                 )
                 bucket["trades"] += 1
                 bucket["pnl"] += trade.profit or 0.0
                 if (trade.profit or 0.0) > 0:
                     bucket["wins"] += 1
+                    bucket["gross_profit"] += trade.profit
+                elif (trade.profit or 0.0) < 0:
+                    bucket["gross_loss"] += abs(trade.profit)
     except Exception:
         logger.warning("Could not read recent results per prompt; prompts are ranked without them", exc_info=True)
 
@@ -755,36 +906,24 @@ async def _choose_prompt_with_context(
         score = 50.0 + regime_score
         history_reasons = []
 
-        strategy_rows = scores_by_prompt.get(prompt["text"], [])
-        if strategy_rows:
-            best = max(
-                strategy_rows,
-                key=lambda s: (
-                    s.total_trades or 0,
-                    s.profit_factor or 0,
-                    s.total_pnl or 0,
-                ),
-            )
-            win_rate = best.win_rate or 0.0
-            profit_factor = best.profit_factor or 0.0
-            total_pnl = best.total_pnl or 0.0
-            sample = best.total_trades or 0
-            score += min(22, max(-18, (win_rate - 50) * 0.45))
-            if profit_factor:
-                score += min(12, (profit_factor - 1.0) * 8)
-            score += min(10, max(-10, total_pnl / 25))
-            history_reasons.append(
-                f"scoreboard {sample} trades, win {win_rate:.1f}%, pf {profit_factor or 0:.2f}"
-            )
-
-        recent = recent_by_prompt.get(prompt["text"])
-        if recent and recent["trades"] >= 3:
+        recent = history_by_prompt.get(prompt["text"])
+        if recent and recent["trades"] >= MIN_TRADES_FOR_BEST:
             recent_wr = recent["wins"] / recent["trades"] * 100
-            score += min(12, max(-12, (recent_wr - 50) * 0.35))
-            score += min(8, max(-8, recent["pnl"] / 20))
+            profit_factor = (recent["gross_profit"] / recent["gross_loss"]
+                             if recent["gross_loss"] else (float("inf") if recent["gross_profit"] else 0.0))
+            # Bounded contributions keep lot size/P&L scale from overwhelming regime fit.
+            score += min(18, max(-18, (recent_wr - 50) * 0.4))
+            if profit_factor != float("inf"):
+                score += min(8, max(-8, (profit_factor - 1.0) * 5))
+            elif recent["gross_profit"]:
+                score += 8
+            score += min(6, max(-6, recent["pnl"] / 50))
             history_reasons.append(
-                f"recent {recent['trades']} trades, win {recent_wr:.1f}%, pnl {recent['pnl']:+.2f}"
+                f"same-regime {recent['trades']} trades, win {recent_wr:.1f}%, "
+                f"pf {'inf' if profit_factor == float('inf') else f'{profit_factor:.2f}'}, pnl {recent['pnl']:+.2f}"
             )
+        elif recent:
+            history_reasons.append(f"same-regime sample too small ({recent['trades']}/{MIN_TRADES_FOR_BEST}); neutral performance weight")
 
         score = max(5.0, min(score, 95.0))
         weight = max(1, int(score))
@@ -801,13 +940,25 @@ async def _choose_prompt_with_context(
     for item in ranked:
         weighted.extend([item] * item["weight"])
 
+    total_weight = sum(item["weight"] for item in ranked)
+    for item in ranked:
+        item["selection_probability"] = round(item["weight"] / total_weight, 8) if total_weight else 0.0
     selected = random.choice(weighted) if weighted else random.choice(ranked)
     context = {
         "selection_mode": "regime_score_weighted",
         "selected_score": selected["score"],
         "selected_tags": selected["tags"],
         "selected_reasons": selected["reasons"],
+        "selected_probability": selected["selection_probability"],
         "market_regime": market_regime,
+        "candidate_count": len(ranked),
+        "candidates": [
+            {"id": item["prompt"]["id"], "is_custom": item["prompt"]["is_custom"],
+             "score": item["score"], "weight": item["weight"],
+             "selection_probability": item["selection_probability"], "tags": item["tags"],
+             "reasons": item["reasons"][:3]}
+            for item in ranked
+        ],
         "top_candidates": [
             {
                 "id": item["prompt"]["id"],
@@ -822,8 +973,27 @@ async def _choose_prompt_with_context(
     return selected["prompt"], context
 
 
-async def run_autopilot_cycle(user_id: int):
+async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
     state = _get_state(user_id)
+    # The loop creates the durable cycle before its cooldown/health gates. Keep
+    # direct callers backwards-compatible by creating a cycle here when needed.
+    if cycle_id is None:
+        state["stats"]["total_runs"] += 1
+        state["stats"]["last_run"] = datetime.now(timezone.utc).isoformat()
+        cycle_id = str(uuid.uuid4())
+        state["active_cycle_id"] = cycle_id
+        async with AsyncSessionLocal() as db:
+            db.add(AutopilotCycle(
+                cycle_id=cycle_id,
+                user_id=user_id,
+                cycle_number=state["stats"]["total_runs"],
+                symbol="unknown",
+                status="running",
+            ))
+            await db.commit()
+    cycle_number = state["stats"]["total_runs"]
+    add_log(user_id, f"=== Starting Cycle #{cycle_number} ===")
+
     default_prompts = load_prompts()
     
     async with AsyncSessionLocal() as db:
@@ -831,25 +1001,33 @@ async def run_autopilot_cycle(user_id: int):
             select(AutopilotSettings).where(AutopilotSettings.user_id == user_id)
         )
         settings_obj = result.scalar_one_or_none()
+        if settings_obj:
+            result = await db.execute(
+                select(UserPrompt).where(UserPrompt.user_id == user_id)
+            )
+            personal_prompts = result.scalars().all()
 
-        if not settings_obj:
-            add_log(user_id, "Autopilot not configured", "ERROR")
-            return
+            symbol = settings_obj.symbol
+            provider = settings_obj.provider
+            model = settings_obj.model
+            lot_size = settings_obj.default_lot
+            mt5_connected = settings_obj.mt5_connected
+            selected_ids = settings_obj.selected_prompts or []
+            max_trades = settings_obj.max_trades_per_day
+            max_loss = settings_obj.max_daily_loss
+            cooldown = settings_obj.cooldown_minutes
 
-        result = await db.execute(
-            select(UserPrompt).where(UserPrompt.user_id == user_id)
-        )
-        personal_prompts = result.scalars().all()
+    if not settings_obj:
+        add_log(user_id, "Autopilot not configured", "ERROR")
+        await _finish_autopilot_cycle(user_id, cycle_id, "not_configured", "No autopilot settings row exists")
+        return
 
-        symbol = settings_obj.symbol
-        provider = settings_obj.provider
-        model = settings_obj.model
-        lot_size = settings_obj.default_lot
-        mt5_connected = settings_obj.mt5_connected
-        selected_ids = settings_obj.selected_prompts or []
-        max_trades = settings_obj.max_trades_per_day
-        max_loss = settings_obj.max_daily_loss
-        cooldown = settings_obj.cooldown_minutes
+    await _update_autopilot_cycle(
+        cycle_id,
+        symbol=symbol,
+        provider=provider,
+        model=model,
+    )
 
     prompt_pool = []
     for line in default_prompts:
@@ -867,6 +1045,7 @@ async def run_autopilot_cycle(user_id: int):
 
     if not prompt_pool:
         add_log(user_id, "No prompts selected in settings", "ERROR")
+        await _finish_autopilot_cycle(user_id, cycle_id, "no_eligible_prompts", "The configured selection produced no eligible prompts")
         return
 
     if not mt5_connected:
@@ -874,6 +1053,7 @@ async def run_autopilot_cycle(user_id: int):
         conn_ok = await initialize_mt5_connector(user_id)
         if not conn_ok:
             add_log(user_id, "Failed to connect to MT5. Check MT5_CONNECTOR_URL and MT5_API_TOKEN on the server.", "ERROR")
+            await _finish_autopilot_cycle(user_id, cycle_id, "mt5_connection_failed", "Could not initialize the configured MT5 connection")
             return
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
@@ -891,6 +1071,7 @@ async def run_autopilot_cycle(user_id: int):
     if state["stats"]["daily_trade_count"] >= max_trades:
         add_log(user_id, f"Daily trade limit ({max_trades}) reached. Skipping.", "WARNING")
         state["stats"]["skipped_count"] += 1
+        await _finish_autopilot_cycle(user_id, cycle_id, "daily_trade_limit", f"Daily trade limit ({max_trades}) reached")
         return
 
     baseline_market_data = await get_market_data(
@@ -932,13 +1113,46 @@ async def run_autopilot_cycle(user_id: int):
         user_id,
         f"Using Strategy {display_id} | score={selected_score} | styles={selected_styles}: {prompt_text[:50]}...",
     )
+    prompt_version = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+    await _update_autopilot_cycle(
+        cycle_id,
+        prompt_number=prompt_num,
+        prompt_text=prompt_text,
+        prompt_version=prompt_version,
+        market_regime=market_regime.get("regime"),
+        regime_details=market_regime,
+        selection_context=decision_context,
+    )
+
+    # ── Model routing (Phase 4b): try the best-performing provider/model for
+    #    this symbol first; the user's configured provider stays in the list
+    #    as fallback. Only activates once a pair has >=10 closed trades. ──────
+    model_routing = None
+    try:
+        from ..core.strategy_scorer import get_best_model_for_symbol
+        model_routing = await get_best_model_for_symbol(symbol)
+    except Exception:
+        logger.warning("Model routing unavailable for %s; using the configured provider", symbol, exc_info=True)
+        model_routing = None
+    if model_routing:
+        await _update_autopilot_cycle(
+            cycle_id,
+            provider=model_routing["provider"],
+            model=model_routing["model"],
+        )
+        add_log(
+            user_id,
+            f"Model routing: {model_routing['provider']}/{model_routing['model']} "
+            f"(win {model_routing['win_rate']:.0f}%, {model_routing['trades']} trades) -> tried first",
+            "INFO",
+        )
 
     # ── AI call helper with 429 retry + provider fallback ────────────────────
     _call_count = 0
     _call_tokens = 0
     _call_log_ids: list[int] = []
 
-    async def _log_call(outcome: str, p: str, m: str, st: str, pt: int = 0, ct: int = 0, tt: int = 0, err: str = None):
+    async def _log_call(outcome: str, p: str, m: str, st: str, pt: int = 0, ct: int = 0, tt: int = 0, err: str = None, lt: int = None):
         nonlocal _call_count, _call_tokens
         _call_count += 1
         if tt:
@@ -947,7 +1161,8 @@ async def run_autopilot_cycle(user_id: int):
             user_id, prompt_num, state["stats"]["total_runs"],
             p, m, st, outcome=outcome,
             prompt_tokens=pt, completion_tokens=ct, total_tokens=tt,
-            error_message=err,
+            error_message=err, latency_ms=lt,
+            cycle_id=cycle_id,
         )
         if log_id:
             _call_log_ids.append(log_id)
@@ -955,75 +1170,153 @@ async def run_autopilot_cycle(user_id: int):
     # Why the last _call_ai_with_retry returned nothing, for the cycle's log line.
     _ai_failure = {"reason": ""}
 
-    async def _call_ai_with_retry(messages: list, provider: str, model: str, max_retries: int = 3, stage: str = "initial") -> tuple[str | None, dict | None]:
-        """Call AI with exponential backoff on 429, fallback to next provider.
+    async def _call_ai_with_retry(messages: list, provider: str, model: str, max_retries: int = 3, stage: str = "initial") -> tuple[str | None, dict | None, dict | None]:
+        """Call AI with multi-key fallback + provider fallback.
+
+        For each provider, resolves ALL available API keys (comma-separated).
+        If key #1 fails with auth/rate-limit, tries key #2, then #3, etc.
+        If all keys for a provider are exhausted, moves to the next provider.
+
         Returns (content, usage_dict) where usage_dict has prompt_tokens, completion_tokens, total_tokens.
         On failure returns (None, None) and leaves the reason in _ai_failure.
         """
-        from ..core.providers import PROVIDERS, get_provider_names, get_base_url, resolve_api_key
-        
+        from ..core.providers import PROVIDERS, get_provider_names, get_base_url, resolve_all_api_keys
+
         providers = get_provider_names()
-        provider_idx = providers.index(provider) if provider in providers else 0
         no_key: list[str] = []
         last_error = ""
         _ai_failure["reason"] = "the reply was empty"  # if a provider answers with nothing
-        
+
+        if model_routing and model_routing["provider"] in providers:
+            providers = [model_routing["provider"]] + [
+                p for p in providers if p != model_routing["provider"]
+            ]
+            provider_idx = 0
+        else:
+            provider_idx = providers.index(provider) if provider in providers else 0
+
+        async def get_best_model(p: str, all_keys: List[str]) -> str:
+            """Get the best available model for provider p.
+            Always fetches live models from provider API (cached 24h).
+            Only falls back to hardcoded list if API fails.
+            """
+            cfg = PROVIDERS.get(p, {})
+            base_url = cfg.get("base_url", "")
+            needs_prefix = cfg.get("needs_nvapi_prefix", False)
+
+            # Fetch live models via shared cache (24h TTL)
+            for api_key in all_keys:
+                models = await _get_live_models(p, api_key, base_url, needs_prefix)
+                if models:
+                    return models[0]
+
+            # Fallback to hardcoded if API failed
+            fallback = cfg.get("models", ["unknown"])[0] if cfg.get("models") else "unknown"
+            return fallback
+
         for attempt in range(max_retries):
             for p_idx in range(provider_idx, len(providers)):
                 p = providers[p_idx]
-                api_key = await resolve_api_key(p, settings, user_id, AsyncSessionLocal)
-                if not api_key:
+                all_keys = await resolve_all_api_keys(p, settings, user_id, AsyncSessionLocal)
+                if not all_keys:
                     if p not in no_key:
                         no_key.append(p)
                         await _log_call("no_key", p, model if p == provider else PROVIDERS[p]["models"][0], stage)
                     continue
-                if p == "nvidia" and not api_key.startswith("nvapi-"):
-                    api_key = f"nvapi-{api_key}"
-                actual_model = model if p == provider else PROVIDERS[p]["models"][0]
-                
-                try:
-                    client = AsyncOpenAI(base_url=get_base_url(p), api_key=api_key)
-                    response = await client.chat.completions.create(
-                        model=actual_model,
-                        messages=messages,
-                        temperature=0.2,
-                        max_tokens=2500,
-                        timeout=60
-                    )
-                    content = response.choices[0].message.content or ""
-                    match = re.search(r'```(?:python)?\n?(.*?)```', content, re.DOTALL)
-                    result = match.group(1).strip() if match else content.strip()
-                    usage = None
-                    if hasattr(response, 'usage') and response.usage:
-                        usage = {
-                            "provider": p,
-                            "model": actual_model,
-                            "prompt_tokens": response.usage.prompt_tokens or 0,
-                            "completion_tokens": response.usage.completion_tokens or 0,
-                            "total_tokens": response.usage.total_tokens or 0,
-                        }
-                    if usage:
-                        asyncio.create_task(_update_model_usage(user_id, usage))
-                        await _log_call("success", p, actual_model, stage,
-                            usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"])
-                    else:
-                        await _log_call("no_usage", p, actual_model, stage)
-                    return result, usage
-                except Exception as e:
-                    err_str = str(e).lower()
-                    if "429" in err_str or "too_many_requests" in err_str or "queue_exceeded" in err_str:
-                        wait = min(2 ** attempt * 10, 60)
-                        add_log(user_id, f"Provider {p} rate limited (429), waiting {wait}s...", "WARNING")
-                        last_error = f"{p} is rate limiting requests"
-                        await _log_call("rate_limited", p, actual_model, stage, err=str(e)[:200])
-                        await asyncio.sleep(wait)
-                        break
-                    else:
-                        err_msg = str(e)[:200]
-                        add_log(user_id, f"Provider {p} error: {err_msg}", "WARNING")
-                        last_error = f"{p} answered with an error: {err_msg}"
-                        await _log_call("error", p, actual_model, stage, err=err_msg)
-                        continue
+
+                if model_routing and p == model_routing["provider"]:
+                    actual_model = model_routing["model"]
+                else:
+                    actual_model = await get_best_model(p, all_keys)
+
+                # Try each key for this provider
+                for key_idx, api_key in enumerate(all_keys):
+                    if len(all_keys) > 1:
+                        add_log(user_id, f"Provider {p}: trying key {key_idx + 1}/{len(all_keys)}", "INFO")
+
+                    try:
+                        client = AsyncOpenAI(base_url=get_base_url(p), api_key=api_key)
+                        _t0 = time.time()
+                        response = await client.chat.completions.create(
+                            model=actual_model,
+                            messages=messages,
+                            temperature=0.2,
+                            max_tokens=2500,
+                            timeout=60
+                        )
+                        latency_ms = int((time.time() - _t0) * 1000)
+                        content = response.choices[0].message.content or ""
+                        match = re.search(r'```(?:python)?\n?(.*?)```', content, re.DOTALL)
+                        result = match.group(1).strip() if match else content.strip()
+                        usage = None
+                        if hasattr(response, 'usage') and response.usage:
+                            usage = {
+                                "provider": p,
+                                "model": actual_model,
+                                "prompt_tokens": response.usage.prompt_tokens or 0,
+                                "completion_tokens": response.usage.completion_tokens or 0,
+                                "total_tokens": response.usage.total_tokens or 0,
+                                "latency_ms": latency_ms,
+                            }
+                        if usage:
+                            asyncio.create_task(_update_model_usage(user_id, usage))
+                            await _log_call("success", p, actual_model, stage,
+                                usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"],
+                                lt=latency_ms)
+                        else:
+                            await _log_call("no_usage", p, actual_model, stage)
+                        if len(all_keys) > 1:
+                            add_log(user_id, f"Provider {p} key {key_idx + 1} succeeded")
+                        return result, usage, _capture_raw_response(response)
+                    except Exception as e:
+                        err_str = str(e).lower()
+                        if "429" in err_str or "too_many_requests" in err_str or "queue_exceeded" in err_str:
+                            # Rate limited — try next key for this provider
+                            add_log(user_id, f"Provider {p} key {key_idx + 1} rate limited (429), trying next key...", "WARNING")
+                            await _log_call("rate_limited", p, actual_model, stage, err=str(e)[:200])
+                            last_error = f"{p} is rate limiting requests"
+                            continue
+                        elif "expired" in err_str or "invalid" in err_str or "unauthorized" in err_str or "401" in err_str:
+                            # Auth failed — try next key for this provider
+                            add_log(user_id, f"Provider {p} key {key_idx + 1} auth failed, trying next key...", "WARNING")
+                            await _log_call("auth_failed", p, actual_model, stage, err=str(e)[:200])
+                            last_error = f"{p} refused the key: {str(e)[:120]}"
+                            continue
+                        elif "402" in err_str or "payment_required" in err_str or "payment required" in err_str:
+                            # Payment required — provider account has no credits, skip ENTIRE provider
+                            add_log(user_id, f"Provider {p} payment required (402), skipping provider...", "WARNING")
+                            await _log_call("payment_required", p, actual_model, stage, err=str(e)[:200])
+                            last_error = f"{p} needs payment (402)"
+                            break  # Skip to next provider
+                        elif "403" in err_str or "forbidden" in err_str or "tier_not_allowed" in err_str or "subscription tier" in err_str:
+                            # Tier not allowed — provider account can't access model, skip ENTIRE provider
+                            add_log(user_id, f"Provider {p} tier/forbidden (403), skipping provider...", "WARNING")
+                            await _log_call("tier_not_allowed", p, actual_model, stage, err=str(e)[:200])
+                            last_error = f"{p} does not allow this model on the account (403)"
+                            break  # Skip to next provider
+                        elif "404" in err_str or "model_not_supported" in err_str or "not found" in err_str:
+                            # Model not available — blacklist it, try next key (different model via live fetch)
+                            from ..core.models_cache import blacklist_model
+                            blacklist_model(p, actual_model)
+                            add_log(user_id, f"Provider {p} model {actual_model} not available (404), blacklisted, trying next key...", "WARNING")
+                            await _log_call("model_not_found", p, actual_model, stage, err=str(e)[:200])
+                            last_error = f"{p} does not offer {actual_model} (404)"
+                            continue  # Try next key — get_best_model will pick a different model
+                        else:
+                            # Other error — try next key for this provider
+                            err_msg = str(e)[:200]
+                            add_log(user_id, f"Provider {p} key {key_idx + 1} error: {err_msg}", "WARNING")
+                            await _log_call("error", p, actual_model, stage, err=err_msg)
+                            last_error = f"{p} answered with an error: {err_msg}"
+                            continue
+
+                # All keys for this provider exhausted — wait before trying next provider
+                if not last_error and len(no_key) == len(providers) - provider_idx:
+                    continue  # no key at all: nothing to wait for
+                if attempt < max_retries - 1:
+                    wait = min(2 ** attempt * 10, 60)
+                    await asyncio.sleep(wait)
+
             if not last_error and len(no_key) == len(providers) - provider_idx:
                 break  # no provider has a key: retrying cannot help
         if last_error:
@@ -1032,7 +1325,7 @@ async def run_autopilot_cycle(user_id: int):
             _ai_failure["reason"] = "no AI key is set for any provider. Add one in Settings, AI Providers"
         else:
             _ai_failure["reason"] = "no provider answered"
-        return None, None
+        return None, None, None
 
     # Detect required timeframe from prompt text and fetch from MT5 directly
     def _detect_timeframe(text: str) -> tuple:
@@ -1066,7 +1359,16 @@ async def run_autopilot_cycle(user_id: int):
     if not market_data or len(market_data) == 0:
         add_log(user_id, "No market data available", "ERROR")
         state["stats"]["error_count"] += 1
+        await _finish_autopilot_cycle(
+            user_id, cycle_id, "no_market_data", f"No {tf} candle data available",
+            market_timeframe=tf, candles_loaded=0,
+        )
         return
+    await _update_autopilot_cycle(cycle_id, market_timeframe=tf, candles_loaded=len(market_data))
+    market_data_hash = hashlib.sha256(
+        json.dumps(market_data, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    await _update_autopilot_cycle(cycle_id, market_data_hash=market_data_hash)
     add_log(user_id, f"Loaded {len(market_data)} {tf} candles for {symbol}")
 
     # ── Compute ATR for SL/TP sizing ──
@@ -1088,6 +1390,7 @@ async def run_autopilot_cycle(user_id: int):
     except Exception as e:
         add_log(user_id, f"Could not compute ATR, using 0: {e}", "WARNING")
     add_log(user_id, f"ATR(14): {atr_value:.2f} | Avg(20): {avg_atr_20:.2f}")
+    await _update_autopilot_cycle(cycle_id, atr_14=atr_value, avg_atr_20=avg_atr_20)
 
     # ── SANDBOX APPROACH ──────────────────────────────────────────────
     # Instead of dumping raw candle text into the AI prompt, we:
@@ -1119,6 +1422,25 @@ AUTOPILOT DECISION CONTEXT:
 {chr(10).join(top_candidate_lines) if top_candidate_lines else "- No ranked candidates available"}
 Use this context as guidance.
 """
+
+    # ── RAG: inject the track record (similar past analyses + best/losing
+    #    strategies for this symbol) so the AI trades on its own history.
+    #    Best-effort: any failure degrades to no-context, never blocks a cycle.
+    rag_section = ""
+    try:
+        from ..core.rag_service import build_rag_context
+        rag_ctx = await build_rag_context(
+            symbol, prompt_text, user_id=user_id, source="autopilot", cycle_id=cycle_id
+        )
+        if rag_ctx:
+            rag_section = f"""
+PAST PERFORMANCE (your own track record on {symbol}):
+{rag_ctx}
+Use this: repeat what worked, propose an alternative to anything listed as underperforming, and do NOT simply re-run losing approaches.
+"""
+            add_log(user_id, f"RAG context attached ({len(rag_ctx)} chars)")
+    except Exception as e:
+        add_log(user_id, f"RAG context unavailable: {e}", "WARNING")
 
     candle_count = len(market_data)
     data_warning = ""
@@ -1155,8 +1477,8 @@ IMPORTANT RULES:
    Use df.tail(N) for last N rows. NEVER use hardcoded indices like df.iloc[13].
 
    For multi-timeframe analysis, resample df UP to higher TFs:
-     df_4h = df.resample('4H', on='timestamp').agg({{'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}})
-   Aliases: '1H'=1h, '4H'=4h, '1D'=1d.
+     df_4h = df.resample('4h', on='timestamp').agg({{'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}})
+   Aliases: '1h', '4h', '1D' (pandas 3 removed '1H'/'4H' — never use uppercase H or bare 'm').
    You CANNOT resample DOWN (e.g. 1h → 1m) — that creates fake data.
 
 4. You have THREE possible outputs at the end:
@@ -1198,9 +1520,18 @@ CURRENT VOLATILITY:
 
 Strategy:
 {prompt_text}
+{rag_section}
 {decision_section}
 {error_section}
 """
+
+    analysis_prompt_hash = hashlib.sha256(code_prompt.encode("utf-8")).hexdigest()
+    await _update_autopilot_cycle(
+        cycle_id,
+        analysis_prompt_hash=analysis_prompt_hash,
+        rag_context_included=bool(rag_section),
+        rag_context_chars=len(rag_section),
+    )
 
     add_log(user_id, f"AI prompt: analyze {len(market_data)} {tf} candles for strategy")
 
@@ -1209,16 +1540,19 @@ Strategy:
     # Step 1: AI generates analysis code (with 429 retry + provider fallback)
     _last_usage = None
     _source = "sandbox"
-    generated_code, _last_usage = await _call_ai_with_retry(
+    generated_code, _last_usage, _raw_resp = await _call_ai_with_retry(
         messages=[{"role": "user", "content": code_prompt}],
         provider=provider,
         model=model,
         max_retries=3,
         stage="initial",
     )
+    if _raw_resp:
+        full_raw_response = _raw_resp
     if not generated_code:
         add_log(user_id, f"AI code generation failed after retries: {_ai_failure['reason']}", "ERROR")
         state["stats"]["error_count"] += 1
+        await _finish_autopilot_cycle(user_id, cycle_id, "ai_generation_failed", "No code returned after initial provider retries")
         return
     add_log(user_id, f"AI generated code ({len(generated_code)} chars)")
 
@@ -1226,6 +1560,7 @@ Strategy:
     from ..api.execute import run_python_code
 
     setup = None
+    saw_no_setup = False
     ai_response = generated_code  # Store generated code as AI response for DB
     # Build provider failover order: user's pick first, then known-working,
     # then the rest sorted by reliability.
@@ -1244,13 +1579,15 @@ Strategy:
         # Subsequent iterations generate new code with the next provider.
         if p_idx > 0:
             add_log(user_id, f"Trying provider {retry_p} for code generation...", "INFO")
-            new_code, _last_usage = await _call_ai_with_retry(
+            new_code, _last_usage, _raw_resp = await _call_ai_with_retry(
                 messages=[{"role": "user", "content": code_prompt}],
                 provider=retry_p,
                 model=PROVIDERS[retry_p]["models"][0],
                 max_retries=2,
                 stage="failover",
             )
+            if _raw_resp:
+                full_raw_response = _raw_resp
             if not new_code:
                 add_log(user_id, f"{retry_p} code generation returned nothing ({_ai_failure['reason']}), skipping")
                 continue
@@ -1298,12 +1635,13 @@ Strategy:
                 break
 
             if "NO_SETUP" in output:
+                saw_no_setup = True
                 add_log(user_id, f"{retry_p} says NO_SETUP, trying next provider", "WARNING")
                 continue
 
             # Unclear output — try self-correction once with same provider
             add_log(user_id, f"{retry_p} output unclear, trying self-correction...", "WARNING")
-            corrected, _last_usage = await _call_ai_with_retry(
+            corrected, _last_usage, _raw_resp = await _call_ai_with_retry(
                 messages=[
                     {"role": "user", "content": code_prompt},
                     {"role": "assistant", "content": generated_code},
@@ -1314,6 +1652,8 @@ Strategy:
                 max_retries=2,
                 stage="self_correct",
             )
+            if _raw_resp:
+                full_raw_response = _raw_resp
             if corrected:
                 generated_code = corrected
                 ai_response = generated_code
@@ -1350,6 +1690,7 @@ Strategy:
                     if setup:
                         break
                     if "NO_SETUP" in corrected_output:
+                        saw_no_setup = True
                         add_log(user_id, f"{retry_p} self-correction says NO_SETUP", "WARNING")
             else:
                 add_log(user_id, f"{retry_p} self-correction failed", "WARNING")
@@ -1419,6 +1760,7 @@ Total candles loaded: {len(market_data)}
 {candle_block}
 
 Strategy: {prompt_text}
+{rag_section}
 {error_section}
 
 CRITICAL SL/TP RULES:
@@ -1439,13 +1781,15 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
         add_log(user_id, "Backup: sending 50 candles + indicators to providers...", "INFO")
 
         for p_idx, retry_p in enumerate(_retry_providers):
-            fallback_response, _last_usage = await _call_ai_with_retry(
+            fallback_response, _last_usage, _raw_resp = await _call_ai_with_retry(
                 messages=[{"role": "user", "content": backup_prompt}],
                 provider=retry_p,
                 model=PROVIDERS[retry_p]["models"][0],
                 max_retries=2,
                 stage="backup",
             )
+            if _raw_resp:
+                full_raw_response = _raw_resp
             if not fallback_response:
                 add_log(user_id, f"Backup {retry_p} returned nothing ({_ai_failure['reason']}), skipping")
                 continue
@@ -1476,6 +1820,7 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
                     break
 
             if "NO_SETUP" in fallback_response:
+                saw_no_setup = True
                 add_log(user_id, f"Backup {retry_p}: NO_SETUP, trying next provider", "WARNING")
                 continue
 
@@ -1484,6 +1829,31 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
         if not setup:
             add_log(user_id, "All backup providers: NO_SETUP or failed", "WARNING")
             state["stats"]["skipped_count"] += 1
+            async with AsyncSessionLocal() as db:
+                no_setup_record = AutopilotTrade(
+                    user_id=user_id, prompt_number=prompt_num, prompt_text=prompt_text,
+                    symbol=symbol, direction="NONE", order_type="market", lot_size=lot_size,
+                    execution_status="skipped", decision_type="NO_SETUP",
+                    reasoning="All providers returned NO_SETUP or failed",
+                    market_regime=market_regime.get("regime") if market_regime else None,
+                    regime_details=market_regime,
+                    prompt_tags=decision_context.get("selected_tags"),
+                    decision_score=decision_context.get("selected_score"),
+                    decision_context=decision_context,
+                    source=_source,
+                    cycle_number=state["stats"]["total_runs"],
+                    cycle_id=cycle_id,
+                )
+                db.add(no_setup_record)
+                await db.commit()
+            await _finish_autopilot_cycle(
+                user_id,
+                cycle_id,
+                "no_setup" if saw_no_setup else "ai_provider_or_response_failed",
+                "Model explicitly returned NO_SETUP" if saw_no_setup else "No valid setup produced after provider and sandbox fallbacks",
+                execution_status="skipped",
+                decision_source=_source,
+            )
             return
 
     direction = setup.get("direction", "BUY").upper()
@@ -1493,12 +1863,34 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
     tp = setup.get("take_profit")
     # The AI's lot is recorded but not used: the risk gate sizes the order from its stop.
     lot = setup.get("lot_size", lot_size)
+    requested_lot = lot  # the AI's suggestion; the risk gate sets the real size from the stop
+    await _update_autopilot_cycle(
+        cycle_id,
+        setup={key: setup.get(key) for key in ("action", "symbol", "direction", "order_type", "entry_price", "stop_loss", "take_profit", "lot_size", "reasoning", "confidence") if key in setup},
+        requested_lot_size=requested_lot,
+        decision_source=_source,
+    )
     reasoning = setup.get("reasoning", "")
     confidence = setup.get("confidence", 70)
 
+    # Capture the AI-proposed values before any safety adjustments.
+    proposed_entry_price = entry_price
+    proposed_sl = sl
+    proposed_tp = tp
+
+    raw_geometry_error = None
+    if entry_price and entry_price > 0:
+        is_buy = direction == "BUY"
+        if sl not in (None, 0) and ((is_buy and sl >= entry_price) or (not is_buy and sl <= entry_price)):
+            raw_geometry_error = "AI stop loss is on the wrong side of its proposed entry"
+        elif tp not in (None, 0) and ((is_buy and tp <= entry_price) or (not is_buy and tp >= entry_price)):
+            raw_geometry_error = "AI take profit is on the wrong side of its proposed entry"
+
     # ── SL/TP post-processing: clamp unreasonably wide stops ──
-    if entry_price and sl and atr_value and atr_value > 0:
-        sl_dist = abs(entry_price - sl)
+    max_sl_distance = None
+    min_reward_risk = None
+    if not raw_geometry_error and atr_value and atr_value > 0:
+        min_reward_risk = 1.5
         max_sl_by_atr = atr_value * 1.5
         if "XAU" in symbol or "GOLD" in symbol:
             hard_cap = 30.0
@@ -1509,13 +1901,15 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
         else:
             hard_cap = max_sl_by_atr
         max_sl_dist = min(max_sl_by_atr, hard_cap)
-        if sl_dist > max_sl_dist:
+        max_sl_distance = max_sl_dist
+        if entry_price and sl and abs(entry_price - sl) > max_sl_dist:
+            sl_dist = abs(entry_price - sl)
             if direction == "BUY":
                 sl = entry_price - max_sl_dist
             else:
                 sl = entry_price + max_sl_dist
             add_log(user_id, f"SL clamped from {sl_dist:.2f}pts to {max_sl_dist:.2f}pts (1.5x ATR={max_sl_by_atr:.2f}, hard cap={hard_cap})", "WARNING")
-    if entry_price and tp and sl and atr_value and atr_value > 0:
+    if not raw_geometry_error and entry_price and tp and sl and atr_value and atr_value > 0:
         tp_dist = abs(entry_price - tp)
         sl_dist = abs(entry_price - sl)
         min_tp_dist = sl_dist * 1.5
@@ -1528,28 +1922,82 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
 
     add_log(user_id, f"TRADE SETUP - {direction} ({order_type}) | Entry: {entry_price} SL: {sl} TP: {tp} Confidence: {confidence}%")
 
-    result = await execute_trade(user_id, symbol, direction, lot, entry_price, sl, tp, prompt_num=prompt_num,
-                                 order_type=order_type,
-                                 context={"market_regime": market_regime.get("regime"), "confidence": confidence})
+    if raw_geometry_error:
+        result = {"success": False, "error": raw_geometry_error}
+        add_log(user_id, f"Trade setup rejected: {raw_geometry_error}", "WARNING")
+    else:
+        result = await execute_trade(
+            user_id, symbol, direction, lot, entry_price, sl, tp,
+            prompt_num=prompt_num, order_type=order_type, cycle_id=cycle_id,
+            max_sl_distance=max_sl_distance, min_reward_risk=min_reward_risk,
+            context={"market_regime": market_regime.get("regime"), "confidence": confidence},
+        )
     state["last_trade_time"] = datetime.now(timezone.utc)
 
     if result.get("success"):
         state["last_error_feedback"] = None
         ticket = result.get("ticket")
+        order_ticket = result.get("order_ticket") or ticket
+        order_status = result.get("order_status") or ("placed" if order_type in ("limit", "stop") else "filled")
+        is_pending_order = order_status in ("placed", "started", "request_add")
+        position_ticket = result.get("position_ticket")
         exec_price = result.get("price")
-        add_log(user_id, f"Trade executed - Ticket #{ticket} Price: {exec_price}", "SUCCESS")
-        state["stats"]["trades_executed"] += 1
-        state["stats"]["daily_trade_count"] += 1
+        add_log(user_id, f"Order {order_status} - Order #{order_ticket} Price: {exec_price}", "SUCCESS")
+        if not is_pending_order:
+            state["stats"]["trades_executed"] += 1
+            state["stats"]["daily_trade_count"] += 1
+
+        # For market orders, use actual MT5 fill price as entry_price
+        submitted_quote = result.get("submitted_quote")
+        requested_sl = sl
+        requested_tp = tp
+        broker_sl = result.get("stop_loss")
+        broker_tp = result.get("take_profit")
+        requested_entry = submitted_quote if order_type == "market" else entry_price
+        slippage = None
+        if submitted_quote is not None and exec_price is not None:
+            # Positive values mean the fill was worse for the strategy direction.
+            slippage = round(
+                (exec_price - submitted_quote) if direction == "BUY" else (submitted_quote - exec_price),
+                8,
+            )
+        if order_type == "market":
+            entry_price = exec_price
+        # Persist the levels reported by the connector as broker-accepted.
+        sl = broker_sl
+        tp = broker_tp
+
+        market_snap = {
+            "regime": market_regime.get("regime") if market_regime else None,
+            "trend": market_regime.get("trend") if market_regime else None,
+            "volatility": market_regime.get("volatility") if market_regime else None,
+            "atr_14": market_regime.get("atr_14") if market_regime else None,
+            "entry_price": entry_price,
+            "sl": sl,
+            "tp": tp,
+            "submitted_quote": submitted_quote,
+        }
 
         async with AsyncSessionLocal() as db:
             trade = AutopilotTrade(
                 user_id=user_id, prompt_number=prompt_num, prompt_text=prompt_text,
                 symbol=symbol, direction=direction, order_type=order_type, entry_price=entry_price,
+                proposed_entry_price=proposed_entry_price,
                 stop_loss=sl, take_profit=tp, lot_size=result.get("volume") or lot,
-                mt5_ticket=ticket, execution_price=exec_price, execution_status="executed",
+                mt5_ticket=position_ticket or (None if is_pending_order else ticket),
+                mt5_order_ticket=order_ticket, order_status=order_status,
+                execution_price=exec_price,
                 requested_price=result.get("requested_price"),
+                requested_entry_price=requested_entry,
+                submitted_quote=submitted_quote,
+                slippage_price=slippage,
+                requested_stop_loss=requested_sl,
+                requested_take_profit=requested_tp,
+                broker_stop_loss=broker_sl,
+                broker_take_profit=broker_tp,
+                execution_status="pending" if is_pending_order else "executed",
                 reasoning=reasoning, confidence=confidence, ai_response=ai_response,
-                raw_thinking=full_raw_response,
+                raw_thinking=full_raw_response if isinstance(full_raw_response, dict) else None,
                 market_regime=market_regime.get("regime"),
                 regime_details=market_regime,
                 prompt_tags=decision_context.get("selected_tags"),
@@ -1563,10 +2011,40 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
                 source=_source,
                 call_count=_call_count if _call_count > 0 else None,
                 call_tokens=_call_tokens if _call_tokens > 0 else None,
+                decision_type="TRADE",
+                market_snapshot=market_snap,
                 cycle_number=state["stats"]["total_runs"],
+                cycle_id=cycle_id,
             )
             db.add(trade)
+            await db.flush()
+            await _add_order_event(db, {
+                "event_key": f"user:{user_id}:order:{order_ticket}:submitted",
+                "user_id": user_id,
+                "autopilot_trade_id": trade.id,
+                "cycle_id": cycle_id,
+                "prompt_number": prompt_num,
+                "symbol": symbol,
+                "event_type": "ORDER_SUBMITTED",
+                "status": order_status,
+                "order_ticket": order_ticket,
+                "position_id": position_ticket,
+                "volume": lot,
+                "price": submitted_quote if submitted_quote is not None else entry_price,
+                "broker_time": datetime.now(timezone.utc),
+                "comment": f"[AUTOPILOT] prompt={prompt_num} cycle={cycle_id}",
+            })
             await db.commit()
+        await _finish_autopilot_cycle(
+            user_id, cycle_id,
+            "order_pending" if is_pending_order else "trade_executed",
+            "Broker accepted pending order" if is_pending_order else "Broker filled the market order",
+            execution_status="pending" if is_pending_order else "executed",
+            mt5_ticket=position_ticket or (None if is_pending_order else ticket),
+            mt5_order_ticket=order_ticket, order_status=order_status,
+            provider=(_last_usage.get("provider") if _last_usage else provider),
+            model=(_last_usage.get("model") if _last_usage else model),
+        )
     else:
         error_msg = result.get('error', 'Unknown error')
         add_log(user_id, f"Trade failed: {error_msg}", "ERROR")
@@ -1576,14 +2054,46 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
         )
         state["stats"]["error_count"] += 1
 
+        async with AsyncSessionLocal() as db:
+            attempt = AutopilotExecutionAttempt(
+                user_id=user_id, cycle_number=state["stats"]["total_runs"], cycle_id=cycle_id,
+                symbol=symbol, direction=direction, order_type=order_type,
+                entry_price=entry_price, stop_loss=sl, take_profit=tp, lot_size=lot,
+                outcome="rejected", error_message=error_msg[:500],
+                error_category=_classify_execution_error(error_msg),
+                source=_source,
+                proposed_entry_price=proposed_entry_price,
+                proposed_stop_loss=proposed_sl,
+                proposed_take_profit=proposed_tp,
+                requested_entry_price=entry_price,
+                requested_stop_loss=sl,
+                requested_take_profit=tp,
+                requested_lot_size=requested_lot,
+                submitted_quote=result.get("submitted_quote"),
+                broker_stop_loss=result.get("broker_stop_loss"),
+                broker_take_profit=result.get("broker_take_profit"),
+                market_regime=market_regime.get("regime") if market_regime else None,
+                provider=(_last_usage.get("provider") if _last_usage else None),
+                model=(_last_usage.get("model") if _last_usage else None),
+            )
+            db.add(attempt)
+            await db.commit()
+        await _finish_autopilot_cycle(
+            user_id, cycle_id, "execution_rejected", error_msg[:500],
+            execution_status="rejected",
+            provider=(_last_usage.get("provider") if _last_usage else provider),
+            model=(_last_usage.get("model") if _last_usage else model),
+        )
+
 
 async def _is_market_open() -> bool:
-    """Check if XAUUSD market is currently open.
-    XAUUSD: Sunday 23:00 UTC → Friday 22:00 UTC. Saturday fully closed.
+    """Whether XAUUSD normally trades now: Sunday 23:00 UTC to Friday 22:00 UTC.
+
+    Not used to decide whether to trade (live ticks do that); the heartbeat uses it
+    to know when missing prices are a problem rather than a weekend.
     """
     now = datetime.now(timezone.utc)
-    wd = now.weekday()
-    hour = now.hour
+    wd, hour = now.weekday(), now.hour
     if wd == 5:  # Saturday
         return False
     if wd == 4 and hour >= 22:  # Friday after 22:00 UTC
@@ -1593,7 +2103,73 @@ async def _is_market_open() -> bool:
     return True
 
 
-async def sync_all_trades_from_mt5(user_id: int, hours: int = 720):
+async def _has_live_ticks(user_id: int, symbol: str) -> bool:
+    """True if the latest one-minute candle is under 3 minutes old: the market is live.
+
+    From the upstream branch; replaces fixed weekday hours, so holidays and early
+    closes are seen too. Candle times arrive in UTC from the connector client.
+    """
+    try:
+        data = await connector_client.get_latest_data(symbol, timeframe="1m", count=1)
+    except ConnectorError as e:
+        logger.warning("[user=%d] Live tick check failed: %s", user_id, e.detail)
+        return False
+    candles = data.get("data") or []
+    last_time = candles[-1].get("time") if candles else None
+    if not last_time:
+        return False
+    age_seconds = (datetime.now(timezone.utc) - datetime.fromtimestamp(last_time, tz=timezone.utc)).total_seconds()
+    return age_seconds < 180
+
+
+async def _resolve_prompt_text(db, user_id: int, prompt_num: int) -> str:
+    """Resolve the actual prompt text for a given prompt_number.
+
+    Tries in order:
+      1. Default prompts from prompt_list.txt (numbered 1-N)
+      2. User's custom prompts from user_prompts table
+      3. Fallback placeholder
+    """
+    # Custom prompt IDs are negative in autopilot records; resolve them by row ID.
+    if prompt_num < 0:
+        result = await db.execute(
+            select(UserPrompt.content).where(
+                UserPrompt.user_id == user_id,
+                UserPrompt.id == abs(prompt_num),
+            )
+        )
+        content = result.scalar_one_or_none()
+        if content:
+            return content
+
+    # 1. Try default prompts from prompt_list.txt
+    default_prompts = load_prompts()
+    for p in default_prompts:
+        # Format: "1. Analyze XAUUSD..."
+        try:
+            num_str = p.split(".")[0].strip()
+            if int(num_str) == prompt_num:
+                return p
+        except (ValueError, IndexError):
+            continue
+
+    # 2. Try user's custom prompts from DB
+    try:
+        from sqlalchemy import text as _txt
+        result = await db.execute(_txt(
+            "SELECT content FROM user_prompts WHERE user_id = :uid LIMIT 1 OFFSET :offset"
+        ), {"uid": user_id, "offset": prompt_num - 1})
+        row = result.fetchone()
+        if row and row[0]:
+            return row[0]
+    except Exception:
+        logger.warning("Could not look up custom prompt #%s for user %s", prompt_num, user_id, exc_info=True)
+
+    # 3. Fallback
+    return f"(synced from MT5 - P#{prompt_num})"
+
+
+async def sync_all_trades_from_mt5(user_id: int, hours: int = 2160):
     """Full back-sync: fetch ALL MT5 history, match by comment, create missing local records."""
     try:
         async with AsyncSessionLocal() as db:
@@ -1612,52 +2188,100 @@ async def sync_all_trades_from_mt5(user_id: int, hours: int = 720):
             if not deals:
                 return
 
-            # Group by position_id into open/close pairs
-            positions = {}
-            for d in deals:
-                pid = d.get("position_id")
-                if pid:
-                    positions.setdefault(pid, {})[d["entry"]] = d
+            positions_data = await connector_client.get_positions()
+            if not positions_data or not positions_data.get("success"):
+                add_log(user_id, "Full sync: open-position check failed; close results deferred", "WARNING")
+                return
+            open_position_ids = {
+                str(position.get("ticket"))
+                for position in positions_data.get("positions", [])
+                if position.get("ticket") is not None
+            }
 
-            # Get all existing local tickets
-            existing = await db.execute(
-                select(AutopilotTrade.mt5_ticket).where(AutopilotTrade.user_id == user_id)
-            )
-            existing_tickets = {row[0] for row in existing if row[0]}
+            # Keep every deal: a position can have multiple partial-close deals.
+            position_deals: dict[str, list[dict]] = {}
+            for deal in deals:
+                pid = deal.get("position_id")
+                if pid is not None:
+                    position_deals.setdefault(str(pid), []).append(deal)
 
             created = 0
             updated = 0
-            for pid, pair in positions.items():
-                close = pair.get("CLOSE")
-                opn = pair.get("OPEN")
-                if not close or not opn:
+            for pid, grouped_deals in position_deals.items():
+                open_deals = [deal for deal in grouped_deals if deal.get("entry") == "OPEN"]
+                close_deals = [deal for deal in grouped_deals if deal.get("entry") in ("CLOSE", "INOUT", "OUT_BY")]
+                if not open_deals:
                     continue
-                ticket = opn.get("ticket") or close.get("ticket")
+                open_deals.sort(key=lambda item: str(item.get("time") or ""))
+                close_deals.sort(key=lambda item: str(item.get("time") or ""))
+                opn = open_deals[0]
+                close = close_deals[-1] if close_deals else {}
+                # Position ID is the stable key used by MT5's open-position list
+                # and all related deal rows; an order/deal ticket may differ.
+                ticket = int(pid)
+                is_open = pid in open_position_ids or str(ticket) in open_position_ids
                 comment = opn.get("comment", "") or close.get("comment", "")
-                m = re.search(r"\[AUTOPILOT\]\s*(?:Custom-)?P?(\d+)", comment)
-                if not m:
+                custom_prompt_match = re.search(r"\[AUTOPILOT\]\s+C(\d+)\b", comment, re.I)
+                prompt_match = re.search(r"\[AUTOPILOT\]\s*(?:Custom-|P)?(\d+)", comment, re.I)
+                if not custom_prompt_match and not prompt_match:
                     continue
-                prompt_num = int(m.group(1))
+                prompt_num = -int(custom_prompt_match.group(1)) if custom_prompt_match else int(prompt_match.group(1))
+                cycle_token_match = re.search(r"\bX([0-9a-f]{12})\b", comment, re.I)
+                linked_cycle_id = None
+                if cycle_token_match:
+                    linked_cycle_id = (await db.execute(
+                        select(AutopilotCycle.cycle_id).where(
+                            AutopilotCycle.user_id == user_id,
+                            AutopilotCycle.cycle_id.like(f"{cycle_token_match.group(1).lower()}%"),
+                        )
+                    )).scalars().first()
 
                 # Try to match existing local trade by ticket or position_id
                 existing_trade = None
-                result_set = await db.execute(
-                    select(AutopilotTrade).where(
-                        AutopilotTrade.user_id == user_id,
-                        AutopilotTrade.mt5_ticket == ticket,
+                if linked_cycle_id:
+                    result_set = await db.execute(
+                        select(AutopilotTrade).where(
+                            AutopilotTrade.user_id == user_id,
+                            AutopilotTrade.cycle_id == linked_cycle_id,
+                        )
                     )
-                )
-                existing_trade = result_set.scalar_one_or_none()
+                    existing_trade = result_set.scalar_one_or_none()
+                if existing_trade is None:
+                    result_set = await db.execute(
+                        select(AutopilotTrade).where(
+                            AutopilotTrade.user_id == user_id,
+                            AutopilotTrade.mt5_ticket == ticket,
+                        )
+                    )
+                    existing_trade = result_set.scalar_one_or_none()
+                if existing_trade is None and opn.get("order_ticket") is not None:
+                    result_set = await db.execute(
+                        select(AutopilotTrade).where(
+                            AutopilotTrade.user_id == user_id,
+                            AutopilotTrade.mt5_order_ticket == int(opn["order_ticket"]),
+                        )
+                    )
+                    existing_trade = result_set.scalar_one_or_none()
 
-                profit = close.get("profit", 0) or 0
+                profit = None
+                if close_deals and not is_open:
+                    profit = sum(
+                        float(deal.get("profit") or 0.0)
+                        + float(deal.get("swap") or 0.0)
+                        + float(deal.get("commission") or 0.0)
+                        for deal in close_deals
+                    )
                 exit_price = close.get("price")
-                closed_at_str = close.get("time")
+                closed_at_str = close.get("time") if profit is not None else None
                 volume = opn.get("volume", 0) or 0
                 symbol = opn.get("symbol", "")
                 entry_price = opn.get("price", 0) or 0
                 direction = opn.get("direction", "BUY").upper()
                 entry_time_str = opn.get("time")
-                res_type = close_result(close)
+                if profit is None:
+                    res_type, exit_reason, exit_reason_source = None, None, None
+                else:
+                    res_type, exit_reason, exit_reason_source = _classify_exit_reason(close_deals, profit)
 
                 def _parse_ts(s):
                     if not s:
@@ -1665,23 +2289,58 @@ async def sync_all_trades_from_mt5(user_id: int, hours: int = 720):
                     return datetime.strptime(s, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
 
                 if existing_trade:
-                    if existing_trade.result is None or existing_trade.profit is None:
+                    tracked_trade = existing_trade
+                    if linked_cycle_id and not existing_trade.cycle_id:
+                        existing_trade.cycle_id = linked_cycle_id
+                    if profit is None:
+                        # The position is still open, possibly after a partial exit.
+                        was_closed = existing_trade.result is not None or existing_trade.profit is not None
+                        existing_trade.profit = None
+                        existing_trade.exit_price = None
+                        existing_trade.result = None
+                        existing_trade.exit_reason = None
+                        existing_trade.exit_reason_source = None
+                        existing_trade.closed_at = None
+                        existing_trade.duration_minutes = None
+                        if was_closed:
+                            updated += 1
+                    elif (
+                        existing_trade.result is None
+                        or existing_trade.profit is None
+                        or existing_trade.profit != profit
+                        or existing_trade.exit_reason != exit_reason
+                        or existing_trade.exit_reason_source != exit_reason_source
+                    ):
                         existing_trade.profit = profit
                         existing_trade.exit_price = exit_price
                         existing_trade.result = res_type
+                        existing_trade.exit_reason = exit_reason
+                        existing_trade.exit_reason_source = exit_reason_source
                         existing_trade.closed_at = _parse_ts(closed_at_str)
                         if existing_trade.executed_at and existing_trade.closed_at:
                             diff = existing_trade.closed_at - existing_trade.executed_at
                             existing_trade.duration_minutes = int(diff.total_seconds() / 60)
                         updated += 1
+                    if existing_trade.cycle_id:
+                        cycle = await db.get(AutopilotCycle, existing_trade.cycle_id)
+                        if cycle:
+                            cycle.trade_result = existing_trade.result
+                            cycle.exit_reason = existing_trade.exit_reason
+                            cycle.exit_reason_source = existing_trade.exit_reason_source
+                            cycle.realized_profit = existing_trade.profit
+                            cycle.trade_closed_at = existing_trade.closed_at
+                            cycle.duration_minutes = existing_trade.duration_minutes
                 else:
+                    # Resolve actual prompt text from prompt_number
+                    resolved_text = await _resolve_prompt_text(db, user_id, prompt_num)
+
                     executed_at = _parse_ts(entry_time_str)
                     closed_at = _parse_ts(closed_at_str)
                     duration = int((closed_at - executed_at).total_seconds() / 60) if executed_at and closed_at else None
                     new_trade = AutopilotTrade(
                         user_id=user_id,
                         prompt_number=prompt_num,
-                        prompt_text=f"(synced from MT5 - P#{prompt_num})",
+                        prompt_text=resolved_text,
                         symbol=symbol,
                         direction=direction,
                         entry_price=entry_price,
@@ -1692,37 +2351,97 @@ async def sync_all_trades_from_mt5(user_id: int, hours: int = 720):
                         execution_price=entry_price,
                         execution_status="executed",
                         result=res_type,
+                        exit_reason=exit_reason,
+                        exit_reason_source=exit_reason_source,
                         profit=profit,
                         exit_price=exit_price,
                         closed_at=closed_at,
                         duration_minutes=duration,
                         source="mt5_sync",
+                        cycle_id=linked_cycle_id,
                     )
                     db.add(new_trade)
+                    await db.flush()
+                    tracked_trade = new_trade
+                    if linked_cycle_id and profit is not None:
+                        cycle = await db.get(AutopilotCycle, linked_cycle_id)
+                        if cycle:
+                            cycle.trade_result = res_type
+                            cycle.exit_reason = exit_reason
+                            cycle.exit_reason_source = exit_reason_source
+                            cycle.realized_profit = profit
+                            cycle.trade_closed_at = closed_at
+                            cycle.duration_minutes = duration
                     created += 1
 
+                for deal in grouped_deals:
+                    deal_ticket = deal.get("deal_ticket")
+                    if deal_ticket is None:
+                        continue
+                    entry_type = deal.get("entry") or "UNKNOWN"
+                    event_type = {
+                        "OPEN": "DEAL_OPEN", "CLOSE": "DEAL_CLOSE",
+                        "INOUT": "DEAL_REVERSAL", "OUT_BY": "DEAL_CLOSE_BY",
+                    }.get(entry_type, "DEAL_OTHER")
+                    await _add_order_event(db, {
+                        "event_key": f"user:{user_id}:deal:{deal_ticket}",
+                        "user_id": user_id,
+                        "autopilot_trade_id": tracked_trade.id,
+                        "cycle_id": tracked_trade.cycle_id,
+                        "prompt_number": tracked_trade.prompt_number,
+                        "symbol": deal.get("symbol") or tracked_trade.symbol,
+                        "event_type": event_type,
+                        "status": "recorded",
+                        "order_ticket": deal.get("order_ticket", deal.get("ticket")),
+                        "deal_ticket": int(deal_ticket),
+                        "position_id": deal.get("position_id"),
+                        "entry_type": entry_type,
+                        "reason_code": deal.get("reason_code"),
+                        "reason": deal.get("reason") or "UNKNOWN",
+                        "volume": deal.get("volume"),
+                        "price": deal.get("price"),
+                        "profit": deal.get("profit"),
+                        "swap": deal.get("swap"),
+                        "commission": deal.get("commission"),
+                        "broker_time": _parse_broker_datetime(deal.get("time_msc") or deal.get("time")),
+                        "comment": (deal.get("comment") or "")[:256],
+                    })
+
+            await db.commit()
             if created > 0 or updated > 0:
-                await db.commit()
                 add_log(user_id, f"Full sync: {created} created, {updated} updated from MT5 history", "INFO")
 
     except Exception as e:
         add_log(user_id, f"Full sync failed: {str(e)}", "ERROR")
 
 
-async def sync_trade_results(user_id: int):
+async def _sync_trade_results_unlocked(user_id: int) -> int:
     try:
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(AutopilotSettings).where(AutopilotSettings.user_id == user_id))
             settings_obj = result.scalar_one_or_none()
             if not settings_obj:
                 return
+            reconcile_since = datetime.now(timezone.utc) - timedelta(days=90)
             result = await db.execute(
-                select(AutopilotTrade).where(AutopilotTrade.user_id == user_id)
-                .where(AutopilotTrade.execution_status == "executed").where(AutopilotTrade.result == None)
+                select(AutopilotTrade).where(
+                    AutopilotTrade.user_id == user_id,
+                    or_(
+                        AutopilotTrade.execution_status == "pending",
+                        and_(
+                            AutopilotTrade.execution_status == "executed",
+                            AutopilotTrade.order_status == "partially_filled_active",
+                        ),
+                        and_(
+                            AutopilotTrade.execution_status == "executed",
+                            or_(AutopilotTrade.result.is_(None), AutopilotTrade.executed_at >= reconcile_since),
+                        ),
+                    ),
+                )
             )
             open_trades = result.scalars().all()
             if not open_trades:
-                return
+                return 0
 
             # Dynamically determine the history window to check based on the oldest open trade
             try:
@@ -1738,46 +2457,364 @@ async def sync_trade_results(user_id: int):
                 history_data = await connector_client.get_history(hours=sync_hours)
             except Exception as e:
                 add_log(user_id, f"History fetch failed: {str(e)}", "ERROR")
-                return
+                return 0
 
-            if not history_data.get("success"):
-                return
-            deals = history_data.get("deals", [])
+            deals = history_data.get("deals", []) if history_data.get("success") else []
+
+            pending_trades = [
+                t for t in open_trades
+                if t.execution_status == "pending" or t.order_status == "partially_filled_active"
+            ]
+            active_orders, historical_orders = [], []
+            if pending_trades:
+                try:
+                    active_data = await connector_client.get_orders()
+                    if active_data.get("success"):
+                        active_orders = active_data.get("orders", [])
+                except Exception as e:
+                    add_log(user_id, f"Active-order fetch failed: {type(e).__name__}", "WARNING")
+                try:
+                    history_orders_data = await connector_client.get_order_history(hours=sync_hours)
+                    if history_orders_data.get("success"):
+                        historical_orders = history_orders_data.get("orders", [])
+                except Exception as e:
+                    add_log(user_id, f"Order-history fetch failed: {type(e).__name__}", "WARNING")
+
+            # Apply the latest broker state for each pending order. The order
+            # ticket is intentionally distinct from a resulting position ID.
+            orders_by_ticket = {}
+            for order in active_orders + historical_orders:
+                ticket_value = order.get("order_ticket", order.get("ticket"))
+                if ticket_value is not None:
+                    orders_by_ticket[str(ticket_value)] = order
+            order_terminal_states = {
+                "filled": "executed", "partially_filled": "executed",
+                "cancelled": "cancelled", "canceled": "cancelled",
+                "expired": "expired", "rejected": "rejected",
+            }
+            for trade in pending_trades:
+                broker_order = orders_by_ticket.get(str(trade.mt5_order_ticket)) if trade.mt5_order_ticket is not None else None
+                if not broker_order:
+                    continue
+                if broker_order.get("sl") is not None:
+                    trade.broker_stop_loss = trade.stop_loss = float(broker_order["sl"])
+                if broker_order.get("tp") is not None:
+                    trade.broker_take_profit = trade.take_profit = float(broker_order["tp"])
+                broker_status = (broker_order.get("status") or "unknown").lower()
+                if broker_status == "partially_filled" and broker_order.get("is_active"):
+                    broker_status = "partially_filled_active"
+                was_unfilled = trade.execution_status == "pending"
+                trade.order_status = broker_status
+                state_marker = broker_order.get("done_time") or broker_order.get("setup_time") or "active"
+                remaining_volume = broker_order.get("volume_current")
+                event_key = (
+                    f"user:{user_id}:order:{trade.mt5_order_ticket}:{broker_status}:"
+                    f"{remaining_volume}:{state_marker}"
+                )
+                await _add_order_event(db, {
+                    "event_key": event_key[:180],
+                    "user_id": user_id,
+                    "autopilot_trade_id": trade.id,
+                    "cycle_id": trade.cycle_id,
+                    "prompt_number": trade.prompt_number,
+                    "symbol": trade.symbol,
+                    "event_type": "ORDER_STATE",
+                    "status": broker_status,
+                    "order_ticket": trade.mt5_order_ticket,
+                    "position_id": broker_order.get("position_id"),
+                    "volume": broker_order.get("volume_initial"),
+                    "price": broker_order.get("price_open"),
+                    "broker_time": _parse_broker_datetime(broker_order.get("done_time") or broker_order.get("setup_time")),
+                    "comment": (broker_order.get("comment") or "")[:256],
+                })
+                terminal_execution_status = order_terminal_states.get(broker_status)
+                cycle_prefix = (trade.cycle_id or "")[:12].lower()
+                matching_opens = [
+                    deal for deal in deals
+                    if deal.get("entry") == "OPEN"
+                    and (
+                        (deal.get("order_ticket") is not None and str(deal.get("order_ticket")) == str(trade.mt5_order_ticket))
+                        or (cycle_prefix and f"x{cycle_prefix}" in (deal.get("comment") or "").lower())
+                    )
+                ]
+                matching_open = matching_opens[0] if matching_opens else None
+                if terminal_execution_status:
+                    # A broker may cancel/expire the unfilled remainder after
+                    # a partial fill. Preserve its real position for P&L sync.
+                    trade.execution_status = (
+                        "executed" if matching_opens and terminal_execution_status in ("cancelled", "expired")
+                        else terminal_execution_status
+                    )
+                    done_time = broker_order.get("done_time")
+                    try:
+                        trade.order_completed_at = _ensure_aware(
+                            datetime.strptime(done_time, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                        ) if done_time else _ensure_aware(datetime.now(timezone.utc))
+                    except (TypeError, ValueError):
+                        trade.order_completed_at = _ensure_aware(datetime.now(timezone.utc))
+                    pos_id = broker_order.get("position_id")
+                    if pos_id is not None and terminal_execution_status == "executed":
+                        trade.mt5_ticket = int(pos_id)
+                    if matching_open:
+                        if matching_open.get("position_id") is not None:
+                            trade.mt5_ticket = int(matching_open["position_id"])
+                        if matching_open.get("price") is not None:
+                            trade.execution_price = float(matching_open["price"])
+                            if trade.order_type != "market" and trade.requested_entry_price is not None:
+                                trade.slippage_price = round(
+                                    (trade.execution_price - trade.requested_entry_price)
+                                    if trade.direction == "BUY"
+                                    else (trade.requested_entry_price - trade.execution_price),
+                                    8,
+                                )
+                        opened_at = matching_open.get("time")
+                        if opened_at:
+                            try:
+                                trade.executed_at = _ensure_aware(
+                                    datetime.strptime(opened_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                                )
+                            except ValueError:
+                                pass
+                    if trade.cycle_id:
+                        cycle = await db.get(AutopilotCycle, trade.cycle_id)
+                        if cycle:
+                            cycle.order_status = broker_status
+                            cycle.order_completed_at = trade.order_completed_at
+                            cycle.execution_status = trade.execution_status
+                            cycle.mt5_ticket = trade.mt5_ticket
+                            cycle.outcome = f"order_{broker_status}"
+                elif broker_status in ("partially_filled", "partially_filled_active"):
+                    trade.execution_status = "executed"
+                    if matching_open:
+                        if matching_open.get("position_id") is not None:
+                            trade.mt5_ticket = int(matching_open["position_id"])
+                        if matching_open.get("price") is not None:
+                            trade.execution_price = float(matching_open["price"])
+                            if trade.order_type != "market" and trade.requested_entry_price is not None:
+                                trade.slippage_price = round(
+                                    (trade.execution_price - trade.requested_entry_price)
+                                    if trade.direction == "BUY"
+                                    else (trade.requested_entry_price - trade.execution_price),
+                                    8,
+                                )
+                if was_unfilled and trade.execution_status == "executed":
+                    state = _get_state(user_id)
+                    today = datetime.now(timezone.utc).date().isoformat()
+                    if state["stats"].get("daily_reset_date") == today:
+                        state["stats"]["daily_trade_count"] += 1
+                    state["stats"]["trades_executed"] += 1
+
             if not deals:
-                return
+                await db.commit()
+                return 0
+
+            # A CLOSE deal may be only a partial close. Confirm the position is
+            # absent before treating accumulated close deals as its final P&L.
+            try:
+                positions_data = await connector_client.get_positions()
+            except Exception as e:
+                add_log(user_id, f"Open-position check failed; close results deferred: {type(e).__name__}", "WARNING")
+                await db.commit()
+                return 0
+            if not positions_data or not positions_data.get("success"):
+                add_log(user_id, "Open-position check failed; close results deferred", "WARNING")
+                await db.commit()
+                return 0
+            open_position_ids = {
+                str(position.get("ticket"))
+                for position in positions_data.get("positions", [])
+                if position.get("ticket") is not None
+            }
+            positions_by_ticket = {
+                str(position.get("ticket")): position
+                for position in positions_data.get("positions", [])
+                if position.get("ticket") is not None
+            }
 
             updated_count = 0
-            state = _get_state(user_id)
             for trade in open_trades:
-                close_deal = None
-                for deal in deals:
-                    is_match = (deal.get("position_id") == trade.mt5_ticket or deal.get("ticket") == trade.mt5_ticket)
-                    if is_match and deal.get("entry") == "CLOSE":
-                        close_deal = deal
-                        break
-                if close_deal:
-                    profit = close_deal.get("profit", 0)
-                    exit_price = close_deal.get("price")
-                    closed_at_str = close_deal.get("time")
-                    res_type = close_result(close_deal)
+                trade_ids = {str(trade.mt5_ticket)} if trade.mt5_ticket is not None else set()
+                if trade.mt5_order_ticket is not None:
+                    trade_ids.add(str(trade.mt5_order_ticket))
+                cycle_prefix = (trade.cycle_id or "")[:12].lower()
+                if cycle_prefix:
+                    for deal in deals:
+                        if deal.get("entry") != "OPEN":
+                            continue
+                        deal_comment = (deal.get("comment") or "").lower()
+                        if f"x{cycle_prefix}" in deal_comment:
+                            if deal.get("position_id") is not None:
+                                trade_ids.add(str(deal["position_id"]))
+                            if deal.get("ticket") is not None:
+                                trade_ids.add(str(deal["ticket"]))
+                if trade.mt5_order_ticket is not None:
+                    for deal in deals:
+                        if (
+                            deal.get("entry") == "OPEN"
+                            and str(deal.get("order_ticket", deal.get("ticket"))) == str(trade.mt5_order_ticket)
+                            and deal.get("position_id") is not None
+                        ):
+                            trade_ids.add(str(deal["position_id"]))
+                matching_closes = [
+                    deal for deal in deals
+                    if deal.get("entry") in ("CLOSE", "INOUT", "OUT_BY")
+                    and trade_ids.intersection({str(deal.get("position_id")), str(deal.get("ticket"))})
+                ]
+                matching_deals = [
+                    deal for deal in deals
+                    if trade_ids.intersection({str(deal.get("position_id")), str(deal.get("order_ticket", deal.get("ticket")))})
+                ]
+                if cycle_prefix:
+                    matching_deals.extend(
+                        deal for deal in deals
+                        if f"x{cycle_prefix}" in (deal.get("comment") or "").lower()
+                        and deal not in matching_deals
+                    )
+                for deal in matching_deals:
+                    deal_ticket = deal.get("deal_ticket")
+                    if deal_ticket is None:
+                        continue
+                    entry_type = deal.get("entry") or "UNKNOWN"
+                    event_type = {
+                        "OPEN": "DEAL_OPEN", "CLOSE": "DEAL_CLOSE",
+                        "INOUT": "DEAL_REVERSAL", "OUT_BY": "DEAL_CLOSE_BY",
+                    }.get(entry_type, "DEAL_OTHER")
+                    await _add_order_event(db, {
+                        "event_key": f"user:{user_id}:deal:{deal_ticket}",
+                        "user_id": user_id,
+                        "autopilot_trade_id": trade.id,
+                        "cycle_id": trade.cycle_id,
+                        "prompt_number": trade.prompt_number,
+                        "symbol": deal.get("symbol") or trade.symbol,
+                        "event_type": event_type,
+                        "status": "recorded",
+                        "order_ticket": deal.get("order_ticket", deal.get("ticket")),
+                        "deal_ticket": int(deal_ticket),
+                        "position_id": deal.get("position_id"),
+                        "entry_type": entry_type,
+                        "reason_code": deal.get("reason_code"),
+                        "reason": deal.get("reason") or "UNKNOWN",
+                        "volume": deal.get("volume"),
+                        "price": deal.get("price"),
+                        "profit": deal.get("profit"),
+                        "swap": deal.get("swap"),
+                        "commission": deal.get("commission"),
+                        "broker_time": _parse_broker_datetime(deal.get("time_msc") or deal.get("time")),
+                        "comment": (deal.get("comment") or "")[:256],
+                    })
+                if trade.execution_status == "pending":
+                    continue
+                if trade.order_status == "partially_filled_active":
+                    # The currently filled position may have closed while the
+                    # residual volume is still waiting to fill.
+                    continue
+                if trade_ids.intersection(open_position_ids):
+                    matching_position = next(
+                        (positions_by_ticket[ticket_id] for ticket_id in trade_ids if ticket_id in positions_by_ticket),
+                        None,
+                    )
+                    if matching_position:
+                        actual_position_entry = matching_position.get("entry_price")
+                        if actual_position_entry is not None:
+                            trade.execution_price = float(actual_position_entry)
+                            if trade.order_type != "market" and trade.requested_entry_price is not None:
+                                trade.slippage_price = round(
+                                    (trade.execution_price - trade.requested_entry_price)
+                                    if trade.direction == "BUY"
+                                    else (trade.requested_entry_price - trade.execution_price),
+                                    8,
+                                )
+                        if matching_position.get("sl") is not None:
+                            trade.broker_stop_loss = trade.stop_loss = float(matching_position["sl"])
+                        if matching_position.get("tp") is not None:
+                            trade.broker_take_profit = trade.take_profit = float(matching_position["tp"])
+                    # Clear any stale partial-close classification from earlier sync versions.
+                    if trade.result is not None or trade.profit is not None:
+                        trade.profit = None
+                        trade.exit_price = None
+                        trade.result = None
+                        trade.closed_at = None
+                        trade.duration_minutes = None
+                        if trade.cycle_id:
+                            cycle = await db.get(AutopilotCycle, trade.cycle_id)
+                            if cycle:
+                                cycle.trade_result = None
+                                cycle.exit_reason = None
+                                cycle.exit_reason_source = None
+                                cycle.realized_profit = None
+                                cycle.trade_closed_at = None
+                                cycle.duration_minutes = None
+                        updated_count += 1
+                    continue
 
+                if matching_closes:
+                    matching_closes.sort(key=lambda item: str(item.get("time") or ""))
+                    latest_close = matching_closes[-1]
+                    # Include broker-reported swap/commission when supplied.
+                    profit = sum(
+                        float(deal.get("profit") or 0.0)
+                        + float(deal.get("swap") or 0.0)
+                        + float(deal.get("commission") or 0.0)
+                        for deal in matching_closes
+                    )
+                    exit_price = latest_close.get("price")
+                    closed_at_str = latest_close.get("time")
+                    res_type, exit_reason, exit_reason_source = _classify_exit_reason(matching_closes, profit)
+
+                    was_changed = (
+                        trade.result != res_type
+                        or trade.exit_reason != exit_reason
+                        or trade.exit_reason_source != exit_reason_source
+                        or trade.profit != profit
+                        or trade.closed_at is None
+                    )
                     trade.profit = profit
                     trade.exit_price = exit_price
                     trade.result = res_type
+                    trade.exit_reason = exit_reason
+                    trade.exit_reason_source = exit_reason_source
                     if closed_at_str:
                         trade.closed_at = _ensure_aware(datetime.strptime(closed_at_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc))
                         trade.executed_at = _ensure_aware(trade.executed_at)
                         if trade.executed_at and trade.closed_at:
                             diff = trade.closed_at - trade.executed_at
                             trade.duration_minutes = int(diff.total_seconds() / 60)
-                    updated_count += 1
-                    add_log(user_id, f"Trade #{trade.mt5_ticket} | Profit: ${profit:.2f} | {res_type}", "SUCCESS" if profit > 0 else "WARNING")
+                    if trade.cycle_id:
+                        cycle = await db.get(AutopilotCycle, trade.cycle_id)
+                        if cycle:
+                            cycle.trade_result = res_type
+                            cycle.exit_reason = exit_reason
+                            cycle.exit_reason_source = exit_reason_source
+                            cycle.realized_profit = profit
+                            cycle.trade_closed_at = trade.closed_at
+                            cycle.duration_minutes = trade.duration_minutes
+                    if was_changed:
+                        updated_count += 1
+                        add_log(user_id, f"Trade #{trade.mt5_ticket} | Profit: ${profit:.2f} | {res_type}", "SUCCESS" if profit > 0 else "WARNING")
 
+            await db.commit()
             if updated_count > 0:
-                await db.commit()
+                today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                daily_pnl = await db.execute(
+                    select(func.coalesce(func.sum(AutopilotTrade.profit), 0.0)).where(
+                        AutopilotTrade.user_id == user_id,
+                        AutopilotTrade.closed_at >= today_start,
+                        AutopilotTrade.result.is_not(None),
+                    )
+                )
+                _get_state(user_id)["stats"]["daily_pnl"] = float(daily_pnl.scalar() or 0.0)
+            return updated_count
 
     except Exception as e:
         add_log(user_id, f"Failed to sync trade results: {str(e)}", "ERROR")
+        return 0
+
+
+async def sync_trade_results(user_id: int) -> int:
+    """Serialize periodic and Autopilot-loop syncs so outcomes are applied once."""
+    lock = _trade_sync_locks.setdefault(user_id, asyncio.Lock())
+    async with lock:
+        return await _sync_trade_results_unlocked(user_id)
 
 
 async def _settings_row(user_id: int):
@@ -1793,11 +2830,42 @@ def _loss_limit_hit(settings_row, daily_pnl: float) -> bool:
     return settings_row.max_daily_loss is not None and daily_pnl <= settings_row.max_daily_loss
 
 
+async def _start_cycle_record(user_id: int) -> Optional[str]:
+    """Record that an attempt started (upstream's cycle ledger). None if it cannot be saved."""
+    state = _get_state(user_id)
+    state["stats"]["total_runs"] += 1
+    state["stats"]["last_run"] = datetime.now(timezone.utc).isoformat()
+    cycle_id = str(uuid.uuid4())
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(AutopilotCycle(cycle_id=cycle_id, user_id=user_id, cycle_number=state["stats"]["total_runs"],
+                                  symbol="unknown", status="running"))
+            await db.commit()
+    except Exception:
+        logger.exception("[user=%d] Could not record the start of an autopilot attempt", user_id)
+        return None
+    state["active_cycle_id"] = cycle_id
+    return cycle_id
+
+
 async def _loop_iteration(user_id: int) -> None:
-    """One pass: cooldown, market hours, result sync, the daily brake, then a cycle."""
+    """One pass: cooldown, live market, result sync, the daily brake, then a cycle.
+
+    Every pass is recorded in autopilot_cycles with its outcome, including passes
+    that stop at a gate, so reports can say why nothing traded.
+    """
     state = _get_state(user_id)
     s = await _settings_row(user_id)
     cooldown_mins = (s.cooldown_minutes or 0) if s else 0
+    symbol = (s.symbol if s else None) or "XAUUSD"
+
+    cycle_id = await _start_cycle_record(user_id)
+    if cycle_id is None:
+        # Never place an order whose attempt cannot be audited.
+        state["stats"]["error_count"] += 1
+        add_log(user_id, "Attempt tracking unavailable; skipping this cycle", "ERROR")
+        return
+    await _update_autopilot_cycle(cycle_id, symbol=symbol)
 
     last_trade = state.get("last_trade_time")
     if cooldown_mins > 0 and last_trade:
@@ -1805,14 +2873,27 @@ async def _loop_iteration(user_id: int) -> None:
         if elapsed_mins < cooldown_mins:
             add_log(user_id, f"Cooldown ({elapsed_mins:.0f}/{cooldown_mins} min). Skipping cycle.", "INFO")
             state["stats"]["skipped_count"] += 1
+            await _finish_autopilot_cycle(user_id, cycle_id, "skipped_cooldown",
+                                          f"Cooldown active ({elapsed_mins:.0f}/{cooldown_mins} minutes)")
             return
 
-    if not await _is_market_open():
+    if not connector_client.configured:
+        add_log(user_id, "No MT5 connector is configured on the server. Skipping cycle.", "WARNING")
+        state["stats"]["skipped_count"] += 1
+        await _finish_autopilot_cycle(user_id, cycle_id, "skipped_no_connector", "No MT5 connector configured")
+        return
+
+    # Live prices, not fixed weekday hours, decide whether the market is open (upstream).
+    if not await _has_live_ticks(user_id, symbol):
         if not state.get("market_closed"):
-            add_log(user_id, "Market closed (Sat/Sun). Waiting until Sunday 23:00 UTC.", "INFO")
+            add_log(user_id, f"Market paused: no live prices for {symbol}. Waiting for them to return.", "INFO")
             state["market_closed"] = True
         state["stats"]["skipped_count"] += 1
+        await _finish_autopilot_cycle(user_id, cycle_id, "skipped_stale_market_data",
+                                      f"No fresh one-minute candle for {symbol}")
         return
+    if state.get("market_closed"):
+        add_log(user_id, "Live prices are back. Resuming.", "INFO")
     state["market_closed"] = False
 
     await sync_trade_results(user_id)
@@ -1828,13 +2909,26 @@ async def _loop_iteration(user_id: int) -> None:
             state["paused_day"] = today
         state["stats"]["paused_reason"] = f"Daily loss limit reached ({daily_pnl:+.2f}). Resumes at 00:00 UTC."
         state["stats"]["skipped_count"] += 1
+        await _finish_autopilot_cycle(user_id, cycle_id, "daily_loss_limit",
+                                      f"Daily realized P&L {daily_pnl:.2f} reached limit {s.max_daily_loss:.2f}")
         return
     if state.get("paused_day"):
         add_log(user_id, "Daily loss pause over. Resuming.", "INFO")
         state["paused_day"] = None
     state["stats"]["paused_reason"] = None
 
-    await run_autopilot_cycle(user_id)
+    try:
+        from ..core.strategy_scorer import update_strategy_scores
+        await update_strategy_scores()
+    except Exception:
+        logger.warning("Could not update the strategy scoreboard", exc_info=True)
+
+    try:
+        await run_autopilot_cycle(user_id, cycle_id=cycle_id)
+    except Exception as e:
+        if state.get("active_cycle_id") == cycle_id:
+            await _finish_autopilot_cycle(user_id, cycle_id, "cycle_crashed", type(e).__name__)
+        raise
 
 
 async def autopilot_loop(user_id: int):
@@ -1844,6 +2938,25 @@ async def autopilot_loop(user_id: int):
     running while nothing ran.
     """
     state = _get_state(user_id)
+    # A process restart can interrupt a cycle after its durable start record.
+    # Close those rows explicitly so reporting never mistakes them for active work.
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(AutopilotCycle).where(
+                    AutopilotCycle.user_id == user_id,
+                    AutopilotCycle.status == "running",
+                )
+            )
+            for cycle in result.scalars().all():
+                cycle.status = "completed"
+                cycle.outcome = "interrupted_by_restart"
+                cycle.outcome_reason = "Process restarted before cycle completion"
+                cycle.completed_at = datetime.now(timezone.utc)
+            await db.commit()
+    except Exception as exc:
+        logger.warning("Could not reconcile interrupted autopilot cycles: %s", type(exc).__name__)
+    # Full back-sync from MT5 history at startup (captures trades that were missed)
     try:
         await _refresh_daily_stats(user_id)
         await _rebuild_stats(user_id)
@@ -1884,6 +2997,14 @@ async def autopilot_loop(user_id: int):
                 logger.warning("[user=%d] Could not read the cycle interval, waiting 300s", user_id, exc_info=True)
             await asyncio.sleep(s.interval_seconds if s and s.interval_seconds else 300)
     except asyncio.CancelledError:
+        interrupted_cycle_id = state.get("active_cycle_id")
+        if interrupted_cycle_id:
+            await _finish_autopilot_cycle(
+                user_id,
+                interrupted_cycle_id,
+                "cycle_cancelled",
+                "Autopilot stopped while the cycle was running",
+            )
         add_log(user_id, "Autopilot loop cancelled.", "INFO")
         raise
 
@@ -1966,6 +3087,9 @@ class TradeResult(BaseModel):
     take_profit: Optional[float]
     lot_size: float
     mt5_ticket: Optional[int]
+    mt5_order_ticket: Optional[int] = None
+    order_status: Optional[str] = None
+    execution_status: Optional[str] = None
     executed_at: str
     result: Optional[str]
     profit: Optional[float]
@@ -2439,6 +3563,9 @@ async def get_trade_results(
                 take_profit=t.take_profit,
                 lot_size=t.lot_size,
                 mt5_ticket=t.mt5_ticket,
+                mt5_order_ticket=t.mt5_order_ticket,
+                order_status=t.order_status,
+                execution_status=t.execution_status,
                 executed_at=t.executed_at.isoformat() if t.executed_at else "",
                 result=t.result,
                 profit=t.profit,
@@ -2451,6 +3578,78 @@ async def get_trade_results(
             )
             for t in trades
         ]
+
+
+@router.get("/cycles")
+async def get_cycle_history(
+    skip: int = 0, limit: int = 50, outcome: Optional[str] = None,
+    symbol: Optional[str] = None, current_user: dict = Depends(get_current_user),
+):
+    """Return each scheduled cycle with its linked AI/execution/broker trail."""
+    user_id = current_user["id"]
+    limit, skip = max(1, min(limit, 200)), max(0, skip)
+    async with AsyncSessionLocal() as db:
+        query = select(AutopilotCycle).where(AutopilotCycle.user_id == user_id)
+        if outcome:
+            query = query.where(AutopilotCycle.outcome == outcome)
+        if symbol:
+            query = query.where(AutopilotCycle.symbol == symbol.upper())
+        total = await db.scalar(select(func.count()).select_from(query.subquery())) or 0
+        cycles = list((await db.execute(query.order_by(AutopilotCycle.started_at.desc()).offset(skip).limit(limit))).scalars().all())
+        ids = [c.cycle_id for c in cycles]
+        if not ids:
+            return {"cycles": [], "total": total, "skip": skip, "limit": limit}
+        async def linked(model, timestamp):
+            return (await db.execute(select(model).where(model.user_id == user_id, model.cycle_id.in_(ids)).order_by(timestamp))).scalars().all()
+        calls = await linked(AiCallLog, AiCallLog.created_at)
+        attempts = await linked(AutopilotExecutionAttempt, AutopilotExecutionAttempt.created_at)
+        events = await linked(AutopilotOrderEvent, AutopilotOrderEvent.observed_at)
+        logs = await linked(AutopilotLog, AutopilotLog.timestamp)
+        trades = await linked(AutopilotTrade, AutopilotTrade.executed_at)
+        def group(rows):
+            result = {}
+            for row in rows:
+                result.setdefault(row.cycle_id, []).append(row)
+            return result
+        calls, attempts, events, logs, trades = map(group, (calls, attempts, events, logs, trades))
+        def iso(value): return value.isoformat() if value else None
+        output = []
+        for c in cycles:
+            timeline = [{"timestamp": iso(c.started_at), "stage": "cycle_started", "outcome": None,
+                         "details": {"cycle_number": c.cycle_number, "symbol": c.symbol}}]
+            for row in calls.get(c.cycle_id, []):
+                timeline.append({"timestamp": iso(row.created_at), "stage": f"ai:{row.stage or 'call'}", "outcome": row.outcome,
+                    "details": {"provider": row.provider, "model": row.model, "latency_ms": row.latency_ms, "error": row.error_message}})
+            for row in attempts.get(c.cycle_id, []):
+                timeline.append({"timestamp": iso(row.created_at), "stage": "execution", "outcome": row.outcome,
+                    "details": {"category": row.error_category, "message": row.error_message, "ticket": row.mt5_ticket, "direction": row.direction, "volume": row.lot_size}})
+            for row in events.get(c.cycle_id, []):
+                timeline.append({"timestamp": iso(row.broker_time or row.observed_at), "stage": f"broker:{row.event_type}", "outcome": row.status,
+                    "details": {"reason": row.reason, "reason_code": row.reason_code, "order_ticket": row.order_ticket,
+                        "deal_ticket": row.deal_ticket, "position_id": row.position_id, "price": row.price, "volume": row.volume,
+                        "profit": row.profit, "swap": row.swap, "commission": row.commission}})
+            for row in logs.get(c.cycle_id, []):
+                timeline.append({"timestamp": iso(row.timestamp), "stage": f"log:{row.level}", "outcome": None, "details": {"message": row.message}})
+            for row in trades.get(c.cycle_id, []):
+                timeline.append({"timestamp": iso(row.closed_at or row.order_completed_at or row.executed_at), "stage": "trade_status",
+                    "outcome": row.result or row.execution_status, "details": {"trade_id": row.id, "profit": row.profit,
+                    "closed_at": iso(row.closed_at), "exit_reason": row.exit_reason, "ticket": row.mt5_ticket}})
+            timeline.append({"timestamp": iso(c.completed_at), "stage": "cycle_finished", "outcome": c.outcome,
+                             "details": {"reason": c.outcome_reason}})
+            timeline.sort(key=lambda item: item["timestamp"] or "")
+            output.append({"cycle_id": c.cycle_id, "cycle_number": c.cycle_number, "symbol": c.symbol,
+                "status": c.status, "outcome": c.outcome, "outcome_reason": c.outcome_reason,
+                "started_at": iso(c.started_at), "completed_at": iso(c.completed_at), "prompt_number": c.prompt_number,
+                "prompt_text": c.prompt_text, "prompt_version": c.prompt_version, "provider": c.provider, "model": c.model,
+                "market_regime": c.market_regime, "market_timeframe": c.market_timeframe, "candles_loaded": c.candles_loaded,
+                "market_data_hash": c.market_data_hash, "analysis_prompt_hash": c.analysis_prompt_hash,
+                "decision_source": c.decision_source, "selection_context": c.selection_context, "regime_details": c.regime_details,
+                "setup": c.setup, "requested_lot_size": c.requested_lot_size, "final_lot_size": c.final_lot_size,
+                "execution_status": c.execution_status, "order_status": c.order_status, "mt5_order_ticket": c.mt5_order_ticket,
+                "mt5_ticket": c.mt5_ticket, "trade_result": c.trade_result, "realized_profit": c.realized_profit,
+                "exit_reason": c.exit_reason, "exit_reason_source": c.exit_reason_source,
+                "trade_closed_at": iso(c.trade_closed_at), "duration_minutes": c.duration_minutes, "timeline": timeline})
+        return {"cycles": output, "total": total, "skip": skip, "limit": limit}
 
 
 @router.get("/results/export")

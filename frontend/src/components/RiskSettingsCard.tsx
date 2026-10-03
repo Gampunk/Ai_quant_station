@@ -9,7 +9,7 @@ import { useAuthStore } from '@/store/authStore'
 import type { HaltState } from '@/components/TradingHaltBanner'
 
 type NumberKey = 'autopilot_risk_pct' | 'max_trade_risk_pct' | 'max_open_positions' | 'daily_loss_pct' |
-  'min_margin_level' | 'max_pending_distance_pct'
+  'min_margin_level' | 'max_pending_distance_pct' | 'default_stop_atr_mult'
 
 interface RiskSettings extends Record<NumberKey, number> {
   id: number
@@ -54,6 +54,7 @@ const FIELDS: { key: NumberKey; label: string; help: string }[] = [
   { key: 'max_open_positions', label: 'Most trades open at once', help: '0 means no limit.' },
   { key: 'min_margin_level', label: 'Lowest margin level (%)', help: 'No new orders while the margin level is below this. 0 turns it off.' },
   { key: 'max_pending_distance_pct', label: 'Pending order distance (%)', help: 'How far a pending order’s price may be from the market. 0 turns it off.' },
+  { key: 'default_stop_atr_mult', label: 'Default stop (× ATR)', help: 'An order without a stop loss gets one this many ATR(14, 15-minute) away, and is sized from it. 0 turns it off: such orders are refused.' },
 ]
 
 const fmt = (n: number | null | undefined, digits = 2) => (n === null || n === undefined ? '—' : n.toFixed(digits))

@@ -12,6 +12,7 @@ interface Message {
   execution_charts?: Array<{title: string, data: number[], color: string, type: string}>
   execution_tables?: Array<{title: string, columns?: string[], rows: any[][]}>
   chat_memory_id?: number
+  rag_context?: string
 }
 
 interface LoadedDataInfo {

@@ -177,3 +177,46 @@ def test_defaults_are_valid():
 def test_bad_settings_are_rejected(change, fragment):
     errors = validate_settings({**DEFAULTS, **change})
     assert any(fragment in e for e in errors), errors
+
+
+# ── Optional ATR default stop (replaces upstream's fixed 0.2%) ──────────────
+def _run_with_atr(order, atr, mult, sized=False):
+    s = {**DEFAULTS, "default_stop_atr_mult": mult}
+    return evaluate({"symbol": "XAUUSD", **order}, {**GOLD, "atr": atr}, ACCOUNT, [], s, 5000.0, sized)
+
+
+def test_without_the_setting_a_missing_stop_is_refused():
+    ev = _run_with_atr({"action": "BUY"}, atr=4.0, mult=0)
+    assert not ev.allowed and ev.code == "no_stop_loss"
+
+
+def test_a_missing_stop_is_set_at_the_atr_multiple_and_sized_from_it():
+    ev = _run_with_atr({"action": "BUY"}, atr=4.0, mult=1.25, sized=True)   # 5.00 below the ask
+    assert ev.allowed, ev.message
+    assert ev.stop_filled == round(GOLD["ask"] - 5.0, 2)
+    assert ev.volume == 0.10 and ev.risk_pct == 1.0
+
+
+def test_a_sell_gets_its_stop_above_the_bid():
+    ev = _run_with_atr({"action": "SELL"}, atr=4.0, mult=1.25, sized=True)
+    assert ev.stop_filled == round(GOLD["bid"] + 5.0, 2)
+
+
+def test_a_given_stop_is_never_replaced():
+    ev = _run_with_atr(buy(10.0), atr=4.0, mult=1.25, sized=True)
+    assert ev.stop_filled is None and ev.volume == 0.05
+
+
+def test_without_an_atr_reading_nothing_is_guessed():
+    ev = _run_with_atr({"action": "BUY"}, atr=None, mult=1.25)
+    assert not ev.allowed and ev.code == "no_stop_loss"
+
+
+def test_the_filled_stop_respects_the_brokers_minimum_distance():
+    ev = _run_with_atr({"action": "BUY"}, atr=0.01, mult=1.0, sized=True)
+    assert ev.stop_filled == round(GOLD["ask"] - GOLD["min_stop_distance"], 2)
+
+
+def test_the_setting_has_a_range():
+    assert any("default_stop_atr_mult" in e for e in validate_settings({**DEFAULTS, "default_stop_atr_mult": 50}))
+    assert not validate_settings({**DEFAULTS, "default_stop_atr_mult": 1.5})

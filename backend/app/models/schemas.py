@@ -207,6 +207,7 @@ class ChatRequest(BaseModel):
     timeframe: Optional[str] = "1h"  # Primary timeframe
     candle_data: Optional[List[dict]] = None  # Candle data from frontend
     refine_prompt: bool = True  # Automatically enrich/refine user query before sending to AI
+    debug_rag: bool = False  # Return the injected RAG context in the response (visibility)
 
 
 class ChatResponse(BaseModel):
@@ -220,6 +221,7 @@ class ChatResponse(BaseModel):
     execution_tables: Optional[List[dict]] = None
     chat_memory_id: Optional[int] = None
     chat_session_id: Optional[str] = None # NEW: echoes back the session ID
+    rag_context: Optional[str] = None  # RAG context injected into the system prompt (debug_rag only)
 
 
 

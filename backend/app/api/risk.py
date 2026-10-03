@@ -33,6 +33,7 @@ class RiskSettingsUpdate(BaseModel):
     min_margin_level: Optional[float] = None
     max_pending_distance_pct: Optional[float] = None
     require_stop_loss: Optional[bool] = None
+    default_stop_atr_mult: Optional[float] = None
 
 
 @router.get("/settings")

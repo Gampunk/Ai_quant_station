@@ -1,0 +1,18 @@
+[Unit]
+Description=Impulse Analyst Health Monitor
+After=network.target impulse-analyst.service
+
+[Service]
+Type=oneshot
+# A dedicated account, never root (the same one as impulse-analyst.service).
+User=impulse
+Group=impulse
+# Where the monitor remembers what it last reported, so it alerts once per change.
+StateDirectory=impulse-monitor
+Environment="MONITOR_STATE_FILE=/var/lib/impulse-monitor/state.json"
+WorkingDirectory=/opt/impulse_analyst/backend
+Environment="PATH=/opt/impulse_analyst/backend/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EnvironmentFile=/opt/impulse_analyst/backend/.env
+ExecStart=/opt/impulse_analyst/backend/venv/bin/python /opt/impulse_analyst/backend/scripts/monitor.py
+StandardOutput=journal
+StandardError=journal

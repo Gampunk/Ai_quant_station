@@ -12,7 +12,7 @@ import asyncio
 import re
 from pydantic import BaseModel, Field
 
-from app.core.historical_loader import load_data, add_indicators, get_available_years, AVAILABLE_SYMBOLS
+from app.core.historical_loader import load_data, add_indicators, get_available_years, AVAILABLE_SYMBOLS, to_pandas_freq
 from app.core.backtest_engine import BacktestEngine, DeepAnalysisEngine
 from app.core.database import get_db, AsyncSessionLocal
 from app.core.security import get_current_user, require_trader
@@ -136,7 +136,7 @@ def _load_multi_timeframe(symbol: str, start: str, end: str, timeframes: list) -
             if tf == "1T":
                 df_tf = df_1m.copy()
             else:
-                df_tf = df_1m.resample(tf).agg({
+                df_tf = df_1m.resample(to_pandas_freq(tf)).agg({
                     "open": "first", "high": "max", "low": "min",
                     "close": "last", "volume": "sum", "timestamp": "first"
                 }).dropna()

@@ -1,6 +1,6 @@
 # Version 1 (live) vs Version 2 (refactor): comparison and decisions
 
-**Approved on 2026-10-03** by both developers. Technical detail per commit is in
+**Approved on 2026-10-03** by both developers. **Implemented** on branch `v2/merge`; see the Version 2 merge entry in `PROGRESS.md`. Technical detail per commit is in
 `UPSTREAM_COMPARISON.md`.
 
 **Version 1** is `Gautam-813/master`, the code running live: 24 commits since the branches split.

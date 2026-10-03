@@ -2,8 +2,11 @@
 Central AI Provider Registry
 All provider configuration lives here. Imported by ai.py, autopilot.py,
 historical_lab.py, backtest.py — single source of truth.
+
+Supports comma-separated API keys per provider for automatic fallback.
+Set NVIDIA_API_KEY=key1,key2,key3 in .env — each key is tried in order.
 """
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -20,11 +23,14 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
         "base_url": "https://integrate.api.nvidia.com/v1",
         "needs_nvapi_prefix": True,
         "models": [
-            "qwen/qwen3.5-122b-a10b",
-            "qwen/qwen2.5-coder-32b-instruct",
-            "deepseek-ai/deepseek-v3.1",
-            "deepseek-ai/deepseek-r1-distill-qwen-32b",
-            "nvidia/llama-3.1-405b-instruct",
+            "nvidia/llama-3.3-nemotron-super-49b-v1",
+            "nvidia/llama-3.1-nemotron-nano-8b-v1",
+            "nvidia/llama-3.1-8b-instruct",
+            "nvidia/deepseek-r1",
+            "nvidia/mistral-nemotron",
+            "nvidia/nemotron-3.5-lightning-30b-a3b",
+            "deepseek-ai/deepseek-v4-flash-0731",
+            "mistralai/mistral-large-2-instruct",
         ],
     },
     "groq": {
@@ -33,7 +39,6 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
         "base_url": "https://api.groq.com/openai/v1",
         "needs_nvapi_prefix": False,
         "models": [
-            "llama-3.3-70b-versatile",
             "llama-3.1-8b-instant",
             "mixtral-8x7b-32768",
             "gemma2-9b-it",
@@ -57,6 +62,8 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
         "needs_nvapi_prefix": False,
         "models": [
+            "gemini-3.6-flash",
+            "gemini-3.6-pro",
             "gemini-2.5-flash",
             "gemini-2.5-pro",
             "gemini-1.5-flash",
@@ -119,6 +126,39 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
             "z-ai/glm-5.2",
         ],
     },
+    "deepseek": {
+        "name": "DeepSeek",
+        "env_key": "DEEPSEEK_API_KEY",
+        "base_url": "https://api.deepseek.com/v1",
+        "needs_nvapi_prefix": False,
+        "models": [
+            "deepseek-chat",
+            "deepseek-reasoner",
+        ],
+    },
+    "qwen": {
+        "name": "Alibaba Qwen",
+        "env_key": "QWEN_API_KEY",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "needs_nvapi_prefix": False,
+        "models": [
+            "qwen-plus",
+            "qwen-turbo",
+            "qwen-max",
+            "qwen-long",
+        ],
+    },
+    "grok": {
+        "name": "xAI Grok",
+        "env_key": "XAI_API_KEY",
+        "base_url": "https://api.x.ai/v1",
+        "needs_nvapi_prefix": False,
+        "models": [
+            "grok-3-beta",
+            "grok-3-mini-beta",
+            "grok-2-1212",
+        ],
+    },
 }
 
 
@@ -128,11 +168,16 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
 # Update these as provider pricing changes.
 PRICING: Dict[str, Dict[str, Any]] = {
     "nvidia": {
-        "default": (1.50, 5.00),
+        "default": (0.50, 1.50),
         "models": {
-            "deepseek-ai/deepseek-v3.1": (0.50, 2.00),
-            "deepseek-ai/deepseek-r1-distill-qwen-32b": (0.50, 2.00),
-            "nvidia/llama-3.1-405b-instruct": (3.00, 10.00),
+            "nvidia/llama-3.3-nemotron-super-49b-v1": (0.80, 2.50),
+            "nvidia/llama-3.1-nemotron-nano-8b-v1": (0.20, 0.60),
+            "nvidia/llama-3.1-8b-instruct": (0.20, 0.60),
+            "nvidia/deepseek-r1": (0.55, 2.19),
+            "nvidia/mistral-nemotron": (0.50, 1.50),
+            "nvidia/nemotron-3.5-lightning-30b-a3b": (0.30, 0.90),
+            "deepseek-ai/deepseek-v4-flash-0731": (0.27, 1.10),
+            "mistralai/mistral-large-2-instruct": (2.00, 6.00),
         },
     },
     "groq": {
@@ -185,6 +230,30 @@ PRICING: Dict[str, Dict[str, Any]] = {
         "default": (0.0, 0.0),
         "models": {},
     },
+    "deepseek": {
+        "default": (0.14, 0.28),
+        "models": {
+            "deepseek-chat": (0.14, 0.28),
+            "deepseek-reasoner": (0.55, 2.19),
+        },
+    },
+    "qwen": {
+        "default": (0.30, 0.60),
+        "models": {
+            "qwen-plus": (0.30, 0.60),
+            "qwen-turbo": (0.05, 0.20),
+            "qwen-max": (1.60, 6.40),
+            "qwen-long": (0.05, 0.20),
+        },
+    },
+    "grok": {
+        "default": (3.00, 15.00),
+        "models": {
+            "grok-3-beta": (3.00, 15.00),
+            "grok-3-mini-beta": (0.30, 0.50),
+            "grok-2-1212": (2.00, 10.00),
+        },
+    },
 }
 
 
@@ -206,14 +275,29 @@ def estimate_cost(prompt_tokens: int, completion_tokens: int, provider_id: str, 
 
 
 def get_api_key(provider_id: str, settings_obj) -> str:
-    """Get the API key for a provider from settings."""
+    """Get the FIRST API key for a provider from settings. Backward compatible."""
+    keys = get_all_api_keys(provider_id, settings_obj)
+    return keys[0] if keys else ""
+
+
+def get_all_api_keys(provider_id: str, settings_obj) -> List[str]:
+    """Get ALL API keys for a provider (supports comma-separated).
+
+    Returns a list of keys in order. Each key is tried in sequence by the
+    retry logic, giving automatic failover when a key expires or rate-limits.
+    """
     cfg = PROVIDERS.get(provider_id)
     if not cfg:
-        return ""
-    val = getattr(settings_obj, cfg["env_key"], "")
-    if cfg.get("needs_nvapi_prefix") and val and not val.startswith("nvapi-"):
-        return f"nvapi-{val}"
-    return val
+        return []
+    raw = getattr(settings_obj, cfg["env_key"], "")
+    if not raw:
+        return []
+    # Split on comma, strip whitespace, filter empty strings
+    keys = [k.strip() for k in raw.split(",") if k.strip()]
+    # Apply nvapi prefix if needed
+    if cfg.get("needs_nvapi_prefix"):
+        keys = [k if k.startswith("nvapi-") else f"nvapi-{k}" for k in keys]
+    return keys
 
 
 def get_base_url(provider_id: str) -> str:
@@ -238,7 +322,28 @@ async def resolve_api_key(
     user_id: Optional[int] = None,
     db_session_factory=None,
 ) -> str:
-    """Check user's saved key (encrypted in DB) first, fall back to server .env key."""
+    """Check user's saved key (encrypted in DB) first, fall back to server .env key.
+    Returns the FIRST key only — backward compatible.
+    """
+    keys = await resolve_all_api_keys(provider, settings_obj, user_id, db_session_factory)
+    return keys[0] if keys else ""
+
+
+async def resolve_all_api_keys(
+    provider: str,
+    settings_obj,
+    user_id: Optional[int] = None,
+    db_session_factory=None,
+) -> List[str]:
+    """Check user's saved keys (encrypted in DB) first, fall back to server .env keys.
+
+    User DB keys take priority. If the user has saved keys for this provider,
+    those are returned (split by comma if multiple). Otherwise, returns all
+    comma-separated keys from the server .env.
+
+    Returns a list of keys in priority order for automatic fallback.
+    """
+    # 1. Try user's saved keys from DB
     if user_id and db_session_factory:
         from .encryption import decrypt_api_key
         from ..models.user import UserApiKey
@@ -252,14 +357,22 @@ async def resolve_api_key(
             if row:
                 from cryptography.fernet import InvalidToken
                 try:
-                    return decrypt_api_key(row.encrypted_key, settings_obj.SECRET_KEY)
+                    decrypted = decrypt_api_key(row.encrypted_key, settings_obj.SECRET_KEY)
                 except InvalidToken:
                     # Encrypted under a different SECRET_KEY, for example after rotating it.
-                    # Fall back to the server key rather than failing the request.
+                    # Fall back to the server keys rather than failing the request.
                     import logging
                     logging.getLogger(__name__).warning(
                         "Saved %s key for user %s cannot be decrypted with the current "
-                        "SECRET_KEY. Using the server key instead; the user should save it again.",
+                        "SECRET_KEY. Using the server keys instead; the user should save it again.",
                         provider, user_id,
                     )
-    return get_api_key(provider, settings_obj)
+                    decrypted = ""
+                if decrypted:
+                    # User may have stored comma-separated keys too
+                    user_keys = [k.strip() for k in decrypted.split(",") if k.strip()]
+                    if user_keys:
+                        return user_keys
+
+    # 2. Fall back to server .env keys
+    return get_all_api_keys(provider, settings_obj)

@@ -41,7 +41,8 @@ from ..models.ai_memory import (
     GlobalInsights,
     ModelUsage,
 )
-from ..core.providers import PROVIDERS, get_api_key as _get_api_key, get_base_url, resolve_api_key
+from ..core.providers import PROVIDERS, get_api_key as _get_api_key, get_base_url, resolve_api_key, resolve_all_api_keys
+from ..core.models_cache import get_live_models as _get_live_models
 from ..models.user import UserApiKey
 from ..core.encryption import encrypt_api_key
 from ..core.rag_service import build_rag_context, generate_embedding
@@ -50,6 +51,23 @@ from ..core.rate_limit import limiter
 router = APIRouter(prefix="/ai", tags=["AI"])
 
 logger = logging.getLogger(__name__)
+
+# Strong references for fire-and-forget tasks (embedding generation).
+# Without these, CPython may garbage-collect the task mid-execution and the
+# embedding is silently never stored.
+_background_tasks: set = set()
+
+
+def _spawn_background_task(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+
+    def _on_done(t: "asyncio.Task") -> None:
+        _background_tasks.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            logger.warning(f"Background task failed: {t.exception()}")
+
+    task.add_done_callback(_on_done)
 
 # Timeframe detection helpers
 TF_MAPPING = {
@@ -367,45 +385,15 @@ Market context: {context_summary}
     return user_query
 
 
-_model_cache = {"data": {}, "timestamp": 0}
-MODEL_CACHE_TTL = 300  # 5 minutes
-
-
-async def _fetch_live_models(provider_id: str, config: dict, api_key: str) -> Optional[List[str]]:
-    """Fetch available models from provider API. Returns None on failure."""
-    if not api_key:
-        return None
-    try:
-        headers = {"Authorization": f"Bearer {api_key}"}
-        if provider_id == "nvidia" and not api_key.startswith("nvapi-"):
-            headers["Authorization"] = f"Bearer nvapi-{api_key}"
-
-        base = config["base_url"].rstrip("/")
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{base}/models", headers=headers)
-            if resp.status_code == 200:
-                data = resp.json()
-                models = [
-                    item["id"] for item in data.get("data", []) if item.get("id")
-                ]
-                if models:
-                    return sorted(models)
-    except Exception as e:
-        logger.warning(f"Could not fetch live models for {provider_id}: {e}")
-    return None
-
-
 @router.get("/providers", response_model=AIProvidersResponse)
 async def get_providers(current_user: dict = Depends(get_current_user)):
-    """Get available AI providers with live model lists."""
-    now = time()
-    if now - _model_cache["timestamp"] < MODEL_CACHE_TTL and _model_cache["data"]:
-        return AIProvidersResponse(providers=_model_cache["data"])
-
+    """Get available AI providers with live model lists (cached 24h)."""
     providers_list = []
     for key, value in PROVIDERS.items():
         api_key = _get_api_key(key, settings)
-        live_models = await _fetch_live_models(key, value, api_key)
+        live_models = []
+        if api_key:
+            live_models = await _get_live_models(key, api_key, value["base_url"], value.get("needs_nvapi_prefix", False))
         providers_list.append(
             AIProvider(
                 id=key,
@@ -415,8 +403,6 @@ async def get_providers(current_user: dict = Depends(get_current_user)):
             )
         )
 
-    _model_cache["data"] = providers_list
-    _model_cache["timestamp"] = now
     return AIProvidersResponse(providers=providers_list)
 
 
@@ -470,9 +456,10 @@ async def test_connection(
 async def chat(request: Request, chat_req: ChatRequest, current_user: dict = Depends(require_trader)):
     if chat_req.provider not in PROVIDERS:
         raise HTTPException(status_code=400, detail="Invalid provider")
-    api_key = await resolve_api_key(chat_req.provider, settings, current_user["id"], AsyncSessionLocal)
-    if not api_key:
+    all_keys = await resolve_all_api_keys(chat_req.provider, settings, current_user["id"], AsyncSessionLocal)
+    if not all_keys:
         raise HTTPException(status_code=400, detail=f"No API key for {chat_req.provider}")
+    api_key = all_keys[0]  # Primary key for initial calls (refiner, etc.)
     provider_config = PROVIDERS[chat_req.provider]
 
     # ── TIMEFRAME DETECTION & DATA FETCHING ────────────────────────────────
@@ -669,7 +656,9 @@ Last 10 candles:
                     None
                 )
                 if last_user_msg:
-                    rag_context = await build_rag_context(chat_req.symbol, last_user_msg)
+                    rag_context = await build_rag_context(
+                        chat_req.symbol, last_user_msg, user_id=current_user["id"], source="ai_analyst"
+                    )
             except Exception as e:
                 logger.warning(f"RAG context build error: {e}")
 
@@ -730,7 +719,7 @@ def calculate_signals(df): ...
             system_parts.append(f"TOTAL_CANDLES_IN_DF: {total_candles}")
             system_parts.append(f"LATEST_SAMPLES: {', '.join(samples)}")
             system_parts.append("\nNote: The 'df' variable in the Python environment contains ALL these candles. Use it for your calculations.")
-            system_parts.append(f"\nNote on timeframes: 'df' contains raw {chat_req.timeframe or '1m'} data. To analyze higher timeframes, resample in your Python code using pandas: df.resample('1H').agg({{'open':'first','high':'max','low':'min','close':'last'}}).dropna(). Available aliases: '1T'=1min, '5T'=5min, '15T'=15min, '30T'=30min, '1H'=1h, '4H'=4h, '1D'=1d. You can also compute multi-TF indicators by resampling to each TF and merging. WARNING: After resample().dropna(), check len(df) before accessing elements — resampling reduces row count significantly.")
+            system_parts.append(f"\nNote on timeframes: 'df' contains raw {chat_req.timeframe or '1m'} data. To analyze higher timeframes, resample in your Python code using pandas: df.resample('1h').agg({{'open':'first','high':'max','low':'min','close':'last'}}).dropna(). Available pandas aliases: '1min', '5min', '15min', '30min', '1h', '4h', '1D' (do NOT use '1T'/'4H'/'m' — they are removed in pandas 3). You can also compute multi-TF indicators by resampling to each TF and merging. WARNING: After resample().dropna(), check len(df) before accessing elements — resampling reduces row count significantly.")
 
         # Add current session context (recent conversation from database)
         if user_memory_context:
@@ -773,12 +762,9 @@ def calculate_signals(df): ...
         logger.info(f"[AI Chat] Provider: {chat_req.provider}")
         logger.info(f"[AI Chat] Model: {chat_req.model}")
         logger.info(f"[AI Chat] Base URL: {provider_config['base_url']}")
-        logger.info(f"[AI Chat] API Key configured: {bool(api_key)}")
+        logger.info(f"[AI Chat] API Keys configured: {len(all_keys)}")
         
-        client = AsyncOpenAI(base_url=provider_config["base_url"], api_key=api_key)
-        logger.info(f"[AI Chat] OpenAI client created successfully")
-
-        # Professional retry logic with detailed logging
+        # Professional retry logic with multi-key fallback
         assistant_message = None
         reasoning_text = None
         token_usage = None
@@ -787,64 +773,75 @@ def calculate_signals(df): ...
         full_raw_response = None
         
         for attempt in range(MAX_RETRIES):
-            try:
-                logger.info(f"[AI Chat] Attempt {attempt + 1}/{MAX_RETRIES} - Making API call...")
-                
-                import time as time_module
-                req_start = time_module.time()
-                response = await client.chat.completions.create(
-                    model=chat_req.model,
-                    messages=messages,
-                    temperature=0.2,
-                    max_tokens=32768,
-                    timeout=REQUEST_TIMEOUT
-                )
-                req_elapsed_ms = int((time_module.time() - req_start) * 1000)
-                
-                # Handle both content and reasoning_content (Qwen model uses reasoning_content)
-                msg = response.choices[0].message
-                assistant_message = msg.content or msg.reasoning_content or ""
-                reasoning_text = msg.reasoning_content if hasattr(msg, 'reasoning_content') and msg.reasoning_content else None
-                
-                # Capture token usage if available
-                token_usage = None
-                token_detail = {}
-                if hasattr(response, 'usage') and response.usage:
-                    token_usage = response.usage.total_tokens
-                    token_detail = {
-                        "prompt_tokens": response.usage.prompt_tokens or 0,
-                        "completion_tokens": response.usage.completion_tokens or 0,
-                        "total_tokens": token_usage,
-                    }
-                
-                # Capture full raw API response
+            # Try each key for this attempt
+            for key_idx, current_key in enumerate(all_keys):
                 try:
-                    full_raw_response = response.model_dump(mode='json')
-                except Exception:  # swallow-ok: older SDK objects; .dict() is tried next
+                    logger.info(f"[AI Chat] Attempt {attempt + 1}/{MAX_RETRIES}, key {key_idx + 1}/{len(all_keys)} - Making API call...")
+                    
+                    client = AsyncOpenAI(base_url=provider_config["base_url"], api_key=current_key)
+                    import time as time_module
+                    req_start = time_module.time()
+                    response = await client.chat.completions.create(
+                        model=chat_req.model,
+                        messages=messages,
+                        temperature=0.2,
+                        max_tokens=32768,
+                        timeout=REQUEST_TIMEOUT
+                    )
+                    req_elapsed_ms = int((time_module.time() - req_start) * 1000)
+                    
+                    # Handle both content and reasoning_content (Qwen model uses reasoning_content)
+                    msg = response.choices[0].message
+                    assistant_message = msg.content or msg.reasoning_content or ""
+                    reasoning_text = msg.reasoning_content if hasattr(msg, 'reasoning_content') and msg.reasoning_content else None
+                    
+                    # Capture token usage if available
+                    token_usage = None
+                    token_detail = {}
+                    if hasattr(response, 'usage') and response.usage:
+                        token_usage = response.usage.total_tokens
+                        token_detail = {
+                            "prompt_tokens": response.usage.prompt_tokens or 0,
+                            "completion_tokens": response.usage.completion_tokens or 0,
+                            "total_tokens": token_usage,
+                        }
+                    
+                    # Capture full raw API response
                     try:
-                        full_raw_response = response.dict()
-                    except Exception:  # swallow-ok: the raw copy is only kept for debugging
-                        full_raw_response = None
-                
-                logger.info(f"[AI Chat] SUCCESS - Response length: {len(assistant_message)} chars, Tokens: {token_usage}, Latency: {req_elapsed_ms}ms")
+                        full_raw_response = response.model_dump(mode='json')
+                    except Exception:  # swallow-ok: older SDK objects; .dict() is tried next
+                        try:
+                            full_raw_response = response.dict()
+                        except Exception:  # swallow-ok: the raw copy is only kept for debugging
+                            full_raw_response = None
+                    
+                    logger.info(f"[AI Chat] SUCCESS - Response length: {len(assistant_message)} chars, Tokens: {token_usage}, Latency: {req_elapsed_ms}ms")
+                    break
+                    
+                except RateLimitError as e:
+                    last_error = f"Rate limit exceeded (key {key_idx + 1}): {str(e)}"
+                    logger.warning(f"[AI Chat] Rate limit on key {key_idx + 1}: {str(e)}")
+                    # Try next key
+                    continue
+                    
+                except APIError as e:
+                    last_error = f"API error (key {key_idx + 1}): {str(e)}"
+                    logger.warning(f"[AI Chat] API error on key {key_idx + 1}: {str(e)}")
+                    # Try next key
+                    continue
+                    
+                except Exception as e:
+                    last_error = f"Error (key {key_idx + 1}): {type(e).__name__}: {str(e)}"
+                    logger.error(f"[AI Chat] Exception on key {key_idx + 1}: {type(e).__name__}: {str(e)}")
+                    # Try next key
+                    continue
+
+            if assistant_message is not None:
                 break
                 
-            except RateLimitError as e:
-                last_error = f"Rate limit exceeded: {str(e)}"
-                logger.warning(f"[AI Chat] Rate limit error: {str(e)}")
-                
-            except APIError as e:
-                last_error = f"API error: {str(e)}"
-                logger.warning(f"[AI Chat] API error: {str(e)}")
-                
-            except Exception as e:
-                last_error = f"Error: {type(e).__name__}: {str(e)}"
-                logger.error(f"[AI Chat] Exception: {type(e).__name__}: {str(e)}")
-                logger.error(f"[AI Chat] Traceback: {traceback.format_exc()}")
-            
-            # If not last attempt, wait before retry
+            # All keys for this attempt exhausted — wait before next attempt
             if attempt < MAX_RETRIES - 1:
-                logger.info(f"[AI Chat] Waiting {RETRY_DELAY}s before retry...")
+                logger.info(f"[AI Chat] All {len(all_keys)} keys failed. Waiting {RETRY_DELAY}s before retry {attempt + 2}...")
                 await asyncio.sleep(RETRY_DELAY)
         
         if assistant_message is None:
@@ -912,7 +909,8 @@ def calculate_signals(df): ...
                         {"role": "user", "content": f"The Python code you provided failed with this error: {error_msg}{hint}. Please provide a FIXED version of the code block wrapped in ```python ... ```."}
                     ]
                     
-                    response = await client.chat.completions.create(
+                    correction_client = AsyncOpenAI(base_url=provider_config["base_url"], api_key=all_keys[0])
+                    response = await correction_client.chat.completions.create(
                         model=chat_req.model,
                         messages=correction_messages,
                         temperature=0.1,
@@ -970,7 +968,7 @@ def calculate_signals(df): ...
 
                 # Fire-and-forget: generate and store embedding for RAG
                 try:
-                    asyncio.create_task(
+                    _spawn_background_task(
                         generate_embedding(saved_chat_memory_id, assistant_message)
                     )
                 except Exception:
@@ -1027,7 +1025,8 @@ def calculate_signals(df): ...
             execution_charts=exec_charts,
             execution_tables=exec_tables,
             chat_memory_id=saved_chat_memory_id,
-            chat_session_id=chat_req.chat_session_id # ECHO BACK
+            chat_session_id=chat_req.chat_session_id, # ECHO BACK
+            rag_context=rag_context if chat_req.debug_rag else None,
         )
 
 

@@ -52,7 +52,7 @@ npm run dev
 ### First Run
 
 On first startup with a fresh database, the backend auto-creates:
-- All 27 database tables
+- All 31 database tables
 - One `admin` account, only if `DEFAULT_ADMIN_PASSWORD` is set and strong
 
 **Delete old `finance_engine.db` if upgrading from an older version** (schema changed).
@@ -83,6 +83,7 @@ Optional:
 | `ALLOW_REMOTE_CONNECTOR` | False | Allow a connector address outside local and private networks |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | — | Where heartbeat alerts are sent. Empty: alerts are only logged and listed on the Risk Limits card |
 | `BCRYPT_ROUNDS` | 12 | Password hashing cost. Below 12 is refused outside `APP_ENV=test` |
+| `INSTANCE_LABEL` | Version 2 | Shown in the sidebar, `/api/instance` and `/health`, to tell side-by-side deployments apart |
 | `HUGGINGFACE_API_KEY` | — | For data archiving |
 | `CORS_ORIGINS` | `http://localhost:5173,http://localhost:3000` | Allowed CORS origins |
 | `APP_ENV` | development | `production` switches on JSON logs and hides `/docs`, `/redoc`, `/openapi.json` |
@@ -102,7 +103,7 @@ Add people or reset a password with `python create_admin.py`. It prompts for the
 | trader | Trade, run the autopilot, run anything that executes AI-written code |
 | viewer | Read dashboards, history, reports and settings |
 
-## Database Tables (27)
+## Database Tables (31)
 
 | Table | Purpose |
 |---|---|
@@ -133,6 +134,10 @@ Add people or reset a password with `python create_admin.py`. It prompts for the
 | `risk_decisions` | Every order the risk gate checked: refused, sent or failed, with the numbers and the settings version |
 | `trading_halts` | Every switch of the kill switch, on or off, with who and why. The newest is in force |
 | `alerts` | Heartbeat alerts: a check going down or coming back, and whether Telegram delivered it |
+| `autopilot_cycles` | One row per autopilot attempt, with its outcome, including attempts that stopped at a gate (from Version 1) |
+| `autopilot_execution_attempts` | Each order attempt of a cycle: proposed, requested and broker-accepted levels (from Version 1) |
+| `autopilot_order_events` | Broker order and deal events per autopilot trade, the order lifecycle (from Version 1) |
+| `rag_logs` | What context each RAG retrieval built (from Version 1) |
 
 ## Authentication Flow
 
@@ -236,7 +241,9 @@ Flow:
     A refusal returns 422 naming the rule, and is recorded in risk_decisions
   → Backend sends it through the MT5 connector (core/mt5_connector.py)
   → Saves to trade_records: the fill as entry_price, the quote as requested_price
-    (and the same pair on close), so slippage can be measured
+    (and the same pair on close), so slippage can be measured. Linked to the
+    user's latest same-symbol AI analysis from the last 24h when no
+    chat_memory_id was passed
   → Returns ticket number
   → Positions list refreshes
   Close button has loading state (prevents double-submit)
@@ -429,7 +436,7 @@ Flow:
   → Cannot delete "admin" user
 ```
 
-## API Routes (72 total)
+## API Routes (80 total)
 
 ```
 AUTH:
@@ -631,7 +638,9 @@ with summer time). The backend works in real UTC throughout.
 | Per-user autopilot state | `_user_states[user_id]` dict instead of global singleton |
 | Restricted `__builtins__` in `exec()` | Prevents AI-generated code from running OS commands |
 | `execute.py` sandbox | AI Analyst, Autopilot and Historical Lab code runs through this module, always in a subprocess. Prompt Backtest still has its own runner (to be merged in step B1) |
-| `chat_memory_id` in trade link | Enables win-rate tracking per strategy prompt (RAG pipeline) |
+| `chat_memory_id` in trade link | Enables win-rate tracking per strategy prompt (RAG pipeline). Terminal orders without an explicit id auto-link to the user's latest same-symbol analysis within 24h |
+| 5-minute profit reconciler | `app/core/trade_reconcile.py` matches open `trade_records` against MT5 history deals, through the connector client, and writes `profit_loss` for trades closed outside the app (stop, target, manual close) |
+| Stop loss policy | Every order needs a stop loss; the risk gate sizes the order from it. Version 1's fixed 0.2% default stop was replaced by an optional risk setting that fills a missing stop at an ATR multiple (see `docs/refactor/V1_V2_DECISIONS.md`) |
 | `PRAGMA foreign_keys=ON` for SQLite | Required for CASCADE deletes to work on SQLite |
 | No silent errors | A handler that catches `Exception` must log, re-raise, or carry `# swallow-ok: <reason>` on its `except` line. Code in `app/` logs instead of printing. `tests/test_error_handling.py` enforces both. The price sync ends a run with failed symbols in `PriceSyncFailed` |
 | Continuous checks | `.github/workflows/verify.yml` builds the same environments and runs `scripts/verify.sh` on every push to the fork. Green there means green locally |
@@ -640,12 +649,12 @@ with summer time). The backend works in real UTC throughout.
 
 ## Known Limitations
 
-1. **No HTTPS** in the nginx config. Needed before anything is exposed. Planned with the domain in step 14.
+1. **No HTTPS** in the nginx config. Needed before anything is exposed.
 2. **Single worker only.** Autopilot state and login throttling live in process memory. `run.py` fixes it at one.
 3. **The sandbox is not a security boundary.** See the sandbox section above.
-4. **Records made before step 10 keep broker time.** Autopilot close times and durations stored earlier are a few hours off. They were left as they are; the live database's history is handled in the step 14 plan.
+4. **Records made before step 10 keep broker time.** Autopilot close times and durations stored earlier are a few hours off.
 5. **`pandas_ta` replaced with `ta`**: different API, AI prompts updated accordingly.
-6. **Retrieval runs only in the AI Analyst chat.** The autopilot does not use past analyses.
+6. **Embeddings stored as BLOB (no pgvector).** Cosine similarity is computed in Python; adequate at current scale. See `docs/RAG_ARCHITECTURE.md`.
 
 Every known problem, with the step that fixes it, is in `docs/refactor/FINDINGS.md`.
 
@@ -694,7 +703,4 @@ See `docs/RAG_ARCHITECTURE.md` for the full 5-phase plan:
 4. **Autopilot Smart Selection** — Pick best-performing prompts, not random
 5. **Feedback Dashboard** — Visualize strategy performance
 
-Status: phases 1 to 4 exist. The scoreboard updates hourly (`strategy_scorer.py`),
-embeddings and retrieval run in the AI Analyst chat (`rag_service.py`), and the
-autopilot weights prompts by regime fit and scoreboard results. Phase 5 is partly
-covered by the Reports page. The autopilot does not use retrieval.
+**Implemented — all 5 phases:** strategy scoreboard with win-rate classification (`MIN_TRADES_FOR_BEST=10`), sentence-transformers embeddings (BLOB storage), RAG context injection into AI chat and autopilot prompts (with `rag_logs` telemetry), autopilot smart prompt selection, and the RAG Health report (`GET /api/rag-health` + HistoryPage panel). Note: backend requires pandas-3-safe resample aliases — use `to_pandas_freq()` from `app/core/historical_loader.py`, never raw `'1H'`/`'1T'`.

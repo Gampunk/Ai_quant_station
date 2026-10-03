@@ -25,6 +25,26 @@ HF_TOKEN = settings.HUGGINGFACE_API_KEY
 AVAILABLE_SYMBOLS = ["XAUUSD", "XAGUSD", "EURUSD", "USDJPY", "GBPUSD", "BTCUSD"]
 
 
+def to_pandas_freq(tf: str) -> str:
+    """Map API timeframe aliases ('1T', '15T', '1H', '1m') to pandas-valid
+    frequency strings ('1min', '15min', '1h').
+
+    pandas 3 removed the uppercase 'H'/'T' and bare 'm' minute aliases, so
+    resample() must never receive raw API aliases. Already-valid aliases
+    ('1D', 'W', ...) pass through unchanged.
+    """
+    if not tf or len(tf) < 2:
+        return tf
+    digits, unit = tf[:-1], tf[-1]
+    if unit in ("T", "m"):        # 1T, 15T, 1m, 5m  → minutes
+        return f"{digits}min"
+    if unit == "H":               # 1H, 4H → hours
+        return f"{digits}h"
+    if unit == "d":               # lowercase 'd' deprecated → 'D'
+        return f"{digits}D"
+    return tf                     # 1D, W, ME already valid
+
+
 def _get_parquet_path(symbol: str, year: int) -> Optional[Path]:
     """Get file from local cache first, then fall back to HuggingFace."""
     local_path = LOCAL_CACHE / f"{symbol}_{year}.parquet"
@@ -105,7 +125,7 @@ def load_data(
 
     # Resample to requested timeframe
     if timeframe != "1T":
-        df = df.resample(timeframe).agg({
+        df = df.resample(to_pandas_freq(timeframe)).agg({
             "open": "first",
             "high": "max",
             "low": "min",

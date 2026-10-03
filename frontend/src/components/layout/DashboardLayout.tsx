@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/utils/utils'
 import TradingHaltBanner from '@/components/TradingHaltBanner'
+import { useInstanceLabel } from '@/hooks/useInstanceLabel'
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
@@ -26,6 +27,7 @@ export default function DashboardLayout() {
   const { user, logout } = useAuthStore()
   const navigate = useNavigate()
   const [mobileOpen, setMobileOpen] = useState(false)
+  const instanceLabel = useInstanceLabel()
 
   const handleLogout = () => {
     logout()
@@ -68,6 +70,7 @@ export default function DashboardLayout() {
             <span className="text-sm">📈</span>
           </div>
           <span className="font-bold text-sm">Finance Engine</span>
+          {instanceLabel && <span className="text-[10px] font-semibold text-primary">{instanceLabel}</span>}
         </div>
         <Button variant="ghost" size="sm" onClick={() => setMobileOpen(!mobileOpen)}>
           {mobileOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
@@ -107,7 +110,7 @@ export default function DashboardLayout() {
             </div>
             <div className="min-w-0">
               <h1 className="font-bold text-base lg:text-lg truncate">Finance Engine</h1>
-              <p className="text-[10px] lg:text-xs text-muted-foreground">v2.0</p>
+              <p className="text-[10px] lg:text-xs font-semibold text-primary">{instanceLabel}</p>
             </div>
           </div>
         </div>

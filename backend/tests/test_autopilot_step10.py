@@ -50,18 +50,19 @@ def quiet_loop(monkeypatch):
     """Everything around a cycle made instant, and cycles counted instead of run."""
     calls = []
 
-    async def fake_cycle(user_id):
+    async def fake_cycle(user_id, cycle_id=None):
         calls.append(user_id)
 
     async def nothing(*a, **k):
         return None
 
-    async def market_open():
+    async def live(*a, **k):
         return True
 
     monkeypatch.setattr(autopilot, "run_autopilot_cycle", fake_cycle)
     monkeypatch.setattr(autopilot, "sync_trade_results", nothing)
-    monkeypatch.setattr(autopilot, "_is_market_open", market_open)
+    monkeypatch.setattr(autopilot, "_has_live_ticks", live)  # the market is open
+    monkeypatch.setattr(settings, "MT5_CONNECTOR_URL", "http://127.0.0.1:9")  # cycles are faked
     state = autopilot._get_state(USER_ID)
     state.update(enabled=True, running=True, paused_day=None, last_trade_time=None)
     state["stats"].update(paused_reason=None, stopped_reason=None, error_count=0)
@@ -112,7 +113,7 @@ async def test_an_error_does_not_end_the_loop(db_session, quiet_loop, monkeypatc
     attempts = []
     state = autopilot._get_state(USER_ID)
 
-    async def flaky(user_id):
+    async def flaky(user_id, cycle_id=None):
         attempts.append(1)
         if len(attempts) == 1:
             raise RuntimeError("provider returned garbage")
@@ -211,7 +212,9 @@ async def test_autopilot_records_the_close_in_utc(broker_plus_3, db_session):
         AutopilotTrade.mt5_ticket == placed["ticket"]))).scalar_one()
     closed = trade.closed_at if trade.closed_at.tzinfo else trade.closed_at.replace(tzinfo=timezone.utc)
     assert abs((closed - NOW()).total_seconds()) < 120, closed
-    assert trade.result in ("PROFIT", "LOSS") and 0 <= trade.duration_minutes <= 2
+    # A close sent by software: the broker's deal reason says "expert".
+    assert trade.result == "EXPERT_CLOSE" and trade.exit_reason_source == "broker"
+    assert 0 <= trade.duration_minutes <= 2
 
 
 async def test_history_route_keeps_the_position_and_reason(broker_plus_3, client, viewer_headers):

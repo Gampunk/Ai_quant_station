@@ -123,6 +123,24 @@ class MT5ConnectorClient:
             row["time"] = broker_clock.epoch_to_utc(row.get("time"))
         return res
 
+    async def get_orders(self) -> Dict[str, Any]:
+        """Pending orders, with their times in UTC."""
+        return self._orders_to_utc(await self.request("GET", "/orders"))
+
+    async def get_order_history(self, hours: int = 0) -> Dict[str, Any]:
+        """Past orders, including cancelled and expired ones, with times in UTC."""
+        await self.refresh_clock()
+        extra = int(abs(broker_clock.offset_hours)) + 1 if hours else 0
+        return self._orders_to_utc(await self.request("GET", "/history/orders", params={"hours": hours + extra}))
+
+    @staticmethod
+    def _orders_to_utc(res: Dict[str, Any]) -> Dict[str, Any]:
+        for row in res.get("orders") or []:
+            for key in ("setup_time", "done_time"):
+                if row.get(key):
+                    row[key] = broker_clock.text_to_utc(row[key])
+        return res
+
     async def get_latest_data(self, symbol: str, timeframe: str = "1h", count: int = 500) -> Dict[str, Any]:
         await self.refresh_clock()
         res = await self.request("GET", f"/data/latest/{symbol}", params={"timeframe": timeframe, "count": count})

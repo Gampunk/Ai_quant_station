@@ -18,7 +18,7 @@ from .core.config import settings
 from .core.database import AsyncSessionLocal
 from .core.security import get_password_hash
 from .core.blacklist import cleanup_expired_tokens
-from .api import auth, mt5, trade, ai, yahoo, execute, analytics, autopilot, historical_lab, backtest, risk
+from .api import auth, mt5, trade, ai, yahoo, execute, analytics, autopilot, historical_lab, backtest, risk, rag_health
 from .core.mt5_sync import start_sync_scheduler
 from .models.user import User
 
@@ -136,6 +136,7 @@ async def create_default_users():
 async def startup_event():
     # Refuse to start without a strong signing key, in every environment
     settings.validate_secret_key()
+    settings.validate_connector_token()
 
     # Refuse to start if the configured connector is not local or private
     from .core.connector_guard import check_connector_url
@@ -196,12 +197,22 @@ async def startup_event():
     except Exception:
         log.exception("Strategy scorer did not start")
 
-    # Start daily report scheduler (23:50 UTC)
+    # Start daily report scheduler (Mon-Fri 9AM IST + Saturday weekly 9AM IST)
     try:
         from .core.email_reports import start_report_scheduler
         start_report_scheduler()
     except Exception:
         log.exception("Daily report scheduler did not start")
+
+    # Start trade profit reconciler (closes trade_records whose MT5 positions
+    # were closed externally — SL/TP, manual terminal closes)
+    try:
+        import asyncio
+        from .core.trade_reconcile import start_trade_reconciler, reconcile_trade_records
+        start_trade_reconciler()
+        asyncio.create_task(reconcile_trade_records())
+    except Exception:
+        log.exception("Trade reconciler did not start")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -209,10 +220,12 @@ async def shutdown_event():
     from .core.mt5_sync import shutdown_scheduler
     from .core.email_reports import shutdown_report_scheduler
     from .core.heartbeat import shutdown_heartbeat
+    from .core.trade_reconcile import shutdown_reconciler
     await shutdown_connector()
     shutdown_scheduler()
     shutdown_report_scheduler()
     shutdown_heartbeat()
+    shutdown_reconciler()
 
 # Middleware chain: UserIdentity (innermost) → CORS → SlowAPI (outermost)
 app.add_middleware(UserIdentityMiddleware)
@@ -237,11 +250,18 @@ app.include_router(autopilot.router, prefix="/api")
 app.include_router(historical_lab.router, prefix="/api")
 app.include_router(backtest.router, prefix="/api")
 app.include_router(risk.router, prefix="/api")
+app.include_router(rag_health.router, prefix="/api")
 
 # Registered before the frontend's catch-all route, which would otherwise answer it.
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    return {"status": "healthy", "instance": settings.INSTANCE_LABEL}
+
+
+@app.get("/api/instance")
+async def instance():
+    """Which instance this is. Public: the sidebar shows it before login too."""
+    return {"label": settings.INSTANCE_LABEL}
 
 
 # Paths the frontend must not answer: the API, and the API map that production hides.
@@ -260,6 +280,10 @@ if frontend_dist_path.exists() and frontend_dist_path.is_dir():
     async def serve_react_app(full_path: str):
         # Don't interfere with API routes
         if full_path.startswith(_NOT_FRONTEND):
+            raise HTTPException(status_code=404, detail="Not Found")
+        
+        # Don't interfere with health endpoint
+        if full_path == "health":
             raise HTTPException(status_code=404, detail="Not Found")
         
         # Serve index.html for client-side routing (React Router)

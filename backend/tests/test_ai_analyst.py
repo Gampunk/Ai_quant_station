@@ -2,13 +2,47 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from types import SimpleNamespace
+
+_CANNED_REPLY = (
+    "Gold is trading with a constructive bullish bias as buyers defend the "
+    "recent support zone around the prior swing low. Momentum indicators "
+    "suggest continuation while volume confirms participation, and the "
+    "structure remains valid while price stays above the key moving average. "
+    "Risk management stays paramount with disciplined stop placement near "
+    "the invalidation level to keep exposure controlled."
+)
+
+
+class FakeAsyncOpenAI:
+    """Stands in for openai.AsyncOpenAI — canned completion with token usage."""
+
+    def __init__(self, **kwargs):
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    async def _create(self, **kwargs):
+        msg = SimpleNamespace(content=_CANNED_REPLY)
+        usage = SimpleNamespace(prompt_tokens=60, completion_tokens=45, total_tokens=105)
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)], usage=usage)
+
+
+async def _fake_all_keys(*args, **kwargs):
+    return ["test-key"]
+
+
+@pytest.fixture(autouse=True)
+def _mock_ai_provider(monkeypatch):
+    """Offline-deterministic chat: fake provider + fake keys, no network."""
+    monkeypatch.setattr("app.api.ai.AsyncOpenAI", FakeAsyncOpenAI)
+    monkeypatch.setattr("app.api.ai.resolve_all_api_keys", _fake_all_keys)
 
 
 @pytest.mark.asyncio
 class TestAIAnalyst:
-    """Real integration tests for POST /api/ai/chat.
+    """Integration tests for POST /api/ai/chat against a mocked provider.
 
-    All tests make real API calls to NVIDIA NIM.
+    Asserts the pipeline (memory, insights, usage tracking, setup detection)
+    without live API keys; provider responses are canned and deterministic.
     """
 
     @pytest.mark.requires_ai_key

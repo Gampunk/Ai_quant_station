@@ -30,6 +30,7 @@ interface Message {
   execution_charts?: Array<{title: string, data: number[], color: string, type: string}>
   execution_tables?: Array<{title: string, columns?: string[], rows: any[][]}>
   chat_memory_id?: number
+  rag_context?: string
 }
 
 
@@ -476,7 +477,8 @@ const detectRequiredCandles = (query: string): number => {
         load_market_data: loadData !== 'none' ? loadData : null,
         data_period: dataPeriod,
         timeframe: timeframe,
-        candle_data: currentCandleData.length > 0 ? currentCandleData : null
+        candle_data: currentCandleData.length > 0 ? currentCandleData : null,
+        debug_rag: true
       })
 
       const assistantMessage: Message = {
@@ -489,7 +491,8 @@ const detectRequiredCandles = (query: string): number => {
         execution_output: res.data.execution_output,
         execution_charts: res.data.execution_charts,
         execution_tables: res.data.execution_tables,
-        chat_memory_id: res.data.chat_memory_id
+        chat_memory_id: res.data.chat_memory_id,
+        rag_context: res.data.rag_context
       }
 
       addMessage(assistantMessage)
@@ -860,6 +863,15 @@ const detectRequiredCandles = (query: string): number => {
                       <p className="text-zinc-500 mb-1 border-b border-zinc-800 pb-1">Execution Output:</p>
                       <pre className="text-zinc-300 overflow-x-auto whitespace-pre-wrap">{msg.execution_output}</pre>
                     </div>
+                  )}
+
+                  {msg.rag_context && (
+                    <details className="mt-3 group">
+                      <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground select-none">
+                        🧠 RAG context used ({msg.rag_context.length} chars)
+                      </summary>
+                      <pre className="mt-2 p-3 bg-background rounded border border-border/50 text-xs text-muted-foreground overflow-x-auto whitespace-pre-wrap max-h-64 overflow-y-auto">{msg.rag_context}</pre>
+                    </details>
                   )}
 
 

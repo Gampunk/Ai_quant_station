@@ -18,7 +18,7 @@ from ..core.config import settings
 from ..core.security import get_current_user, require_trader
 from ..core.database import AsyncSessionLocal
 from ..core.providers import PROVIDERS, get_api_key as _get_api_key, get_base_url
-from ..core.historical_loader import add_indicators
+from ..core.historical_loader import add_indicators, to_pandas_freq
 from ..core.utils import get_robust_code_gen_prompt
 from ..models.ai_memory import UserPrompt, DefaultPromptStrategy
 from ..models.historical_lab import HistoricalBacktest
@@ -564,7 +564,7 @@ async def run_backtest(request: BacktestRequest, current_user: dict = Depends(re
     m1_df = full_df.copy()
     if request.timeframe != "1T":
         full_df.set_index('datetime', inplace=True)
-        resampled = full_df.resample(request.timeframe).agg({
+        resampled = full_df.resample(to_pandas_freq(request.timeframe)).agg({
             'open': 'first',
             'high': 'max',
             'low': 'min',
@@ -585,7 +585,7 @@ async def run_backtest(request: BacktestRequest, current_user: dict = Depends(re
         primary_idx = pd.DatetimeIndex(full_df['datetime'])
         df_primary = add_indicators(full_df.set_index('datetime'))
         for alias, (suffix, mins) in tfs_to_merge.items():
-            df_higher = m1_df.set_index('datetime').resample(alias).agg({
+            df_higher = m1_df.set_index('datetime').resample(to_pandas_freq(alias)).agg({
                 'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
             }).dropna()
             df_higher = add_indicators(df_higher)

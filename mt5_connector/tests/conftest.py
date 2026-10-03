@@ -11,8 +11,10 @@ FAKE_DIR = os.path.join(CONNECTOR_DIR, "testing", "fake_mt5")
 sys.path.insert(0, FAKE_DIR)
 sys.path.insert(1, CONNECTOR_DIR)
 
-# connector.py prompts for a port at import time unless this is set.
+# connector.py prompts for a port and a token at import time unless these are set.
+# Every test sets the token it needs on the module itself.
 os.environ.setdefault("MT5_CONNECTOR_PORT", "5999")
+os.environ.setdefault("MT5_API_TOKEN", "import-time-placeholder")
 
 import MetaTrader5 as fake_mt5  # noqa: E402
 

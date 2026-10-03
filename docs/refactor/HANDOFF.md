@@ -25,11 +25,15 @@ the colleague's branch in `UPSTREAM_COMPARISON.md`.
 ## State
 
 - Steps 1 to 10: approved by the user.
-- Steps 11, 12 and 13: built and committed. The user runs their checks together;
-  the instructions are in PROGRESS.md. Not approved until those pass.
-- Next: step 14, merging the best of both branches and replacing the live system.
-  Plan it from `UPSTREAM_COMPARISON.md`; nothing is decided yet beyond what that
-  file and the rules above say.
+- Steps 11, 12, 13 and the Version 2 merge: built. The user runs all their checks
+  together; instructions in PROGRESS.md. Not approved until those pass.
+- The merge lives on branch `v2/merge` (Version 1 merged into `refactor/hardening`),
+  following `V1_V2_DECISIONS.md`, approved by both developers on 2026-10-03.
+- The user wants quick development and deployment: once a plan is approved, build
+  straight through and batch the checks.
+- Next: deploying Version 2 live next to Version 1 for a side-by-side comparison.
+  Not started. Needs the user's go-ahead to touch the live servers, a separate demo
+  MT5 account and database for Version 2, HTTPS, and a private connector link.
 
 ## Step 13 as approved (now built)
 

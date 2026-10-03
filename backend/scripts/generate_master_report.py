@@ -30,7 +30,10 @@ from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "daily_reports"
-CONNECTOR_URL = "http://193.38.138.202:5001"
+# The connector's address comes from the environment (backend/.env), never the code.
+CONNECTOR_URL = os.environ.get("MT5_CONNECTOR_URL", "").rstrip("/")
+if not CONNECTOR_URL:
+    sys.exit("Set MT5_CONNECTOR_URL (and MT5_API_TOKEN) in the environment or backend/.env")
 API_TOKEN = os.environ.get("MT5_API_TOKEN", "")
 
 
@@ -399,67 +402,71 @@ def _generate_master_excel(overall: dict, daily_breakdown: list[dict],
     return filepath
 
 
-# ── Email ──────────────────────────────────────────────────────────────────
+# ── Telegram ────────────────────────────────────────────────────────────────
 
-def _send_email(filepath: str, overall: dict) -> bool:
+def _send_telegram(filepath: str, overall: dict) -> bool:
+    """Send master report to Telegram. Returns True on success."""
     try:
         from app.core.config import settings
     except ImportError:
-        print("  [WARN] Cannot import settings — skipping email")
+        print("  [WARN] Cannot import settings — skipping Telegram")
         return False
 
-    sender = settings.REPORT_EMAIL
-    raw = settings.REPORT_RECIPIENT_EMAIL
-    recipients = [r.strip() for r in raw.split(",") if r.strip()] if raw else []
-    smtp_server = settings.SMTP_SERVER
-    smtp_port = settings.SMTP_PORT
-    password = settings.REPORT_EMAIL_PASSWORD
+    token = settings.TELEGRAM_BOT_TOKEN
+    chat_id = settings.TELEGRAM_CHAT_ID
 
-    if not all([sender, recipients, smtp_server, smtp_port, password]):
-        print("  [WARN] Email not fully configured — skipping")
+    if not token or not chat_id:
+        print("  [WARN] Telegram not configured — skipping")
         return False
-
-    import smtplib
-    from email.mime.application import MIMEApplication
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.text import MIMEText
 
     now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
-    subject = f"Master Trade Report — Full Period ({datetime.utcnow().strftime('%Y-%m-%d')})"
-    body = (
-        f"AI Quant Station — Full Period Master Report\n"
-        f"{now_str} UTC\n\n"
-        f"Overall Performance:\n"
+    text = (
+        f"*AI Quant Station — Full Period Master Report*\n"
+        f"_{now_str} UTC_\n\n"
+        f"*Overall Performance:*\n"
         f"  Total Trades (Closed): {overall['total_trades']}\n"
         f"  Wins: {overall['wins']}  /  Losses: {overall['losses']}\n"
         f"  Win Rate: {overall['win_rate']}%\n"
         f"  Total P&L: ${overall['pnl']:.2f}\n\n"
-        f"Report attached.\n— AI Quant Station"
+        f"Report: `{os.path.basename(filepath)}`"
     )
 
+    api_base = f"https://api.telegram.org/bot{token}"
+
     try:
-        msg = MIMEMultipart()
-        msg["Subject"] = subject
-        msg["From"] = sender
-        msg["To"] = ", ".join(recipients)
-        msg.attach(MIMEText(body, "plain"))
+        # Send text summary
+        payload = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}).encode()
+        req = urllib.request.Request(f"{api_base}/sendMessage", data=payload, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=15)
+
+        # Send Excel file
+        boundary = "----FormBoundary7MA4YWxkTrZu0gW"
         with open(filepath, "rb") as f:
-            att = MIMEApplication(f.read(), _subtype="xlsx")
-            att.add_header("Content-Disposition", "attachment", filename=os.path.basename(filepath))
-            msg.attach(att)
-        if smtp_port == 465:
-            with smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=30) as server:
-                server.login(sender, password)
-                server.send_message(msg)
-        else:
-            with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as server:
-                server.starttls()
-                server.login(sender, password)
-                server.send_message(msg)
-        print(f"  [OK] Email sent to {', '.join(recipients)}")
+            file_data = f.read()
+
+        body = (
+            f"--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"chat_id\"\r\n\r\n"
+            f"{chat_id}\r\n"
+            f"--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"caption\"\r\n\r\n"
+            f"Master Trade Report — {datetime.utcnow().strftime('%Y-%m-%d')}\r\n"
+            f"--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"document\"; filename=\"{os.path.basename(filepath)}\"\r\n"
+            f"Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n"
+        ).encode() + file_data + f"\r\n--{boundary}--\r\n".encode()
+
+        req2 = urllib.request.Request(
+            f"{api_base}/sendDocument",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        urllib.request.urlopen(req2, timeout=30)
+
+        print(f"  [OK] Report sent to Telegram chat {chat_id}")
         return True
     except Exception as e:
-        print(f"  [WARN] Email failed: {e}")
+        print(f"  [WARN] Telegram send failed: {e}")
         return False
 
 
@@ -500,12 +507,12 @@ def main():
     # Generate Excel
     filepath = _generate_master_excel(overall, daily_breakdown, trades, prompt_stats)
 
-    # Email
+    # Send
     if args.dry_run:
-        print("\n  [SKIP] --dry-run: email not sent")
+        print("\n  [SKIP] --dry-run: not sending")
     else:
         print()
-        _send_email(filepath, overall)
+        _send_telegram(filepath, overall)
 
     print("\nDone.")
 

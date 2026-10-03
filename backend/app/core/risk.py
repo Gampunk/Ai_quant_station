@@ -42,6 +42,10 @@ DEFAULTS: Dict[str, Any] = {
     "min_margin_level": 200.0,
     "max_pending_distance_pct": 2.0,
     "require_stop_loss": True,
+    # A missing stop loss is set this many ATR(14) of 15-minute candles from the price.
+    # 0 turns it off: an order without a stop is then refused (when stops are required).
+    # Replaces the upstream branch's fixed 0.2% default, which ignored volatility.
+    "default_stop_atr_mult": 0.0,
 }
 
 # Accepted range for each number when saving. Wide on purpose: these are for research.
@@ -52,6 +56,7 @@ RANGES = {
     "daily_loss_pct": (0.0, 100.0),
     "min_margin_level": (0.0, 10000.0),
     "max_pending_distance_pct": (0.0, 100.0),
+    "default_stop_atr_mult": (0.0, 20.0),
 }
 
 MARKET_ACTIONS = frozenset({"BUY", "SELL"})
@@ -79,6 +84,7 @@ class Evaluation:
     risk_amount: Optional[float] = None
     risk_pct: Optional[float] = None
     equity: Optional[float] = None
+    stop_filled: Optional[float] = None   # a stop the gate set, when the order had none
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -216,6 +222,12 @@ def evaluate(order: Dict[str, Any], info: Dict[str, Any], account: Dict[str, Any
 
     # Stop and target placement.
     sl, tp = order.get("sl"), order.get("tp")
+    mult, atr = settings.get("default_stop_atr_mult") or 0, info.get("atr")
+    if not sl and mult and atr:
+        distance = max(mult * atr, info.get("min_stop_distance") or 0.0)
+        sl = round(price - distance if buy else price + distance, digits)
+        ev.stop_filled = sl
+        ev.extra["stop_filled"] = {"atr": round(atr, digits), "mult": mult, "sl": sl}
     if not sl:
         if size_from_risk:
             ev.code, ev.message = "no_stop_loss", "The autopilot sizes each order from its stop loss, and this one has none"
@@ -379,9 +391,25 @@ async def _record(**fields) -> Optional[int]:
 def _decision_fields(order, ev: Evaluation, source, user_id, settings_id, context) -> Dict[str, Any]:
     return dict(user_id=user_id, source=source, action=order.get("action") or "", symbol=order.get("symbol") or "",
                 requested_volume=order.get("volume"), volume=ev.volume, price=ev.price,
-                sl=order.get("sl"), tp=order.get("tp"), stop_distance=ev.stop_distance,
+                sl=ev.stop_filled if ev.stop_filled is not None else order.get("sl"), tp=order.get("tp"),
+                stop_distance=ev.stop_distance,
                 risk_amount=ev.risk_amount, risk_pct=ev.risk_pct, equity=ev.equity,
                 settings_id=settings_id, context={**(context or {}), **ev.extra} or None)
+
+
+async def _atr(symbol: str, period: int = 14) -> Optional[float]:
+    """ATR of the last `period` closed 15-minute candles, for the default stop. None if unavailable."""
+    try:
+        candles = (await connector_client.get_latest_data(symbol, timeframe="15m", count=period + 2)).get("data") or []
+    except ConnectorError as exc:
+        log.warning("No candles for the ATR default stop on %s: %s", symbol, exc.detail)
+        return None
+    if len(candles) < period + 1:
+        return None
+    ranges = []
+    for prev, cur in zip(candles[-period - 1:-1], candles[-period:]):
+        ranges.append(max(cur["high"] - cur["low"], abs(cur["high"] - prev["close"]), abs(cur["low"] - prev["close"])))
+    return sum(ranges) / len(ranges)
 
 
 _lock_state: Dict[str, Any] = {"loop": None, "lock": None}
@@ -437,6 +465,8 @@ async def _submit_order_locked(order, *, source, user_id, context, size_from_ris
             raise
         start_equity = await start_of_day_equity(db, account)
 
+    if not order.get("sl") and settings.get("default_stop_atr_mult"):
+        info = {**info, "atr": await _atr(order["symbol"])}
     ev = evaluate(order, info, account, positions, settings, start_equity, size_from_risk)
     fields = _decision_fields(order, ev, source, user_id, settings_row.id, context)
     if not ev.allowed:
@@ -446,6 +476,8 @@ async def _submit_order_locked(order, *, source, user_id, context, size_from_ris
 
     payload = {k: v for k, v in order.items() if v is not None}
     payload["volume"] = ev.volume
+    if ev.stop_filled is not None:
+        payload["sl"] = ev.stop_filled
     try:
         result = await connector_client.place_order(payload)
     except ConnectorError as exc:

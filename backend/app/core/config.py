@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     # ── Environment ──────────────────────────────────────────────────────────
     # Set APP_ENV=production when deploying. Defaults to "development".
     APP_ENV: str = "development"
+    # Shown in the sidebar and in /health, so two instances running side by side
+    # (for example Version 1 and Version 2) can never be confused.
+    INSTANCE_LABEL: str = "Version 2"
 
     @property
     def is_production(self) -> bool:
@@ -44,6 +47,18 @@ class Settings(BaseSettings):
                 'python -c "import secrets; print(secrets.token_hex(32))"'
             )
 
+    def validate_connector_token(self) -> None:
+        """Raise ValueError if a connector is configured without a token.
+
+        The connector refuses every request without one, so starting anyway would
+        only fail later, on the first trade. (From the upstream branch.)
+        """
+        if self.MT5_CONNECTOR_URL and not self.MT5_API_TOKEN:
+            raise ValueError(
+                "MT5_API_TOKEN must be set when MT5_CONNECTOR_URL is. Use the same value as on the "
+                'connector. Generate one: python -c "import secrets; print(secrets.token_hex(32))"'
+            )
+
     # MT5 connector: the only route to the broker. The terminal to use is chosen
     # on the connector with its own MT5_TERMINAL_PATH, not here.
     MT5_CONNECTOR_URL: str = ""
@@ -56,7 +71,7 @@ class Settings(BaseSettings):
     HF_REPO_ID: str = ""
     HUGGINGFACE_API_KEY: str = ""
 
-    # AI Providers
+    # AI Providers (supports comma-separated keys for automatic fallback)
     NVIDIA_API_KEY: str = ""
     GROQ_API_KEY: str = ""
     OPEN_ROUTER_API_KEY: str = ""
@@ -67,6 +82,9 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     TOKENLB_API_KEY: str = ""
     ZENMUX_API_KEY: str = ""
+    DEEPSEEK_API_KEY: str = ""
+    QWEN_API_KEY: str = ""
+    XAI_API_KEY: str = ""
 
     # Proxies whose X-Forwarded-For header is believed, as addresses or networks
     # separated by commas. Empty means no proxy: the connecting address is used.
@@ -99,18 +117,10 @@ class Settings(BaseSettings):
     # Yahoo Finance (for market data)
     YAHOO_FINANCE_ENABLED: bool = True
     
-    # Telegram, for heartbeat alerts (core/alerts.py). Same names as upstream's
-    # report delivery. Both empty: alerts are only logged and listed on the page.
+    # Telegram: heartbeat alerts (core/alerts.py) and daily/weekly reports.
+    # Both empty: alerts are only logged and listed on the page.
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
-
-    # SMTP / Daily Report Email
-    SMTP_SERVER: str = "smtp.gmail.com"
-    SMTP_PORT: int = 587
-    REPORT_EMAIL: str = ""
-    REPORT_EMAIL_PASSWORD: str = ""
-    REPORT_RECIPIENT_EMAIL: str = ""
-    SENDGRID_API_KEY: str = ""
 
     # Extra fields from .env (legacy/compat)
     PASSWORD: str = ""

@@ -7,15 +7,16 @@ limits in force and is the only code that sends them. Closing is never blocked.
 """
 import logging
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import select
 
+from ..core.config import settings
 from ..core.database import AsyncSessionLocal
 from ..core.mt5_connector import ConnectorError, connector_client
 from ..core.risk import RiskRefused, check_modify, submit_order
-from ..models.ai_memory import PositionAudit, TradeRecord
+from ..models.ai_memory import ChatMemory, PositionAudit, TradeRecord
 from ..models.schemas import OrderRequest
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,44 @@ def _as_trade_error(exc: ConnectorError, what: str) -> TradeError:
     return TradeError(f"{what} failed: {exc.detail}", status)
 
 
+async def _resolve_chat_link(
+    user_id: Optional[int], symbol: str, explicit_id: Optional[int]
+) -> Optional[int]:
+    """Attach the AI analysis behind this trade (backlog item A).
+
+    The Execute-Trade button passes chat_memory_id explicitly; Terminal
+    orders don't. Fall back to the user's latest assistant analysis of the
+    same symbol (broker-suffix-insensitive) from the last 24h so every
+    trade_record feeds the RAG profit/feedback scores.
+    """
+    if explicit_id:
+        return explicit_id
+    if not user_id or not symbol:
+        return None
+    base = symbol.split(".")[0].upper()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(ChatMemory.id, ChatMemory.symbol)
+                .where(
+                    ChatMemory.user_id == user_id,
+                    ChatMemory.role == "assistant",
+                    ChatMemory.created_at >= cutoff,
+                )
+                .order_by(ChatMemory.created_at.desc())
+                .limit(100)
+            )
+            for cid, chat_symbol in result.all():
+                if (chat_symbol or "").split(".")[0].upper() == base:
+                    return cid
+    except Exception:
+        logger.warning(
+            f"Chat link lookup failed for {symbol}:\n{traceback.format_exc()}"
+        )
+    return None
+
+
 async def place_order(order: OrderRequest, user_id: Optional[int]) -> dict:
     if order.action not in VALID_ACTIONS:
         raise TradeError(f"Invalid action: {order.action}")
@@ -53,6 +92,8 @@ async def place_order(order: OrderRequest, user_id: Optional[int]) -> dict:
 
     source = "ai_analyst" if order.chat_memory_id else "terminal"
     context = {"chat_memory_id": order.chat_memory_id} if order.chat_memory_id else None
+    # A Terminal order is linked to the user's latest analysis of the symbol, if any.
+    chat_id = await _resolve_chat_link(user_id, order.symbol, order.chat_memory_id)
     try:
         result = await submit_order(payload, source=source, user_id=user_id, context=context)
     except RiskRefused as exc:
@@ -76,7 +117,7 @@ async def place_order(order: OrderRequest, user_id: Optional[int]) -> dict:
                 mt5_ticket=result.get("ticket"),
                 executed_at=datetime.now(timezone.utc),
                 comment=order.comment,
-                ai_message=str(order.chat_memory_id) if order.chat_memory_id else None,
+                ai_message=str(chat_id) if chat_id else None,
             ))
             await db.commit()
     except Exception:

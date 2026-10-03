@@ -100,3 +100,5 @@ MANDATORY RULES:
 
 Output ONLY the code block enclosed in ```python ... ```, no explanations.
 """
+
+# ─── Default SL/TP ──────────────────────────────────────────────────────────
