@@ -34,6 +34,8 @@ the colleague's branch in `UPSTREAM_COMPARISON.md`.
 - Next: deploying Version 2 live next to Version 1 for a side-by-side comparison.
   Not started. Needs the user's go-ahead to touch the live servers, a separate demo
   MT5 account and database for Version 2, HTTPS, and a private connector link.
+  The step-by-step plan for that is `V2_TEST_DEPLOYMENT.md`, written for an
+  assistant guiding the person on the server.
 
 ## Step 13 as approved (now built)
 
