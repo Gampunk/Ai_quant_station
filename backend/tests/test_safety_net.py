@@ -225,6 +225,7 @@ async def test_a_connector_outage_alerts_once_and_recovery_once(sent, monkeypatc
     [recovered] = await beat.check_once()
     assert recovered.state == "up"
     assert len(sent) == 2 and "unreachable" in sent[0] and "back" in sent[1]
+    assert all(settings.INSTANCE_LABEL in m for m in sent), "alerts must name the instance"
     db_session.expire_all()
     rows = (await db_session.execute(select(Alert).order_by(Alert.id))).scalars().all()
     assert [(r.check, r.state, r.delivered) for r in rows] == [("connector", "down", True), ("connector", "up", True)]

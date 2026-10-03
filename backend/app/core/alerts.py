@@ -39,7 +39,8 @@ async def raise_alert(check: str, state: str, message: str) -> Alert:
     """Record, log and send one alert. state is "down" when a check starts failing, "up" when it recovers."""
     (log.error if state == "down" else log.info)("[%s] %s: %s", check, state.upper(), message)
     icon = "🔴" if state == "down" else "🟢"
-    delivered = await send_telegram(f"{icon} Impulse Analyst: {message}")
+    # Named, so alerts from two instances running side by side are never confused.
+    delivered = await send_telegram(f"{icon} {settings.INSTANCE_LABEL}: {message}")
     async with AsyncSessionLocal() as db:
         row = Alert(check=check, state=state, message=message, delivered=delivered)
         db.add(row)

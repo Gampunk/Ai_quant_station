@@ -723,7 +723,7 @@ async def _send_telegram(filepath: str, summary: dict, report_type: str = "Daily
 
     # Build message text
     text = (
-        f"*AI Quant Station — {report_type} Trade Report*\n"
+        f"*AI Quant Station ({settings.INSTANCE_LABEL}) — {report_type} Trade Report*\n"
         f"_{_day_name()}_\n\n"
         f"*{performance_label}*\n"
         f"  Total Trades: {summary['total_trades']}\n"

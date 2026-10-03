@@ -33,3 +33,8 @@ def test_no_connector_address_is_written_in_the_scripts():
     for script in (SCRIPT, SCRIPT.parent / "generate_master_report.py"):
         text = script.read_text()
         assert not re.search(r'CONNECTOR_URL\s*=\s*(os\.getenv\([^)]*,\s*)?"http', text), script.name
+
+
+def test_every_message_names_the_instance():
+    [message] = monitor.run({}, {"backend": (False, "Backend down")})
+    assert monitor.LABEL in message

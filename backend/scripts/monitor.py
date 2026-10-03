@@ -14,6 +14,8 @@ Settings, from the environment (the systemd unit reads backend/.env):
     MT5_API_TOKEN         sent to the connector, which refuses requests without it
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
     MONITOR_STATE_FILE    default /var/lib/impulse-monitor/state.json
+    MONITOR_SERVICE_NAME  the systemd service to check, default impulse-analyst
+    INSTANCE_LABEL        named in every message, default "Version 2"
 """
 import json
 import os
@@ -27,6 +29,8 @@ CONNECTOR_TOKEN = os.getenv("MT5_API_TOKEN", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 STATE_FILE = os.getenv("MONITOR_STATE_FILE", "/var/lib/impulse-monitor/state.json")
+SERVICE_NAME = os.getenv("MONITOR_SERVICE_NAME", "impulse-analyst")
+LABEL = os.getenv("INSTANCE_LABEL", "Version 2")
 
 
 def _send_alert(text: str) -> None:
@@ -66,10 +70,10 @@ def check_connector() -> tuple[bool, str]:
 
 def check_systemd() -> tuple[bool, str]:
     try:
-        r = subprocess.run(["systemctl", "is-active", "impulse-analyst"], capture_output=True, text=True)
+        r = subprocess.run(["systemctl", "is-active", SERVICE_NAME], capture_output=True, text=True)
     except FileNotFoundError:
         return True, ""  # not a systemd machine
-    return r.stdout.strip() == "active", "The impulse-analyst service is not running"
+    return r.stdout.strip() == "active", f"The {SERVICE_NAME} service is not running"
 
 
 def _load_state() -> dict:
@@ -95,9 +99,9 @@ def run(state: dict, checks: dict) -> list[str]:
     for name, (ok, failing) in checks.items():
         was_down = state.get(name) == "down"
         if not ok and not was_down:
-            messages.append(f"🔴 Impulse Analyst: {failing}")
+            messages.append(f"🔴 {LABEL}: {failing}")
         elif ok and was_down:
-            messages.append(f"🟢 Impulse Analyst: {name} recovered")
+            messages.append(f"🟢 {LABEL}: {name} recovered")
         state[name] = "up" if ok else "down"
     return messages
 
