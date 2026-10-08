@@ -178,6 +178,7 @@ def fake_broker():
 
 
 async def test_with_no_ai_key_the_log_says_so(fake_broker, monkeypatch, db_session):
+    monkeypatch.setattr(settings, "AUTOPILOT_DECISION_MODE", "code")
     monkeypatch.setattr(settings, "MT5_CONNECTOR_URL", fake_broker)
     monkeypatch.setattr(settings, "MT5_API_TOKEN", "")
     await connector_client.initialize()
@@ -266,6 +267,7 @@ def _fake_ai(calls):
 
 
 async def _one_gemini_cycle(fake_broker, monkeypatch, db_session, chosen_model):
+    monkeypatch.setattr(settings, "AUTOPILOT_DECISION_MODE", "code")
     monkeypatch.setattr(settings, "MT5_CONNECTOR_URL", fake_broker)
     monkeypatch.setattr(settings, "MT5_API_TOKEN", "")
     await connector_client.initialize()
@@ -329,7 +331,8 @@ def _scripted_ai(calls, replies):
     return FakeClient
 
 
-async def _scripted_cycle(fake_broker, monkeypatch, db_session, replies):
+async def _scripted_cycle(fake_broker, monkeypatch, db_session, replies, mode="code"):
+    monkeypatch.setattr(settings, "AUTOPILOT_DECISION_MODE", mode)
     monkeypatch.setattr(settings, "MT5_CONNECTOR_URL", fake_broker)
     monkeypatch.setattr(settings, "MT5_API_TOKEN", "")
     await connector_client.initialize()
@@ -382,3 +385,103 @@ async def test_a_busy_provider_ends_the_cycle_instead_of_piling_on(fake_broker, 
     assert len(calls) <= 3, calls
     assert any("busy" in m for m in messages), messages[-6:]
     assert not any(m.startswith("Backup:") for m in messages), "the backup must not run while the provider is busy"
+
+
+# ── Brief mode: one AI call picks from the backend's shortlist (Part 2) ─────
+import json  # noqa: E402
+import re  # noqa: E402
+
+from sqlalchemy import select  # noqa: E402
+
+from app.models.ai_memory import AutopilotCycle  # noqa: E402
+
+
+def _brief_ai(calls, answer):
+    """A fake AI that reads the brief and answers with `answer(price, strategy_ids)`."""
+    class Completions:
+        async def create(self, model, messages, **kwargs):
+            text = messages[-1]["content"]
+            calls.append(text)
+            price = float(re.search(r"^Price: ([\d.]+)", text, re.M).group(1))
+            ids = re.findall(r"^STRATEGY (\S+) \(", text, re.M)
+            reply = answer(price, ids)
+            if isinstance(reply, Exception):
+                raise reply
+            message = SimpleNamespace(content=reply)
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=Completions())
+    return FakeClient
+
+
+async def _brief_cycle(fake_broker, monkeypatch, db_session, answer):
+    monkeypatch.setattr(settings, "AUTOPILOT_DECISION_MODE", "brief")
+    monkeypatch.setattr(settings, "MT5_CONNECTOR_URL", fake_broker)
+    monkeypatch.setattr(settings, "MT5_API_TOKEN", "")
+    await connector_client.initialize()
+    models_cache._blacklist.clear()
+
+    async def keys(provider, *args, **kwargs):
+        return ["test-key"] if provider == "gemini" else []
+    monkeypatch.setattr(providers, "resolve_all_api_keys", keys)
+
+    async def instant(*args, **kwargs):
+        return None
+    monkeypatch.setattr(autopilot.asyncio, "sleep", instant)
+    calls = []
+    monkeypatch.setattr(autopilot, "AsyncOpenAI", _brief_ai(calls, answer))
+
+    db_session.add(AutopilotSettings(user_id=1, symbol="XAUUSD", provider="gemini", model="chat-model"))
+    await db_session.commit()
+    autopilot._user_states.pop(1, None)
+    await autopilot.run_autopilot_cycle(1)
+    messages = [entry["message"] for entry in autopilot._get_state(1)["logs"]]
+    db_session.expire_all()
+    cycle = (await db_session.execute(select(AutopilotCycle).order_by(AutopilotCycle.cycle_number.desc()))).scalars().first()
+    autopilot._user_states.pop(1, None)
+    for p in (await connector_client.get_positions()).get("positions", []):
+        await connector_client.close_position(p["ticket"])
+    return calls, messages, cycle
+
+
+def _second_choice_buy(price, ids):
+    return json.dumps({"decision": "TRADE_SETUP", "strategy_id": ids[1], "direction": "BUY", "order_type": "market",
+                       "entry_price": price, "stop_loss": round(price - 8, 2), "take_profit": round(price + 16, 2),
+                       "confidence": 72, "reasoning": "pullback to EMA20 held"})
+
+
+async def test_one_call_with_a_small_brief_places_the_ais_choice(fake_broker, monkeypatch, db_session):
+    calls, messages, cycle = await _brief_cycle(fake_broker, monkeypatch, db_session, _second_choice_buy)
+    assert len(calls) == 1, f"{len(calls)} AI calls in one cycle"
+    assert len(calls[0]) < 8000, f"the brief was {len(calls[0])} characters"
+    assert len(re.findall(r"^STRATEGY ", calls[0], re.M)) == settings.AUTOPILOT_SHORTLIST
+    assert cycle.outcome == "trade_executed", (cycle.outcome, cycle.outcome_reason, messages[-6:])
+    choice = cycle.selection_context["ai_choice"]
+    assert choice["chose_top_ranked"] is False and choice["strategy_id"] == str(cycle.prompt_number)
+    assert cycle.selection_context["signals"]["session"] in ("asia", "london", "overlap", "new_york", "after_hours")
+    assert any(m.startswith("AI chose Strategy") and "ranked below" in m for m in messages)
+
+
+async def test_brief_no_setup_records_the_reason(fake_broker, monkeypatch, db_session):
+    answer = lambda price, ids: json.dumps({"decision": "NO_SETUP", "strategy_id": ids[0],  # noqa: E731
+                                            "reasoning": "price is mid-range"})
+    calls, messages, cycle = await _brief_cycle(fake_broker, monkeypatch, db_session, answer)
+    assert len(calls) == 1 and cycle.outcome == "no_setup"
+    assert cycle.selection_context["ai_choice"]["reasoning"] == "price is mid-range"
+
+
+async def test_brief_refuses_a_strategy_not_on_the_shortlist(fake_broker, monkeypatch, db_session):
+    def answer(price, ids):
+        return json.dumps({"decision": "TRADE_SETUP", "strategy_id": "999", "direction": "BUY",
+                           "stop_loss": price - 8, "take_profit": price + 16})
+    _, messages, cycle = await _brief_cycle(fake_broker, monkeypatch, db_session, answer)
+    assert cycle.outcome == "ai_provider_or_response_failed"
+    assert (await connector_client.get_positions())["positions"] == []
+
+
+async def test_brief_with_a_busy_provider_waits_for_the_next_cycle(fake_broker, monkeypatch, db_session):
+    busy = RuntimeError("Error code: 429 - RESOURCE_EXHAUSTED")
+    calls, _, cycle = await _brief_cycle(fake_broker, monkeypatch, db_session, lambda price, ids: busy)
+    assert cycle.outcome == "ai_provider_busy" and len(calls) <= 2

@@ -14,6 +14,13 @@ class Settings(BaseSettings):
     # (for example Version 1 and Version 2) can never be confused.
     INSTANCE_LABEL: str = "Version 2"
 
+    # How the autopilot decides. "brief": the backend measures the market
+    # (core/market_signals), shortlists AUTOPILOT_SHORTLIST prompts by their labels,
+    # and one AI call picks a prompt and returns the setup. "code": the older way,
+    # where the AI gets 200-300 candles and writes analysis code, several calls a cycle.
+    AUTOPILOT_DECISION_MODE: str = "brief"
+    AUTOPILOT_SHORTLIST: int = 3
+
     @property
     def is_production(self) -> bool:
         return self.APP_ENV.lower() == "production"

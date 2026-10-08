@@ -66,7 +66,9 @@ def quiet_loop(monkeypatch):
     state = autopilot._get_state(USER_ID)
     state.update(enabled=True, running=True, paused_day=None, last_trade_time=None)
     state["stats"].update(paused_reason=None, stopped_reason=None, error_count=0)
-    return calls
+    yield calls
+    # Leave no running autopilot behind: later tests expect it off.
+    autopilot._user_states.pop(USER_ID, None)
 
 
 async def _settings(db, **values):

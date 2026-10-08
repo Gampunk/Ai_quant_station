@@ -1,0 +1,1692 @@
+{
+ "_about": "Labels for prompt_list.txt. Draft with scripts/draft_prompt_labels.py, review in prompt_labels.csv, store with its import command.",
+ "prompts": {
+  "1": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "2": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "3": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "4": {
+   "styles": [
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "5": {
+   "styles": [
+    "mean_reversion",
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "6": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "7": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "8": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "1h",
+    "4h"
+   ],
+   "direction": "both",
+   "reviewed": false
+  },
+  "9": {
+   "styles": [
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "10": {
+   "styles": [
+    "breakout",
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [
+    "1h"
+   ],
+   "direction": "both",
+   "reviewed": false
+  },
+  "11": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "1h"
+   ],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "12": {
+   "styles": [
+    "mean_reversion",
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "13": {
+   "styles": [
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "14": {
+   "styles": [
+    "breakout",
+    "range"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "15": {
+   "styles": [
+    "momentum",
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "16": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [
+    "1h",
+    "4h"
+   ],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "17": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "18": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [
+    "1h",
+    "4h"
+   ],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "19": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "20": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "asia",
+    "london"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "21": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "22": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "23": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [
+    "1h",
+    "4h"
+   ],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "24": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "25": {
+   "styles": [
+    "mean_reversion",
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "26": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [
+    "1h",
+    "4h"
+   ],
+   "direction": "both",
+   "reviewed": false
+  },
+  "27": {
+   "styles": [
+    "breakout",
+    "range"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "28": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "29": {
+   "styles": [
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "30": {
+   "styles": [
+    "mean_reversion",
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "31": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "1h"
+   ],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "32": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "33": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "34": {
+   "styles": [
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "35": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "36": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [
+    "1h",
+    "4h"
+   ],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "37": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "38": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "39": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "40": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "41": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "42": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "43": {
+   "styles": [
+    "momentum",
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "44": {
+   "styles": [
+    "breakout",
+    "range"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "45": {
+   "styles": [
+    "momentum",
+    "range"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "46": {
+   "styles": [
+    "breakout",
+    "momentum",
+    "range"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "47": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "48": {
+   "styles": [
+    "breakout",
+    "range"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "49": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "50": {
+   "styles": [
+    "breakout",
+    "momentum",
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "51": {
+   "styles": [
+    "breakout",
+    "range"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "both",
+   "reviewed": false
+  },
+  "52": {
+   "styles": [
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "4h",
+    "1d"
+   ],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "53": {
+   "styles": [
+    "breakout",
+    "range"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "54": {
+   "styles": [
+    "breakout"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "55": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "56": {
+   "styles": [
+    "momentum",
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "57": {
+   "styles": [
+    "breakout",
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "58": {
+   "styles": [
+    "breakout",
+    "range"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "59": {
+   "styles": [
+    "breakout",
+    "mean_reversion",
+    "range"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "60": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "both",
+   "reviewed": false
+  },
+  "61": {
+   "styles": [
+    "mean_reversion"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [
+    "1h"
+   ],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "62": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "1h"
+   ],
+   "direction": "both",
+   "reviewed": false
+  },
+  "63": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "1h"
+   ],
+   "direction": "both",
+   "reviewed": false
+  },
+  "64": {
+   "styles": [
+    "momentum"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "65": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "66": {
+   "styles": [
+    "momentum"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "67": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "68": {
+   "styles": [
+    "breakout"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "69": {
+   "styles": [
+    "mean_reversion"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "70": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "71": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "72": {
+   "styles": [
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "1h"
+   ],
+   "direction": "both",
+   "reviewed": false
+  },
+  "73": {
+   "styles": [
+    "mean_reversion",
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "both",
+   "reviewed": false
+  },
+  "74": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "75": {
+   "styles": [
+    "momentum"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "76": {
+   "styles": [
+    "mean_reversion",
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "77": {
+   "styles": [
+    "breakout",
+    "range"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "78": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "79": {
+   "styles": [
+    "breakout",
+    "range"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "80": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "1h"
+   ],
+   "direction": "both",
+   "reviewed": false
+  },
+  "81": {
+   "styles": [
+    "mean_reversion",
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "london"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "82": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "1h",
+    "4h",
+    "1d"
+   ],
+   "direction": "both",
+   "reviewed": false
+  },
+  "83": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "84": {
+   "styles": [
+    "mean_reversion",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "1h",
+    "4h",
+    "1d"
+   ],
+   "direction": "both",
+   "reviewed": false
+  },
+  "85": {
+   "styles": [
+    "mean_reversion",
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "86": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "87": {
+   "styles": [
+    "scalping",
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "15m",
+    "4h",
+    "1d"
+   ],
+   "direction": "both",
+   "reviewed": false
+  },
+  "88": {
+   "styles": [
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "1h",
+    "4h",
+    "1d"
+   ],
+   "direction": "buy",
+   "reviewed": false
+  },
+  "89": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "1h",
+    "4h"
+   ],
+   "direction": "sell",
+   "reviewed": false
+  },
+  "90": {
+   "styles": [
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "91": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "92": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "93": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "1h"
+   ],
+   "direction": "both",
+   "reviewed": false
+  },
+  "94": {
+   "styles": [
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "95": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "96": {
+   "styles": [
+    "breakout"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "97": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "98": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "99": {
+   "styles": [
+    "general"
+   ],
+   "market": "any",
+   "sessions": [
+    "overlap"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": false
+  },
+  "100": {
+   "styles": [
+    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "1h",
+    "4h",
+    "1d"
+   ],
+   "direction": "both",
+   "reviewed": false
+  }
+ }
+}

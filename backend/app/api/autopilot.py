@@ -366,6 +366,71 @@ def _classify_exit_reason(close_deals: list[dict], profit: float):
     return classification, exit_reason, source
 
 
+BRIEF_SYSTEM = """You are a disciplined quant trader. The backend has already measured the market
+and shortlisted the strategies that fit it best. Your job: pick the ONE strategy whose conditions
+are actually met by the brief, and either give a precise trade setup for it or say there is none.
+Rules:
+- Use only the numbers in the brief. Do not invent prices or indicators.
+- The stop loss is required: beyond a nearby swing level, about 1 to 1.5 ATR from entry.
+- The take profit must be at least 1.5 times the stop distance.
+- If no strategy's conditions are clearly met, answer NO_SETUP. No trade is better than a forced one.
+- Answer with ONE JSON object and nothing else."""
+
+
+def _brief_user_message(symbol: str, signals: dict, shortlist_items: list[dict]) -> str:
+    from ..core.market_signals import brief_text
+    menu = []
+    for item in shortlist_items:
+        tags = item["tags"]
+        label = ", ".join(f"{k}: {tags[k] if isinstance(tags[k], str) else '/'.join(tags[k])}"
+                          for k in ("styles", "market", "sessions", "volatility", "direction") if tags.get(k))
+        menu.append(f"STRATEGY {item['prompt']['id']} (backend fit score {item['score']}; {label}):\n{item['prompt']['text']}")
+    return (brief_text(symbol, signals) + "\n\nSHORTLISTED STRATEGIES:\n\n" + "\n\n".join(menu) + """
+
+Answer with exactly one JSON object:
+{"decision": "TRADE_SETUP" or "NO_SETUP",
+ "strategy_id": the id of the strategy you used (required in both cases),
+ "direction": "BUY" or "SELL", "order_type": "market", "limit" or "stop",
+ "entry_price": number (for market orders, the current price), "stop_loss": number, "take_profit": number,
+ "confidence": 0-100, "reasoning": "which conditions of the strategy the brief meets, with the numbers"}
+For NO_SETUP give only decision, strategy_id and reasoning.""")
+
+
+def _parse_brief_decision(reply: str, allowed_ids: list[str], price: float) -> dict:
+    """The AI's answer to the brief, checked. kind is trade, no_setup or invalid (with a reason)."""
+    match = re.search(r"\{.*\}", reply or "", re.S)
+    if not match:
+        return {"kind": "invalid", "reason": "no JSON object in the reply"}
+    try:
+        obj = json.loads(match.group(0))
+    except json.JSONDecodeError as e:
+        return {"kind": "invalid", "reason": f"unreadable JSON: {e}"}
+    sid = str(obj.get("strategy_id", "")).strip().lstrip("#")
+    decision = str(obj.get("decision", "")).upper()
+    reasoning = str(obj.get("reasoning", ""))[:2000]
+    if decision == "NO_SETUP":
+        return {"kind": "no_setup", "strategy_id": sid if sid in allowed_ids else None, "reasoning": reasoning}
+    if decision != "TRADE_SETUP":
+        return {"kind": "invalid", "reason": f"decision was {obj.get('decision')!r}"}
+    if sid not in allowed_ids:
+        return {"kind": "invalid", "reason": f"strategy {sid!r} was not on the shortlist {allowed_ids}"}
+    direction = str(obj.get("direction", "")).upper()
+    order_type = str(obj.get("order_type", "market")).lower()
+    if direction not in ("BUY", "SELL") or order_type not in ("market", "limit", "stop"):
+        return {"kind": "invalid", "reason": f"direction {direction!r} / order type {order_type!r}"}
+    try:
+        sl = float(obj["stop_loss"])
+        tp = float(obj["take_profit"]) if obj.get("take_profit") not in (None, "") else None
+        entry = float(obj.get("entry_price") or price) if order_type != "market" else price
+        confidence = int(float(obj.get("confidence", 50)))
+    except (KeyError, TypeError, ValueError) as e:
+        return {"kind": "invalid", "reason": f"missing or non-numeric level: {e}"}
+    return {"kind": "trade", "strategy_id": sid, "setup": {
+        "action": "TRADE_SETUP", "direction": direction, "order_type": order_type,
+        "entry_price": entry, "stop_loss": sl, "take_profit": tp,
+        "confidence": confidence, "reasoning": reasoning}}
+
+
 def _parse_trade_setup(output: str):
     """A TRADE_SETUP from sandbox output: a ```json block, or a JSON line. None if absent."""
     jm = re.search(r'```json\n?(.*?)```', output or "", re.DOTALL)
@@ -893,8 +958,18 @@ async def _choose_prompt_with_context(
     prompt_pool: list[dict],
     symbol: str,
     market_regime: dict,
-) -> tuple[dict, dict]:
-    """Choose prompts using regime fit and this user's outcomes in this regime."""
+    signals: dict | None = None,
+    labels: dict | None = None,
+    shortlist: int = 0,
+):
+    """Rank prompts by regime fit, label fit and this user's outcomes in this regime.
+
+    With shortlist=0 one prompt is drawn at random, weighted by score (the code
+    path). With shortlist=k the top k are returned, in order, for the AI to choose
+    from (the brief path): deterministic, so the record shows exactly why each was there.
+    `labels` are the stored prompt labels; `signals` the backend's market signals.
+    """
+    from ..core import prompt_labels as _labels
     from ..core.strategy_scorer import MIN_TRADES_FOR_BEST
 
     history_by_prompt: dict[str, dict] = {}
@@ -930,9 +1005,17 @@ async def _choose_prompt_with_context(
 
     ranked = []
     for prompt in prompt_pool:
-        tags = _infer_prompt_tags(prompt["text"])
+        stored = None if prompt["is_custom"] else (labels or {}).get(str(prompt["id"]))
+        if stored:
+            tags = {**stored, "avoid_when": _infer_prompt_tags(prompt["text"])["avoid_when"], "labelled": True}
+        else:
+            tags = _infer_prompt_tags(prompt["text"])
         regime_score, fit_reasons = _score_prompt_regime_fit(tags, market_regime)
         score = 50.0 + regime_score
+        if signals:
+            label_score, label_reasons = _labels.fit(stored or _labels.draft_by_keyword(prompt["text"]), signals)
+            score += label_score
+            fit_reasons = fit_reasons + label_reasons
         history_reasons = []
 
         recent = history_by_prompt.get(prompt["text"])
@@ -965,6 +1048,18 @@ async def _choose_prompt_with_context(
         })
 
     ranked.sort(key=lambda item: item["score"], reverse=True)
+    if shortlist:
+        top = ranked[:shortlist]
+        return top, {
+            "selection_mode": "shortlist_for_ai",
+            "market_regime": market_regime,
+            "signals": {k: v for k, v in (signals or {}).items() if k != "recent_candles"},
+            "candidate_count": len(ranked),
+            "shortlist": [{"id": item["prompt"]["id"], "is_custom": item["prompt"]["is_custom"],
+                           "score": item["score"], "tags": item["tags"], "reasons": item["reasons"]}
+                          for item in top],
+            "labelled_prompts": sum(1 for item in ranked if item["tags"].get("labelled")),
+        }
     weighted = []
     for item in ranked:
         weighted.extend([item] * item["weight"])
@@ -1116,12 +1211,35 @@ async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
         ),
     )
 
-    chosen, decision_context = await _choose_prompt_with_context(
-        user_id=user_id,
-        prompt_pool=prompt_pool,
-        symbol=symbol,
-        market_regime=market_regime,
-    )
+    brief_mode = settings.AUTOPILOT_DECISION_MODE.lower() == "brief"
+    signals: dict = {}
+    shortlist_items: list[dict] = []
+    if brief_mode:
+        # The backend measures the market and shortlists the prompts that fit;
+        # one AI call then picks among them (see _brief_user_message).
+        from ..core import market_signals, prompt_labels
+        signals = market_signals.compute_signals(baseline_market_data or [], market_regime,
+                                                 datetime.now(timezone.utc), timeframe="15m")
+        shortlist_items, decision_context = await _choose_prompt_with_context(
+            user_id=user_id, prompt_pool=prompt_pool, symbol=symbol, market_regime=market_regime,
+            signals=signals, labels=prompt_labels.load(), shortlist=max(1, settings.AUTOPILOT_SHORTLIST),
+        )
+        chosen = shortlist_items[0]["prompt"]  # provisional, until the AI picks
+        decision_context["selected_score"] = shortlist_items[0]["score"]
+        decision_context["selected_tags"] = shortlist_items[0]["tags"]
+        if signals.get("ok"):
+            add_log(user_id, f"Signals: session {signals['session']}, volatility {signals['volatility']['label']}, "
+                             f"volume {signals['volume']['label']} ({signals['volume']['ratio']}), "
+                             f"RSI {signals['momentum']['rsi14']}, price {signals['price']}")
+        add_log(user_id, "Shortlist for the AI: " + ", ".join(
+            f"#{item['prompt']['id']} ({item['score']})" for item in shortlist_items))
+    else:
+        chosen, decision_context = await _choose_prompt_with_context(
+            user_id=user_id,
+            prompt_pool=prompt_pool,
+            symbol=symbol,
+            market_regime=market_regime,
+        )
 
     prompt_id_val = chosen["id"]
     prompt_text = chosen["text"]
@@ -1134,10 +1252,11 @@ async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
     selected_score = decision_context.get("selected_score")
     selected_tags = decision_context.get("selected_tags", {})
     selected_styles = ",".join(selected_tags.get("styles") or ["general"])
-    add_log(
-        user_id,
-        f"Using Strategy {display_id} | score={selected_score} | styles={selected_styles}: {prompt_text[:50]}...",
-    )
+    if not brief_mode:
+        add_log(
+            user_id,
+            f"Using Strategy {display_id} | score={selected_score} | styles={selected_styles}: {prompt_text[:50]}...",
+        )
     prompt_version = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
     await _update_autopilot_cycle(
         cycle_id,
@@ -1374,570 +1493,639 @@ async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
             _ai_failure["reason"] = "no provider answered"
         return None, None, None
 
-    # Detect required timeframe from prompt text and fetch from MT5 directly
-    def _detect_timeframe(text: str) -> tuple:
-        """Return (mt5_timeframe, candle_count) based on prompt.
-        Check more specific (M15, M5) before broader (H1, H4, D1) to avoid
-        catching reference levels (e.g. 'H1 resistance') instead of the
-        actual analysis timeframe (e.g. 'M15').
-        """
-        lower = text.lower()
-        # Check shorter (more granular) timeframes FIRST.
-        # For multi-TF prompts ("H4 trend, H1 entry"), this detects the LOWEST TF
-        # so the AI gets granular data and can resample UP to higher TFs if needed.
-        if re.search(r'\b(?:m15|15m|15[-\s]?min(?:ute)?s?\b)', lower):
-            return ("15m", 500)
-        if re.search(r'\b(?:m5|5m|5[-\s]?min(?:ute)?s?\b)', lower):
-            return ("5m", 500)
-        if re.search(r'\b(?:m1|1m|1[-\s]?min(?:ute)?s?\b)', lower):
-            return ("1m", 500)
-        if re.search(r'\b(?:m30|30m|30[-\s]?min(?:ute)?s?\b)', lower):
-            return ("30m", 500)
-        if re.search(r'\b1[-\s]?(?:h|hour)\b|one[-\s]?hour|hourly|h1\b|1hrs?\b', lower):
-            return ("1h", 300)
-        if re.search(r'\b4[-\s]?(?:h|hour)\b|four[-\s]?hour|h4\b|4hrs?\b', lower):
-            return ("4h", 200)
-        if re.search(r'\b1[-\s]?(?:d|day|w|week)\b|daily|weekly|d1|w1|previous\s*day|yesterday', lower):
-            return ("1d", 200)
-        return ("4h", 200)  # default: 4H for swing trading
-
-    tf, count = _detect_timeframe(prompt_text)
-    market_data = await get_market_data(user_id, symbol, timeframe=tf, count=count)
-    if not market_data or len(market_data) == 0:
-        add_log(user_id, "No market data available", "ERROR")
-        state["stats"]["error_count"] += 1
-        await _finish_autopilot_cycle(
-            user_id, cycle_id, "no_market_data", f"No {tf} candle data available",
-            market_timeframe=tf, candles_loaded=0,
+    if brief_mode:
+        # ── One AI call: the market brief plus the shortlist. ─────────────────
+        setup = None
+        saw_no_setup = False
+        _source = "brief"
+        _last_usage = None
+        full_raw_response = None
+        ai_response = ""
+        atr_value = float((signals.get("volatility") or {}).get("atr") or 0.0)
+        if not signals.get("ok"):
+            add_log(user_id, f"Not enough market data for the brief ({signals.get('reason')}). Skipping.", "WARNING")
+            state["stats"]["skipped_count"] += 1
+            await _finish_autopilot_cycle(user_id, cycle_id, "no_market_data", signals.get("reason"))
+            return
+        allowed_ids = [str(item["prompt"]["id"]) for item in shortlist_items]
+        brief_message = _brief_user_message(symbol, signals, shortlist_items)
+        add_log(user_id, f"AI brief: {len(brief_message)} characters, {len(allowed_ids)} strategies, one call")
+        reply, _last_usage, full_raw_response = await _call_ai_with_retry(
+            messages=[{"role": "system", "content": BRIEF_SYSTEM}, {"role": "user", "content": brief_message}],
+            provider=provider, model=model, max_retries=2, stage="brief",
         )
-        return
-    await _update_autopilot_cycle(cycle_id, market_timeframe=tf, candles_loaded=len(market_data))
-    market_data_hash = hashlib.sha256(
-        json.dumps(market_data, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    await _update_autopilot_cycle(cycle_id, market_data_hash=market_data_hash)
-    add_log(user_id, f"Loaded {len(market_data)} {tf} candles for {symbol}")
-
-    # ── Compute ATR for SL/TP sizing ──
-    atr_value = 0.0
-    avg_atr_20 = 0.0
-    try:
-        df_atr = pd.DataFrame(market_data)
-        if 'high' in df_atr.columns and 'low' in df_atr.columns and 'close' in df_atr.columns:
-            atr_series = ta.volatility.average_true_range(
-                df_atr['high'].astype(float),
-                df_atr['low'].astype(float),
-                df_atr['close'].astype(float),
-                window=14
-            )
-            valid = atr_series.dropna()
-            if len(valid) > 0:
-                atr_value = float(valid.iloc[-1])
-                avg_atr_20 = float(valid.tail(min(20, len(valid))).mean())
-    except Exception as e:
-        add_log(user_id, f"Could not compute ATR, using 0: {e}", "WARNING")
-    add_log(user_id, f"ATR(14): {atr_value:.2f} | Avg(20): {avg_atr_20:.2f}")
-    await _update_autopilot_cycle(cycle_id, atr_14=atr_value, avg_atr_20=avg_atr_20)
-
-    # ── SANDBOX APPROACH ──────────────────────────────────────────────
-    # Instead of dumping raw candle text into the AI prompt, we:
-    # 1. Ask AI to write analysis code (short prompt, ~150 tokens)
-    # 2. Execute the code in sandbox with 1m OHLC data
-    # 3. Parse TRADE_SETUP JSON or NO_SETUP from sandbox output
-    # 4. Self-correct if code fails (up to 2 retries)
-
-    error_feedback = state.get("last_error_feedback")
-    error_section = ""
-    if error_feedback:
-        error_section = f"\nPREVIOUS TRADE ERROR FEEDBACK (learn from this):\n{error_feedback}\n- Adjust stop loss / take profit to be further from entry.\n- Do NOT repeat the same mistake.\n"
-
-    top_candidates = decision_context.get("top_candidates", [])
-    top_candidate_lines = []
-    for item in top_candidates[:3]:
-        styles = ",".join((item.get("tags") or {}).get("styles") or [])
-        top_candidate_lines.append(
-            f"- {item.get('id')}: score={item.get('score')} styles={styles}"
-        )
-    decision_section = f"""
-AUTOPILOT DECISION CONTEXT:
-- Market regime: {market_regime.get('regime')} (trend={market_regime.get('trend')}, volatility={market_regime.get('volatility')}, directional_bias={market_regime.get('direction_bias')})
-- Regime confidence: {market_regime.get('confidence')}%
-- Selected prompt score: {decision_context.get('selected_score')}
-- Selected prompt tags: {json.dumps(decision_context.get('selected_tags', {}))}
-- Selection reasons: {"; ".join(decision_context.get('selected_reasons') or []) or "No historical reasons yet"}
-- Top prompt candidates:
-{chr(10).join(top_candidate_lines) if top_candidate_lines else "- No ranked candidates available"}
-Use this context as guidance.
-"""
-
-    # ── RAG: inject the track record (similar past analyses + best/losing
-    #    strategies for this symbol) so the AI trades on its own history.
-    #    Best-effort: any failure degrades to no-context, never blocks a cycle.
-    rag_section = ""
-    try:
-        from ..core.rag_service import build_rag_context
-        rag_ctx = await build_rag_context(
-            symbol, prompt_text, user_id=user_id, source="autopilot", cycle_id=cycle_id
-        )
-        if rag_ctx:
-            rag_section = f"""
-PAST PERFORMANCE (your own track record on {symbol}):
-{rag_ctx}
-Use this: repeat what worked, propose an alternative to anything listed as underperforming, and do NOT simply re-run losing approaches.
-"""
-            add_log(user_id, f"RAG context attached ({len(rag_ctx)} chars)")
-    except Exception as e:
-        add_log(user_id, f"RAG context unavailable: {e}", "WARNING")
-
-    candle_count = len(market_data)
-    data_warning = ""
-    if candle_count < 100:
-        data_warning = f"\nWARNING: Limited historical data ({candle_count} candles). Indicators with large windows (like SMA 200) will fail. RSI(14), ATR(14), and Bollinger Bands(20) are safe above 30 candles.\n"
-    elif candle_count < 500:
-        data_warning = f"\nNOTE: {candle_count} candles available. SMA 200 may produce NaNs. Use .dropna() before accessing results.\n"
-
-    code_prompt = f"""You are a quant trader. Write Python code to analyze market data.
-
-IMPORTANT RULES:
-0. NEVER write any name with double underscores (no __name__, __main__, __len__, __class__, __import__).
-   Code containing them is rejected before it runs.
-1. Write DIRECT executable statements -- NOT a function definition. The code runs via exec(), NOT by calling a function.
-   WRONG (will produce NO output):
-      def calculate_signals(df): ...
-   RIGHT:
-      rsi = ta.momentum.rsi(df['close'], window=14)
-      print(f"RSI: {{rsi.iloc[-1]:.2f}}")
-
-2. Available libraries in sandbox:
-   - pandas as pd, numpy as np, math, json, datetime
-   - ta (technical-analysis-library-python)
-   - ta.momentum.rsi(close, window=14)
-   - ta.trend.sma_indicator(close, window=200)
-   - ta.trend.ema_indicator(close, window=50)
-   - ta.volatility.average_true_range(high, low, close, window=14)
-   - ta.volatility.bollinger_hband(close, window=20, window_dev=2)
-   - ta.volatility.bollinger_lband(close, window=20, window_dev=2)
-   - ta.momentum.stoch(high, low, close, window=14)
-
-3. The DataFrame `df` is already loaded with {tf.upper()} OHLC data.
-    Columns: open, high, low, close, volume (may be 0 if unavailable), timestamp (datetime).
-    The DataFrame index is also datetime (same as timestamp column).
-    timestamp is ALREADY a datetime object — DO NOT call pd.to_datetime() on it.
-   Use df.tail(N) for last N rows. NEVER use hardcoded indices like df.iloc[13].
-
-   For multi-timeframe analysis, resample df UP to higher TFs:
-     df_4h = df.resample('4h', on='timestamp').agg({{'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}})
-   Aliases: '1h', '4h', '1D' (pandas 3 removed '1H'/'4H' — never use uppercase H or bare 'm').
-   You CANNOT resample DOWN (e.g. 1h → 1m) — that creates fake data.
-
-4. You have THREE possible outputs at the end:
-
-   A) FULL TRADE SETUP — clear setup, good risk-reward (RR >= 1:1.5), confidence 60-95.
-      ```json
-      {{"action": "TRADE_SETUP", "symbol": "{symbol}", "direction": "BUY", "order_type": "market", "entry_price": 0.0, "stop_loss": 0.0, "take_profit": 0.0, "lot_size": {lot_size}, "reasoning": "Brief explanation", "confidence": 75}}
-      ```
-
-   B) REDUCED SETUP — setup exists but lower conviction (RR >= 1:1, confidence 40-59).
-      Use half the standard lot size ({lot_size}/2) and tighter stop.
-      ```json
-      {{"action": "TRADE_SETUP", "symbol": "{symbol}", "direction": "BUY", "order_type": "market", "entry_price": 0.0, "stop_loss": 0.0, "take_profit": 0.0, "lot_size": {lot_size}/2, "reasoning": "Lower conviction: explain why", "confidence": 50}}
-      ```
-
-   C) NO_SETUP — no trade opportunity at all.
-
-   Pick A if confidence >= 60 AND RR >= 1:1.5.
-   Pick B if confidence 40-59 AND RR >= 1:1.
-   Pick C if confidence < 40 or no valid level.
-
-5. After resample() or dropna(), always check len(df) before accessing elements.
-   Do NOT assume the resampled DataFrame has the same row count.
-
-6. NEVER write the double-underscore __ character sequence in your code.
-   ANY code containing __ (like __class__, __dict__, __name__, __version__, __init__)
-   will be REJECTED by the sandbox. This includes debug prints, comments, and strings.
-   If you need to check a type, use type(obj).__name__ is REJECTED — use str(type(obj)) instead.
-
-{data_warning}
-CURRENT VOLATILITY:
-- ATR(14): {atr_value:.2f} | AVG ATR(20): {avg_atr_20:.2f}
-- CRITICAL: Stop loss MUST be within 1.0x to 1.5x ATR distance from entry price, NEVER exceed 30 points.
-  Example: ATR={atr_value:.1f}, entry=4060 → SL must be at {4060-atr_value*1.5:.1f} to {4060+atr_value*1.5:.1f} (NOT at a swing high 80+ pts away).
-- You can compute ATR in your code: atr_14 = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14).iloc[-1]
-- Take profit must give minimum RR of 1:1.5 (TP distance >= 1.5x SL distance).
-- If ATR > 1.5x its 20-period average (high volatility), use tighter stop (1.0x ATR) and reduce lot size by 25%.
-- If ATR < 0.5x its 20-period average (low volatility), normal SL rules apply.
-
-Strategy:
-{prompt_text}
-{rag_section}
-{decision_section}
-{error_section}
-"""
-
-    analysis_prompt_hash = hashlib.sha256(code_prompt.encode("utf-8")).hexdigest()
-    await _update_autopilot_cycle(
-        cycle_id,
-        analysis_prompt_hash=analysis_prompt_hash,
-        rag_context_included=bool(rag_section),
-        rag_context_chars=len(rag_section),
-    )
-
-    add_log(user_id, f"AI prompt: analyze {len(market_data)} {tf} candles for strategy")
-
-    full_raw_response = ""
-
-    # Step 1: AI generates analysis code (with 429 retry + provider fallback)
-    _last_usage = None
-    _source = "sandbox"
-    generated_code, _last_usage, _raw_resp = await _call_ai_with_retry(
-        messages=[{"role": "user", "content": code_prompt}],
-        provider=provider,
-        model=model,
-        max_retries=3,
-        stage="initial",
-    )
-    if _raw_resp:
-        full_raw_response = _raw_resp
-    if not generated_code:
-        add_log(user_id, f"AI code generation failed after retries: {_ai_failure['reason']}", "ERROR")
-        state["stats"]["error_count"] += 1
-        await _finish_autopilot_cycle(user_id, cycle_id, "ai_generation_failed", "No code returned after initial provider retries")
-        return
-    add_log(user_id, f"AI generated code ({len(generated_code)} chars)")
-
-    # Step 2 & 3: Execute in sandbox with self-correction
-    from ..api.execute import run_python_code
-
-    setup = None
-    saw_no_setup = False
-    ai_response = generated_code  # Store generated code as AI response for DB
-    # Build provider failover order: user's pick first, then known-working,
-    # then the rest sorted by reliability.
-    from ..core.providers import get_provider_names as _get_providers
-    _priority = ("cerebras", "github")
-    _all_providers = _get_providers()
-    _remaining = [p for p in _all_providers if p != provider]
-    _known_working = [p for p in _remaining if p in _priority]
-    _others = [p for p in _remaining if p not in _priority]
-    _retry_providers = [provider] + _known_working + _others
-    # Only providers that have a key: asking the rest only fell through to the
-    # one provider that does, multiplying calls to it.
-    from ..core.providers import resolve_all_api_keys as _keys_for
-    _retry_providers = [p for p in dict.fromkeys(_retry_providers)
-                        if p == provider or await _keys_for(p, settings, user_id, AsyncSessionLocal)]
-
-    def _model_for(p: str) -> str:
-        return model if p == provider else PROVIDERS[p]["models"][0]
-
-    _busy = False
-
-    for p_idx, retry_p in enumerate(_retry_providers):
-        # First iteration uses the already-generated code from the initial call.
-        # Subsequent iterations generate new code with the next provider.
-        if _busy:
-            break  # the provider is rate limiting: stop here, the next cycle tries again
-        if p_idx > 0:
-            add_log(user_id, f"Trying provider {retry_p} for code generation...", "INFO")
-            new_code, _last_usage, _raw_resp = await _call_ai_with_retry(
-                messages=[{"role": "user", "content": code_prompt}],
-                provider=retry_p,
-                model=_model_for(retry_p),
-                max_retries=2,
-                stage="failover",
-                single_provider=True,
-            )
-            if _raw_resp:
-                full_raw_response = _raw_resp
-            if _ai_failure.get("rate_limited"):
-                _busy = True
-            if not new_code:
-                add_log(user_id, f"{retry_p} code generation returned nothing ({_ai_failure['reason']}), skipping")
-                continue
-            generated_code = new_code
-            ai_response = generated_code
-
-        # Execute code in sandbox
-        add_log(user_id, f"Executing code from {retry_p} in sandbox...", "INFO")
-        try:
-            sandbox_result = await run_python_code(
-                code=generated_code,
-                market_data=market_data,
-                symbol=symbol,
-                user_id=user_id,
-            )
-        except Exception as e:
-            add_log(user_id, f"Sandbox execution error with {retry_p}: {str(e)}", "ERROR")
-            continue
-
-        if sandbox_result.get("success"):
-            output = sandbox_result.get("output", "")
-
-            # Try parse TRADE_SETUP from output (```json block or raw JSON)
-            jm = re.search(r'```json\n?(.*?)```', output, re.DOTALL)
-            if jm:
-                try:
-                    setup = json.loads(jm.group(1))
-                    add_log(user_id, f"TRADE_SETUP found via {retry_p} (conf={setup.get('confidence')}%)")
-                    break
-                except json.JSONDecodeError:
-                    pass
-
-            if not setup:
-                for line in output.strip().split("\n"):
-                    line = line.strip()
-                    try:
-                        obj = json.loads(line)
-                        if isinstance(obj, dict) and obj.get("action") == "TRADE_SETUP":
-                            setup = obj
-                            break
-                    except json.JSONDecodeError:
-                        pass
-
-            if setup:
-                break
-
-            if "NO_SETUP" in output:
-                # The AI's answer stands. Asking other providers until one says yes
-                # would be shopping for a trade, and costs calls.
-                saw_no_setup = True
-                add_log(user_id, f"{retry_p} says NO_SETUP", "INFO")
-                break
-
-            # Unclear output — try self-correction once with same provider
-            add_log(user_id, f"{retry_p} output unclear, trying self-correction...", "WARNING")
-            corrected, _last_usage, _raw_resp = await _call_ai_with_retry(
-                messages=[
-                    {"role": "user", "content": code_prompt},
-                    {"role": "assistant", "content": generated_code},
-                    {"role": "user", "content": f"The code ran but didn't output a valid TRADE_SETUP or NO_SETUP. Fix it to output exactly one of these formats. Output was:\n{output[:400]}"}
-                ],
-                provider=retry_p,
-                model=_model_for(retry_p),
-                max_retries=2,
-                stage="self_correct",
-                single_provider=True,
-            )
-            if _raw_resp:
-                full_raw_response = _raw_resp
-            if corrected:
-                generated_code = corrected
-                ai_response = generated_code
-                # Execute the corrected code
-                try:
-                    sandbox_result = await run_python_code(
-                        code=generated_code,
-                        market_data=market_data,
-                        symbol=symbol,
-                        user_id=user_id,
-                    )
-                except Exception as e:
-                    add_log(user_id, f"Corrected code from {retry_p} also failed: {str(e)}", "ERROR")
-                    continue
-                if sandbox_result.get("success"):
-                    corrected_output = sandbox_result.get("output", "")
-                    jm2 = re.search(r'```json\n?(.*?)```', corrected_output, re.DOTALL)
-                    if jm2:
-                        try:
-                            setup = json.loads(jm2.group(1))
-                            add_log(user_id, f"TRADE_SETUP found via {retry_p} self-correction (conf={setup.get('confidence')}%)")
-                            break
-                        except json.JSONDecodeError:
-                            pass
-                    if not setup:
-                        for line in corrected_output.strip().split("\n"):
-                            try:
-                                obj = json.loads(line.strip())
-                                if isinstance(obj, dict) and obj.get("action") == "TRADE_SETUP":
-                                    setup = obj
-                                    break
-                            except json.JSONDecodeError:
-                                pass
-                    if setup:
-                        break
-                    if "NO_SETUP" in corrected_output:
-                        saw_no_setup = True
-                        add_log(user_id, f"{retry_p} self-correction says NO_SETUP", "WARNING")
+        if not reply:
+            busy = _ai_failure.get("rate_limited")
+            add_log(user_id, f"AI decision failed: {_ai_failure['reason']}", "WARNING" if busy else "ERROR")
+            if busy:
+                state["stats"]["skipped_count"] += 1
             else:
-                add_log(user_id, f"{retry_p} self-correction failed", "WARNING")
+                state["stats"]["error_count"] += 1
+            await _finish_autopilot_cycle(user_id, cycle_id, "ai_provider_busy" if busy else "ai_generation_failed",
+                                          _ai_failure["reason"])
+            return
+        ai_response = reply
+        decision = _parse_brief_decision(reply, allowed_ids, signals["price"])
+        top_id = allowed_ids[0]
+        if decision["kind"] == "invalid":
+            add_log(user_id, f"AI answer not usable: {decision['reason']}", "WARNING")
+            decision_context["ai_choice"] = {"kind": "invalid", "reason": decision["reason"]}
+            await _update_autopilot_cycle(cycle_id, selection_context=decision_context)
+            state["stats"]["error_count"] += 1
+            await _finish_autopilot_cycle(user_id, cycle_id, "ai_provider_or_response_failed", decision["reason"][:500])
+            return
+        picked_id = decision.get("strategy_id") or top_id
+        picked = next(item for item in shortlist_items if str(item["prompt"]["id"]) == picked_id)
+        chosen = picked["prompt"]
+        prompt_id_val, prompt_text = chosen["id"], chosen["text"]
+        if chosen["is_custom"]:
+            prompt_num = -int(str(prompt_id_val).split('_')[1])
+            display_id = f"Custom-{str(prompt_id_val).split('_')[1]}"
         else:
-            # Sandbox error: give the same AI one chance to fix its code before
-            # moving on. It used to go straight to the next provider.
-            sand_err = sandbox_result.get("error", "Unknown error")[:300]
-            add_log(user_id, f"{retry_p} code error: {sand_err[:200]}. Asking it to fix the code once.", "WARNING")
-            fixed, _last_usage, _raw_resp = await _call_ai_with_retry(
-                messages=[
-                    {"role": "user", "content": code_prompt},
-                    {"role": "assistant", "content": generated_code},
-                    {"role": "user", "content": f"The code failed with this error:\n{sand_err}\n"
-                                                "Fix it. Never use names with double underscores. "
-                                                "Output ONLY the corrected Python code."},
-                ],
-                provider=retry_p,
-                model=_model_for(retry_p),
-                max_retries=1,
-                stage="self_correct",
-                single_provider=True,
+            prompt_num, display_id = prompt_id_val, f"#{prompt_id_val}"
+        decision_context.update(
+            selected_score=picked["score"], selected_tags=picked["tags"], selected_reasons=picked["reasons"],
+            ai_choice={"kind": decision["kind"], "strategy_id": picked_id, "top_ranked_id": top_id,
+                       "chose_top_ranked": picked_id == top_id, "reasoning": decision.get("reasoning", "")[:1000]},
+        )
+        await _update_autopilot_cycle(
+            cycle_id, prompt_number=prompt_num, prompt_text=prompt_text,
+            prompt_version=hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(),
+            selection_context=decision_context,
+        )
+        add_log(user_id, f"AI chose Strategy {display_id}"
+                         f"{'' if picked_id == top_id else f' (ranked below #{top_id})'}: {prompt_text[:60]}...")
+        if decision["kind"] == "no_setup":
+            saw_no_setup = True
+            add_log(user_id, f"AI: NO_SETUP. {decision.get('reasoning', '')[:160]}", "INFO")
+        else:
+            setup = decision["setup"]
+            add_log(user_id, f"TRADE_SETUP via the brief (conf={setup.get('confidence')}%)")
+    else:
+        # Detect required timeframe from prompt text and fetch from MT5 directly
+        def _detect_timeframe(text: str) -> tuple:
+            """Return (mt5_timeframe, candle_count) based on prompt.
+            Check more specific (M15, M5) before broader (H1, H4, D1) to avoid
+            catching reference levels (e.g. 'H1 resistance') instead of the
+            actual analysis timeframe (e.g. 'M15').
+            """
+            lower = text.lower()
+            # Check shorter (more granular) timeframes FIRST.
+            # For multi-TF prompts ("H4 trend, H1 entry"), this detects the LOWEST TF
+            # so the AI gets granular data and can resample UP to higher TFs if needed.
+            if re.search(r'\b(?:m15|15m|15[-\s]?min(?:ute)?s?\b)', lower):
+                return ("15m", 500)
+            if re.search(r'\b(?:m5|5m|5[-\s]?min(?:ute)?s?\b)', lower):
+                return ("5m", 500)
+            if re.search(r'\b(?:m1|1m|1[-\s]?min(?:ute)?s?\b)', lower):
+                return ("1m", 500)
+            if re.search(r'\b(?:m30|30m|30[-\s]?min(?:ute)?s?\b)', lower):
+                return ("30m", 500)
+            if re.search(r'\b1[-\s]?(?:h|hour)\b|one[-\s]?hour|hourly|h1\b|1hrs?\b', lower):
+                return ("1h", 300)
+            if re.search(r'\b4[-\s]?(?:h|hour)\b|four[-\s]?hour|h4\b|4hrs?\b', lower):
+                return ("4h", 200)
+            if re.search(r'\b1[-\s]?(?:d|day|w|week)\b|daily|weekly|d1|w1|previous\s*day|yesterday', lower):
+                return ("1d", 200)
+            return ("4h", 200)  # default: 4H for swing trading
+
+        tf, count = _detect_timeframe(prompt_text)
+        market_data = await get_market_data(user_id, symbol, timeframe=tf, count=count)
+        if not market_data or len(market_data) == 0:
+            add_log(user_id, "No market data available", "ERROR")
+            state["stats"]["error_count"] += 1
+            await _finish_autopilot_cycle(
+                user_id, cycle_id, "no_market_data", f"No {tf} candle data available",
+                market_timeframe=tf, candles_loaded=0,
             )
-            if _ai_failure.get("rate_limited"):
-                _busy = True
-            if fixed:
-                generated_code = fixed
-                ai_response = generated_code
-                try:
-                    sandbox_result = await run_python_code(code=generated_code, market_data=market_data,
-                                                           symbol=symbol, user_id=user_id)
-                except Exception as e:
-                    add_log(user_id, f"Corrected code from {retry_p} also failed: {str(e)}", "ERROR")
-                    continue
-                if sandbox_result.get("success"):
-                    fixed_output = sandbox_result.get("output", "")
-                    setup = _parse_trade_setup(fixed_output)
-                    if setup:
-                        add_log(user_id, f"TRADE_SETUP found via {retry_p} after fixing its code (conf={setup.get('confidence')}%)")
-                        break
-                    if "NO_SETUP" in fixed_output:
-                        saw_no_setup = True
-                        add_log(user_id, f"{retry_p} fixed its code: NO_SETUP", "INFO")
-                        break
-                else:
-                    add_log(user_id, f"{retry_p} fixed code still failed: {sandbox_result.get('error', '')[:200]}", "WARNING")
+            return
+        await _update_autopilot_cycle(cycle_id, market_timeframe=tf, candles_loaded=len(market_data))
+        market_data_hash = hashlib.sha256(
+            json.dumps(market_data, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        await _update_autopilot_cycle(cycle_id, market_data_hash=market_data_hash)
+        add_log(user_id, f"Loaded {len(market_data)} {tf} candles for {symbol}")
 
-    # ── BACKUP: all sandbox providers failed, send 50 candles + indicators directly ──
-    if not setup and _busy:
-        add_log(user_id, "The AI provider is busy (rate limited or overloaded). Skipping the backup; "
-                         "the next cycle tries again.", "WARNING")
-        state["stats"]["skipped_count"] += 1
-        await _finish_autopilot_cycle(user_id, cycle_id, "ai_provider_busy", _ai_failure["reason"])
-        return
-    if not setup and not saw_no_setup:
-        add_log(user_id, "All providers failed sandbox, trying backup (50 candles + indicators)...", "WARNING")
-
-        # Build candle text block (last 50)
+        # ── Compute ATR for SL/TP sizing ──
+        atr_value = 0.0
+        avg_atr_20 = 0.0
         try:
-            df_view = pd.DataFrame(market_data[-50:])
-            rows = []
-            for _, r in df_view.iterrows():
-                t = str(r.get('time') or r.get('datetime') or '')[:16]
-                vol = float(r.get('volume', 0) or 0)
-                rows.append(
-                    f"{t}  {float(r['open']):>8.2f}  {float(r['high']):>8.2f}  "
-                    f"{float(r['low']):>8.2f}  {float(r['close']):>8.2f}  {vol:>6.0f}"
+            df_atr = pd.DataFrame(market_data)
+            if 'high' in df_atr.columns and 'low' in df_atr.columns and 'close' in df_atr.columns:
+                atr_series = ta.volatility.average_true_range(
+                    df_atr['high'].astype(float),
+                    df_atr['low'].astype(float),
+                    df_atr['close'].astype(float),
+                    window=14
                 )
-            candle_block = "Date/Time         Open      High      Low       Close     Volume\n" + "\n".join(rows)
+                valid = atr_series.dropna()
+                if len(valid) > 0:
+                    atr_value = float(valid.iloc[-1])
+                    avg_atr_20 = float(valid.tail(min(20, len(valid))).mean())
         except Exception as e:
-            add_log(user_id, f"Failed to format candles: {str(e)}", "ERROR")
-            candle_block = "(candle data unavailable)"
+            add_log(user_id, f"Could not compute ATR, using 0: {e}", "WARNING")
+        add_log(user_id, f"ATR(14): {atr_value:.2f} | Avg(20): {avg_atr_20:.2f}")
+        await _update_autopilot_cycle(cycle_id, atr_14=atr_value, avg_atr_20=avg_atr_20)
 
-        # Compute indicators on full data
+        # ── SANDBOX APPROACH ──────────────────────────────────────────────
+        # Instead of dumping raw candle text into the AI prompt, we:
+        # 1. Ask AI to write analysis code (short prompt, ~150 tokens)
+        # 2. Execute the code in sandbox with 1m OHLC data
+        # 3. Parse TRADE_SETUP JSON or NO_SETUP from sandbox output
+        # 4. Self-correct if code fails (up to 2 retries)
+
+        error_feedback = state.get("last_error_feedback")
+        error_section = ""
+        if error_feedback:
+            error_section = f"\nPREVIOUS TRADE ERROR FEEDBACK (learn from this):\n{error_feedback}\n- Adjust stop loss / take profit to be further from entry.\n- Do NOT repeat the same mistake.\n"
+
+        top_candidates = decision_context.get("top_candidates", [])
+        top_candidate_lines = []
+        for item in top_candidates[:3]:
+            styles = ",".join((item.get("tags") or {}).get("styles") or [])
+            top_candidate_lines.append(
+                f"- {item.get('id')}: score={item.get('score')} styles={styles}"
+            )
+        decision_section = f"""
+    AUTOPILOT DECISION CONTEXT:
+    - Market regime: {market_regime.get('regime')} (trend={market_regime.get('trend')}, volatility={market_regime.get('volatility')}, directional_bias={market_regime.get('direction_bias')})
+    - Regime confidence: {market_regime.get('confidence')}%
+    - Selected prompt score: {decision_context.get('selected_score')}
+    - Selected prompt tags: {json.dumps(decision_context.get('selected_tags', {}))}
+    - Selection reasons: {"; ".join(decision_context.get('selected_reasons') or []) or "No historical reasons yet"}
+    - Top prompt candidates:
+    {chr(10).join(top_candidate_lines) if top_candidate_lines else "- No ranked candidates available"}
+    Use this context as guidance.
+    """
+
+        # ── RAG: inject the track record (similar past analyses + best/losing
+        #    strategies for this symbol) so the AI trades on its own history.
+        #    Best-effort: any failure degrades to no-context, never blocks a cycle.
+        rag_section = ""
         try:
-            full_df = pd.DataFrame(market_data)
-            close_s = full_df['close'].astype(float)
-            high_s = full_df['high'].astype(float)
-            low_s = full_df['low'].astype(float)
-
-            rsi_s = ta.momentum.rsi(close_s, window=14)
-            sma20_s = ta.trend.sma_indicator(close_s, window=20)
-            sma50_s = ta.trend.sma_indicator(close_s, window=50)
-            upper_s = ta.volatility.bollinger_hband(close_s, window=20, window_dev=2)
-            lower_s = ta.volatility.bollinger_lband(close_s, window=20, window_dev=2)
-            atr_s = ta.volatility.average_true_range(high_s, low_s, close_s, window=14)
-            stoch_s = ta.momentum.stoch(high_s, low_s, close_s, window=14)
-
-            ind_lines = [
-                f"RSI(14): {float(rsi_s.iloc[-1]):.1f}" if not pd.isna(rsi_s.iloc[-1]) else "RSI(14): N/A",
-                f"SMA20: {float(sma20_s.iloc[-1]):.2f}" if not pd.isna(sma20_s.iloc[-1]) else "SMA20: N/A",
-                f"SMA50: {float(sma50_s.iloc[-1]):.2f}" if not pd.isna(sma50_s.iloc[-1]) else "SMA50: N/A",
-                f"BB Upper: {float(upper_s.iloc[-1]):.2f}" if not pd.isna(upper_s.iloc[-1]) else "BB Upper: N/A",
-                f"BB Lower: {float(lower_s.iloc[-1]):.2f}" if not pd.isna(lower_s.iloc[-1]) else "BB Lower: N/A",
-                f"ATR(14): {float(atr_s.iloc[-1]):.2f}" if not pd.isna(atr_s.iloc[-1]) else "ATR(14): N/A",
-                f"Stochastic: {float(stoch_s.iloc[-1]):.1f}" if not pd.isna(stoch_s.iloc[-1]) else "Stochastic: N/A",
-            ]
-            indicator_block = "\n".join(ind_lines)
+            from ..core.rag_service import build_rag_context
+            rag_ctx = await build_rag_context(
+                symbol, prompt_text, user_id=user_id, source="autopilot", cycle_id=cycle_id
+            )
+            if rag_ctx:
+                rag_section = f"""
+    PAST PERFORMANCE (your own track record on {symbol}):
+    {rag_ctx}
+    Use this: repeat what worked, propose an alternative to anything listed as underperforming, and do NOT simply re-run losing approaches.
+    """
+                add_log(user_id, f"RAG context attached ({len(rag_ctx)} chars)")
         except Exception as e:
-            add_log(user_id, f"Failed to compute indicators: {str(e)}", "ERROR")
-            indicator_block = "(indicator data unavailable)"
+            add_log(user_id, f"RAG context unavailable: {e}", "WARNING")
 
-        backup_prompt = f"""You are a quant trader. Decide if there is a trade opportunity based on the candle data and indicators below.
+        candle_count = len(market_data)
+        data_warning = ""
+        if candle_count < 100:
+            data_warning = f"\nWARNING: Limited historical data ({candle_count} candles). Indicators with large windows (like SMA 200) will fail. RSI(14), ATR(14), and Bollinger Bands(20) are safe above 30 candles.\n"
+        elif candle_count < 500:
+            data_warning = f"\nNOTE: {candle_count} candles available. SMA 200 may produce NaNs. Use .dropna() before accessing results.\n"
 
-Symbol: {symbol} ({tf})
-Total candles loaded: {len(market_data)}
+        code_prompt = f"""You are a quant trader. Write Python code to analyze market data.
 
---- COMPUTED INDICATORS ---
-{indicator_block}
+    IMPORTANT RULES:
+    0. NEVER write any name with double underscores (no __name__, __main__, __len__, __class__, __import__).
+       Code containing them is rejected before it runs.
+    1. Write DIRECT executable statements -- NOT a function definition. The code runs via exec(), NOT by calling a function.
+       WRONG (will produce NO output):
+          def calculate_signals(df): ...
+       RIGHT:
+          rsi = ta.momentum.rsi(df['close'], window=14)
+          print(f"RSI: {{rsi.iloc[-1]:.2f}}")
 
---- RECENT 50 CANDLES ---
-{candle_block}
+    2. Available libraries in sandbox:
+       - pandas as pd, numpy as np, math, json, datetime
+       - ta (technical-analysis-library-python)
+       - ta.momentum.rsi(close, window=14)
+       - ta.trend.sma_indicator(close, window=200)
+       - ta.trend.ema_indicator(close, window=50)
+       - ta.volatility.average_true_range(high, low, close, window=14)
+       - ta.volatility.bollinger_hband(close, window=20, window_dev=2)
+       - ta.volatility.bollinger_lband(close, window=20, window_dev=2)
+       - ta.momentum.stoch(high, low, close, window=14)
 
-Strategy: {prompt_text}
-{rag_section}
-{error_section}
+    3. The DataFrame `df` is already loaded with {tf.upper()} OHLC data.
+        Columns: open, high, low, close, volume (may be 0 if unavailable), timestamp (datetime).
+        The DataFrame index is also datetime (same as timestamp column).
+        timestamp is ALREADY a datetime object — DO NOT call pd.to_datetime() on it.
+       Use df.tail(N) for last N rows. NEVER use hardcoded indices like df.iloc[13].
 
-CRITICAL SL/TP RULES:
-- Stop loss MUST be within 1.0x to 1.5x ATR distance from entry (ATR(14) = {atr_value:.2f}), max 30 points.
-- Max stop distance = {min(atr_value * 1.5, 30):.1f} points from entry.
-- Take profit must give at least 1:1.5 RR (TP distance >= 1.5x SL distance).
-- If you cannot set SL within this range, output NO_SETUP.
+       For multi-timeframe analysis, resample df UP to higher TFs:
+         df_4h = df.resample('4h', on='timestamp').agg({{'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}})
+       Aliases: '1h', '4h', '1D' (pandas 3 removed '1H'/'4H' — never use uppercase H or bare 'm').
+       You CANNOT resample DOWN (e.g. 1h → 1m) — that creates fake data.
 
-Output ONLY one of the following (no code, no explanation outside the JSON):
+    4. You have THREE possible outputs at the end:
 
-1. TRADE_SETUP JSON:
-```json
-{{"action":"TRADE_SETUP","symbol":"{symbol}","direction":"BUY","order_type":"market","entry_price":0.0,"stop_loss":0.0,"take_profit":0.0,"lot_size":{lot_size},"reasoning":"Brief explanation","confidence":75}}
-```
+       A) FULL TRADE SETUP — clear setup, good risk-reward (RR >= 1:1.5), confidence 60-95.
+          ```json
+          {{"action": "TRADE_SETUP", "symbol": "{symbol}", "direction": "BUY", "order_type": "market", "entry_price": 0.0, "stop_loss": 0.0, "take_profit": 0.0, "lot_size": {lot_size}, "reasoning": "Brief explanation", "confidence": 75}}
+          ```
 
-2. NO_SETUP"""
+       B) REDUCED SETUP — setup exists but lower conviction (RR >= 1:1, confidence 40-59).
+          Use half the standard lot size ({lot_size}/2) and tighter stop.
+          ```json
+          {{"action": "TRADE_SETUP", "symbol": "{symbol}", "direction": "BUY", "order_type": "market", "entry_price": 0.0, "stop_loss": 0.0, "take_profit": 0.0, "lot_size": {lot_size}/2, "reasoning": "Lower conviction: explain why", "confidence": 50}}
+          ```
 
-        add_log(user_id, "Backup: sending 50 candles + indicators to providers...", "INFO")
+       C) NO_SETUP — no trade opportunity at all.
+
+       Pick A if confidence >= 60 AND RR >= 1:1.5.
+       Pick B if confidence 40-59 AND RR >= 1:1.
+       Pick C if confidence < 40 or no valid level.
+
+    5. After resample() or dropna(), always check len(df) before accessing elements.
+       Do NOT assume the resampled DataFrame has the same row count.
+
+    6. NEVER write the double-underscore __ character sequence in your code.
+       ANY code containing __ (like __class__, __dict__, __name__, __version__, __init__)
+       will be REJECTED by the sandbox. This includes debug prints, comments, and strings.
+       If you need to check a type, use type(obj).__name__ is REJECTED — use str(type(obj)) instead.
+
+    {data_warning}
+    CURRENT VOLATILITY:
+    - ATR(14): {atr_value:.2f} | AVG ATR(20): {avg_atr_20:.2f}
+    - CRITICAL: Stop loss MUST be within 1.0x to 1.5x ATR distance from entry price, NEVER exceed 30 points.
+      Example: ATR={atr_value:.1f}, entry=4060 → SL must be at {4060-atr_value*1.5:.1f} to {4060+atr_value*1.5:.1f} (NOT at a swing high 80+ pts away).
+    - You can compute ATR in your code: atr_14 = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14).iloc[-1]
+    - Take profit must give minimum RR of 1:1.5 (TP distance >= 1.5x SL distance).
+    - If ATR > 1.5x its 20-period average (high volatility), use tighter stop (1.0x ATR) and reduce lot size by 25%.
+    - If ATR < 0.5x its 20-period average (low volatility), normal SL rules apply.
+
+    Strategy:
+    {prompt_text}
+    {rag_section}
+    {decision_section}
+    {error_section}
+    """
+
+        analysis_prompt_hash = hashlib.sha256(code_prompt.encode("utf-8")).hexdigest()
+        await _update_autopilot_cycle(
+            cycle_id,
+            analysis_prompt_hash=analysis_prompt_hash,
+            rag_context_included=bool(rag_section),
+            rag_context_chars=len(rag_section),
+        )
+
+        add_log(user_id, f"AI prompt: analyze {len(market_data)} {tf} candles for strategy")
+
+        full_raw_response = ""
+
+        # Step 1: AI generates analysis code (with 429 retry + provider fallback)
+        _last_usage = None
+        _source = "sandbox"
+        generated_code, _last_usage, _raw_resp = await _call_ai_with_retry(
+            messages=[{"role": "user", "content": code_prompt}],
+            provider=provider,
+            model=model,
+            max_retries=3,
+            stage="initial",
+        )
+        if _raw_resp:
+            full_raw_response = _raw_resp
+        if not generated_code:
+            add_log(user_id, f"AI code generation failed after retries: {_ai_failure['reason']}", "ERROR")
+            state["stats"]["error_count"] += 1
+            await _finish_autopilot_cycle(user_id, cycle_id, "ai_generation_failed", "No code returned after initial provider retries")
+            return
+        add_log(user_id, f"AI generated code ({len(generated_code)} chars)")
+
+        # Step 2 & 3: Execute in sandbox with self-correction
+        from ..api.execute import run_python_code
+
+        setup = None
+        saw_no_setup = False
+        ai_response = generated_code  # Store generated code as AI response for DB
+        # Build provider failover order: user's pick first, then known-working,
+        # then the rest sorted by reliability.
+        from ..core.providers import get_provider_names as _get_providers
+        _priority = ("cerebras", "github")
+        _all_providers = _get_providers()
+        _remaining = [p for p in _all_providers if p != provider]
+        _known_working = [p for p in _remaining if p in _priority]
+        _others = [p for p in _remaining if p not in _priority]
+        _retry_providers = [provider] + _known_working + _others
+        # Only providers that have a key: asking the rest only fell through to the
+        # one provider that does, multiplying calls to it.
+        from ..core.providers import resolve_all_api_keys as _keys_for
+        _retry_providers = [p for p in dict.fromkeys(_retry_providers)
+                            if p == provider or await _keys_for(p, settings, user_id, AsyncSessionLocal)]
+
+        def _model_for(p: str) -> str:
+            return model if p == provider else PROVIDERS[p]["models"][0]
+
+        _busy = False
 
         for p_idx, retry_p in enumerate(_retry_providers):
-            fallback_response, _last_usage, _raw_resp = await _call_ai_with_retry(
-                messages=[{"role": "user", "content": backup_prompt}],
-                provider=retry_p,
-                model=_model_for(retry_p),
-                max_retries=2,
-                stage="backup",
-                single_provider=True,
-            )
-            if _raw_resp:
-                full_raw_response = _raw_resp
-            if _ai_failure.get("rate_limited"):
-                add_log(user_id, "The AI provider is busy; stopping the backup. The next cycle tries again.", "WARNING")
-                break
-            if not fallback_response:
-                add_log(user_id, f"Backup {retry_p} returned nothing ({_ai_failure['reason']}), skipping")
+            # First iteration uses the already-generated code from the initial call.
+            # Subsequent iterations generate new code with the next provider.
+            if _busy:
+                break  # the provider is rate limiting: stop here, the next cycle tries again
+            if p_idx > 0:
+                add_log(user_id, f"Trying provider {retry_p} for code generation...", "INFO")
+                new_code, _last_usage, _raw_resp = await _call_ai_with_retry(
+                    messages=[{"role": "user", "content": code_prompt}],
+                    provider=retry_p,
+                    model=_model_for(retry_p),
+                    max_retries=2,
+                    stage="failover",
+                    single_provider=True,
+                )
+                if _raw_resp:
+                    full_raw_response = _raw_resp
+                if _ai_failure.get("rate_limited"):
+                    _busy = True
+                if not new_code:
+                    add_log(user_id, f"{retry_p} code generation returned nothing ({_ai_failure['reason']}), skipping")
+                    continue
+                generated_code = new_code
+                ai_response = generated_code
+
+            # Execute code in sandbox
+            add_log(user_id, f"Executing code from {retry_p} in sandbox...", "INFO")
+            try:
+                sandbox_result = await run_python_code(
+                    code=generated_code,
+                    market_data=market_data,
+                    symbol=symbol,
+                    user_id=user_id,
+                )
+            except Exception as e:
+                add_log(user_id, f"Sandbox execution error with {retry_p}: {str(e)}", "ERROR")
                 continue
-            ai_response = fallback_response
-            _source = "backup"
 
-            # Parse TRADE_SETUP JSON
-            jm = re.search(r'```json\n?(.*?)```', fallback_response, re.DOTALL)
-            if jm:
-                try:
-                    setup = json.loads(jm.group(1))
-                    add_log(user_id, f"Backup TRADE_SETUP found via {retry_p} (conf={setup.get('confidence')}%)")
-                    break
-                except json.JSONDecodeError:
-                    pass
+            if sandbox_result.get("success"):
+                output = sandbox_result.get("output", "")
 
-            if not setup:
-                for line in fallback_response.strip().split("\n"):
+                # Try parse TRADE_SETUP from output (```json block or raw JSON)
+                jm = re.search(r'```json\n?(.*?)```', output, re.DOTALL)
+                if jm:
                     try:
-                        obj = json.loads(line.strip())
-                        if isinstance(obj, dict) and obj.get("action") == "TRADE_SETUP":
-                            setup = obj
-                            break
+                        setup = json.loads(jm.group(1))
+                        add_log(user_id, f"TRADE_SETUP found via {retry_p} (conf={setup.get('confidence')}%)")
+                        break
                     except json.JSONDecodeError:
                         pass
+
+                if not setup:
+                    for line in output.strip().split("\n"):
+                        line = line.strip()
+                        try:
+                            obj = json.loads(line)
+                            if isinstance(obj, dict) and obj.get("action") == "TRADE_SETUP":
+                                setup = obj
+                                break
+                        except json.JSONDecodeError:
+                            pass
+
                 if setup:
-                    add_log(user_id, f"Backup TRADE_SETUP found via {retry_p} (conf={setup.get('confidence')}%)")
                     break
 
-            if "NO_SETUP" in fallback_response:
-                saw_no_setup = True
-                add_log(user_id, f"Backup {retry_p}: NO_SETUP", "INFO")
-                break
+                if "NO_SETUP" in output:
+                    # The AI's answer stands. Asking other providers until one says yes
+                    # would be shopping for a trade, and costs calls.
+                    saw_no_setup = True
+                    add_log(user_id, f"{retry_p} says NO_SETUP", "INFO")
+                    break
 
-            add_log(user_id, f"Backup {retry_p}: unclear response, trying next provider", "WARNING")
+                # Unclear output — try self-correction once with same provider
+                add_log(user_id, f"{retry_p} output unclear, trying self-correction...", "WARNING")
+                corrected, _last_usage, _raw_resp = await _call_ai_with_retry(
+                    messages=[
+                        {"role": "user", "content": code_prompt},
+                        {"role": "assistant", "content": generated_code},
+                        {"role": "user", "content": f"The code ran but didn't output a valid TRADE_SETUP or NO_SETUP. Fix it to output exactly one of these formats. Output was:\n{output[:400]}"}
+                    ],
+                    provider=retry_p,
+                    model=_model_for(retry_p),
+                    max_retries=2,
+                    stage="self_correct",
+                    single_provider=True,
+                )
+                if _raw_resp:
+                    full_raw_response = _raw_resp
+                if corrected:
+                    generated_code = corrected
+                    ai_response = generated_code
+                    # Execute the corrected code
+                    try:
+                        sandbox_result = await run_python_code(
+                            code=generated_code,
+                            market_data=market_data,
+                            symbol=symbol,
+                            user_id=user_id,
+                        )
+                    except Exception as e:
+                        add_log(user_id, f"Corrected code from {retry_p} also failed: {str(e)}", "ERROR")
+                        continue
+                    if sandbox_result.get("success"):
+                        corrected_output = sandbox_result.get("output", "")
+                        jm2 = re.search(r'```json\n?(.*?)```', corrected_output, re.DOTALL)
+                        if jm2:
+                            try:
+                                setup = json.loads(jm2.group(1))
+                                add_log(user_id, f"TRADE_SETUP found via {retry_p} self-correction (conf={setup.get('confidence')}%)")
+                                break
+                            except json.JSONDecodeError:
+                                pass
+                        if not setup:
+                            for line in corrected_output.strip().split("\n"):
+                                try:
+                                    obj = json.loads(line.strip())
+                                    if isinstance(obj, dict) and obj.get("action") == "TRADE_SETUP":
+                                        setup = obj
+                                        break
+                                except json.JSONDecodeError:
+                                    pass
+                        if setup:
+                            break
+                        if "NO_SETUP" in corrected_output:
+                            saw_no_setup = True
+                            add_log(user_id, f"{retry_p} self-correction says NO_SETUP", "WARNING")
+                else:
+                    add_log(user_id, f"{retry_p} self-correction failed", "WARNING")
+            else:
+                # Sandbox error: give the same AI one chance to fix its code before
+                # moving on. It used to go straight to the next provider.
+                sand_err = sandbox_result.get("error", "Unknown error")[:300]
+                add_log(user_id, f"{retry_p} code error: {sand_err[:200]}. Asking it to fix the code once.", "WARNING")
+                fixed, _last_usage, _raw_resp = await _call_ai_with_retry(
+                    messages=[
+                        {"role": "user", "content": code_prompt},
+                        {"role": "assistant", "content": generated_code},
+                        {"role": "user", "content": f"The code failed with this error:\n{sand_err}\n"
+                                                    "Fix it. Never use names with double underscores. "
+                                                    "Output ONLY the corrected Python code."},
+                    ],
+                    provider=retry_p,
+                    model=_model_for(retry_p),
+                    max_retries=1,
+                    stage="self_correct",
+                    single_provider=True,
+                )
+                if _ai_failure.get("rate_limited"):
+                    _busy = True
+                if fixed:
+                    generated_code = fixed
+                    ai_response = generated_code
+                    try:
+                        sandbox_result = await run_python_code(code=generated_code, market_data=market_data,
+                                                               symbol=symbol, user_id=user_id)
+                    except Exception as e:
+                        add_log(user_id, f"Corrected code from {retry_p} also failed: {str(e)}", "ERROR")
+                        continue
+                    if sandbox_result.get("success"):
+                        fixed_output = sandbox_result.get("output", "")
+                        setup = _parse_trade_setup(fixed_output)
+                        if setup:
+                            add_log(user_id, f"TRADE_SETUP found via {retry_p} after fixing its code (conf={setup.get('confidence')}%)")
+                            break
+                        if "NO_SETUP" in fixed_output:
+                            saw_no_setup = True
+                            add_log(user_id, f"{retry_p} fixed its code: NO_SETUP", "INFO")
+                            break
+                    else:
+                        add_log(user_id, f"{retry_p} fixed code still failed: {sandbox_result.get('error', '')[:200]}", "WARNING")
+
+        # ── BACKUP: all sandbox providers failed, send 50 candles + indicators directly ──
+        if not setup and _busy:
+            add_log(user_id, "The AI provider is busy (rate limited or overloaded). Skipping the backup; "
+                             "the next cycle tries again.", "WARNING")
+            state["stats"]["skipped_count"] += 1
+            await _finish_autopilot_cycle(user_id, cycle_id, "ai_provider_busy", _ai_failure["reason"])
+            return
+        if not setup and not saw_no_setup:
+            add_log(user_id, "All providers failed sandbox, trying backup (50 candles + indicators)...", "WARNING")
+
+            # Build candle text block (last 50)
+            try:
+                df_view = pd.DataFrame(market_data[-50:])
+                rows = []
+                for _, r in df_view.iterrows():
+                    t = str(r.get('time') or r.get('datetime') or '')[:16]
+                    vol = float(r.get('volume', 0) or 0)
+                    rows.append(
+                        f"{t}  {float(r['open']):>8.2f}  {float(r['high']):>8.2f}  "
+                        f"{float(r['low']):>8.2f}  {float(r['close']):>8.2f}  {vol:>6.0f}"
+                    )
+                candle_block = "Date/Time         Open      High      Low       Close     Volume\n" + "\n".join(rows)
+            except Exception as e:
+                add_log(user_id, f"Failed to format candles: {str(e)}", "ERROR")
+                candle_block = "(candle data unavailable)"
+
+            # Compute indicators on full data
+            try:
+                full_df = pd.DataFrame(market_data)
+                close_s = full_df['close'].astype(float)
+                high_s = full_df['high'].astype(float)
+                low_s = full_df['low'].astype(float)
+
+                rsi_s = ta.momentum.rsi(close_s, window=14)
+                sma20_s = ta.trend.sma_indicator(close_s, window=20)
+                sma50_s = ta.trend.sma_indicator(close_s, window=50)
+                upper_s = ta.volatility.bollinger_hband(close_s, window=20, window_dev=2)
+                lower_s = ta.volatility.bollinger_lband(close_s, window=20, window_dev=2)
+                atr_s = ta.volatility.average_true_range(high_s, low_s, close_s, window=14)
+                stoch_s = ta.momentum.stoch(high_s, low_s, close_s, window=14)
+
+                ind_lines = [
+                    f"RSI(14): {float(rsi_s.iloc[-1]):.1f}" if not pd.isna(rsi_s.iloc[-1]) else "RSI(14): N/A",
+                    f"SMA20: {float(sma20_s.iloc[-1]):.2f}" if not pd.isna(sma20_s.iloc[-1]) else "SMA20: N/A",
+                    f"SMA50: {float(sma50_s.iloc[-1]):.2f}" if not pd.isna(sma50_s.iloc[-1]) else "SMA50: N/A",
+                    f"BB Upper: {float(upper_s.iloc[-1]):.2f}" if not pd.isna(upper_s.iloc[-1]) else "BB Upper: N/A",
+                    f"BB Lower: {float(lower_s.iloc[-1]):.2f}" if not pd.isna(lower_s.iloc[-1]) else "BB Lower: N/A",
+                    f"ATR(14): {float(atr_s.iloc[-1]):.2f}" if not pd.isna(atr_s.iloc[-1]) else "ATR(14): N/A",
+                    f"Stochastic: {float(stoch_s.iloc[-1]):.1f}" if not pd.isna(stoch_s.iloc[-1]) else "Stochastic: N/A",
+                ]
+                indicator_block = "\n".join(ind_lines)
+            except Exception as e:
+                add_log(user_id, f"Failed to compute indicators: {str(e)}", "ERROR")
+                indicator_block = "(indicator data unavailable)"
+
+            backup_prompt = f"""You are a quant trader. Decide if there is a trade opportunity based on the candle data and indicators below.
+
+    Symbol: {symbol} ({tf})
+    Total candles loaded: {len(market_data)}
+
+    --- COMPUTED INDICATORS ---
+    {indicator_block}
+
+    --- RECENT 50 CANDLES ---
+    {candle_block}
+
+    Strategy: {prompt_text}
+    {rag_section}
+    {error_section}
+
+    CRITICAL SL/TP RULES:
+    - Stop loss MUST be within 1.0x to 1.5x ATR distance from entry (ATR(14) = {atr_value:.2f}), max 30 points.
+    - Max stop distance = {min(atr_value * 1.5, 30):.1f} points from entry.
+    - Take profit must give at least 1:1.5 RR (TP distance >= 1.5x SL distance).
+    - If you cannot set SL within this range, output NO_SETUP.
+
+    Output ONLY one of the following (no code, no explanation outside the JSON):
+
+    1. TRADE_SETUP JSON:
+    ```json
+    {{"action":"TRADE_SETUP","symbol":"{symbol}","direction":"BUY","order_type":"market","entry_price":0.0,"stop_loss":0.0,"take_profit":0.0,"lot_size":{lot_size},"reasoning":"Brief explanation","confidence":75}}
+    ```
+
+    2. NO_SETUP"""
+
+            add_log(user_id, "Backup: sending 50 candles + indicators to providers...", "INFO")
+
+            for p_idx, retry_p in enumerate(_retry_providers):
+                fallback_response, _last_usage, _raw_resp = await _call_ai_with_retry(
+                    messages=[{"role": "user", "content": backup_prompt}],
+                    provider=retry_p,
+                    model=_model_for(retry_p),
+                    max_retries=2,
+                    stage="backup",
+                    single_provider=True,
+                )
+                if _raw_resp:
+                    full_raw_response = _raw_resp
+                if _ai_failure.get("rate_limited"):
+                    add_log(user_id, "The AI provider is busy; stopping the backup. The next cycle tries again.", "WARNING")
+                    break
+                if not fallback_response:
+                    add_log(user_id, f"Backup {retry_p} returned nothing ({_ai_failure['reason']}), skipping")
+                    continue
+                ai_response = fallback_response
+                _source = "backup"
+
+                # Parse TRADE_SETUP JSON
+                jm = re.search(r'```json\n?(.*?)```', fallback_response, re.DOTALL)
+                if jm:
+                    try:
+                        setup = json.loads(jm.group(1))
+                        add_log(user_id, f"Backup TRADE_SETUP found via {retry_p} (conf={setup.get('confidence')}%)")
+                        break
+                    except json.JSONDecodeError:
+                        pass
+
+                if not setup:
+                    for line in fallback_response.strip().split("\n"):
+                        try:
+                            obj = json.loads(line.strip())
+                            if isinstance(obj, dict) and obj.get("action") == "TRADE_SETUP":
+                                setup = obj
+                                break
+                        except json.JSONDecodeError:
+                            pass
+                    if setup:
+                        add_log(user_id, f"Backup TRADE_SETUP found via {retry_p} (conf={setup.get('confidence')}%)")
+                        break
+
+                if "NO_SETUP" in fallback_response:
+                    saw_no_setup = True
+                    add_log(user_id, f"Backup {retry_p}: NO_SETUP", "INFO")
+                    break
+
+                add_log(user_id, f"Backup {retry_p}: unclear response, trying next provider", "WARNING")
 
     # No setup, whether the AI said NO_SETUP or every attempt failed: record it and end the cycle.
     if not setup:
