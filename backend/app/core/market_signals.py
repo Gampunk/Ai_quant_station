@@ -27,7 +27,7 @@ SESSIONS = (
     ("after_hours", 21, 24),
 )
 
-RECENT_CANDLES = 30
+RECENT_CANDLES = 12  # enough for the latest structure; the levels carry the rest
 
 
 def session_at(when: datetime) -> str:
@@ -69,9 +69,9 @@ def swing_levels(df: pd.DataFrame, count: int = 3, wing: int = 2) -> Dict[str, L
     for i in range(len(df) - wing - 1, wing - 1, -1):
         window_h = h[i - wing:i + wing + 1]
         window_l = l[i - wing:i + wing + 1]
-        if len(highs) < count and h[i] == max(window_h):
+        if len(highs) < count and h[i] == max(window_h) and round(h[i], 5) not in highs:
             highs.append(round(h[i], 5))
-        if len(lows) < count and l[i] == min(window_l):
+        if len(lows) < count and l[i] == min(window_l) and round(l[i], 5) not in lows:
             lows.append(round(l[i], 5))
         if len(highs) >= count and len(lows) >= count:
             break
@@ -150,29 +150,31 @@ def compute_signals(candles: List[Dict[str, Any]], regime: Dict[str, Any], now: 
                      "last_4_closes_up": up_moves},
         "levels": levels,
         "recent_candles": [
-            [datetime.fromtimestamp(int(r.time), timezone.utc).strftime("%m-%d %H:%M"),
-             round(float(r.open), 5), round(float(r.high), 5), round(float(r.low), 5), round(float(r.close), 5)]
+            [datetime.fromtimestamp(int(r.time), timezone.utc).strftime("%H:%M"),
+             _p(r.open, price), _p(r.high, price), _p(r.low, price), _p(r.close, price)]
             for r in recent.itertuples()
         ],
     }
 
 
-def brief_text(symbol: str, s: Dict[str, Any]) -> str:
-    """The signals as the short text the AI reads."""
-    r, v, m, lv = s["regime"], s["volume"], s["momentum"], s["levels"]
-    candles = "\n".join(f"{t}  O {o}  H {h}  L {l}  C {c}" for t, o, h, l, c in s["recent_candles"])
-    return f"""MARKET BRIEF: {symbol}, {s['timeframe']} candles, as of {s['as_of_utc']} UTC
-Price: {s['price']}
-Session: {s['session']}
-Regime: {r['regime']} (trend {r['trend']}, bias {r['direction_bias']}, confidence {r['confidence']}%)
-Volatility: {s['volatility']['label']} (ATR14 {s['volatility']['atr']}, ratio to its average {r.get('atr_ratio')})
-Volume: {v['label']} (ratio {v['ratio']}; {v['basis']})
-Momentum: RSI14 {m['rsi14']}; price {'above' if m['above_ema20'] else 'below'} EMA20 {m['ema20']}, \
-{'above' if m['above_ema50'] else 'below'} EMA50 {m['ema50']}; {m['last_4_closes_up']} of the last 4 closes up
-Levels: today high {lv['today_high']} / low {lv['today_low']}; previous day high {lv['prev_day_high']} / low {lv['prev_day_low']}
-Swing highs (recent first): {lv['swing_highs']}
-Swing lows (recent first): {lv['swing_lows']}
-Round numbers: {lv['round_below']} below, {lv['round_above']} above
+def _p(value, price: float):
+    """A price rounded for reading: 2 decimals above 50, else 5."""
+    return round(float(value), 2 if price >= 50 else 5)
 
-Last {len(s['recent_candles'])} candles (UTC):
+
+def brief_text(symbol: str, s: Dict[str, Any]) -> str:
+    """The signals as the short text the AI reads. Kept small so free models handle it."""
+    r, v, m, lv = s["regime"], s["volume"], s["momentum"], s["levels"]
+    p = s["price"]
+    q = lambda x: _p(x, p) if x is not None else "n/a"  # noqa: E731
+    lst = lambda xs: ", ".join(str(q(x)) for x in xs) or "none"  # noqa: E731
+    candles = "\n".join(f"{t} {o} {h} {l} {c}" for t, o, h, l, c in s["recent_candles"])
+    return f"""{symbol} {s['timeframe']}, {s['as_of_utc']} UTC. Price {q(p)}. Session {s['session']}.
+Regime {r['regime']}, bias {r['direction_bias']}, confidence {r['confidence']}%.
+Volatility {s['volatility']['label']}, ATR14 {q(s['volatility']['atr'])}. Volume {v['label']} (x{v['ratio']} of normal).
+RSI14 {m['rsi14']}. Price {'above' if m['above_ema20'] else 'below'} EMA20 {q(m['ema20'])}, \
+{'above' if m['above_ema50'] else 'below'} EMA50 {q(m['ema50'])}.
+Today H {q(lv['today_high'])} L {q(lv['today_low'])}. Yesterday H {q(lv['prev_day_high'])} L {q(lv['prev_day_low'])}.
+Swing highs {lst(lv['swing_highs'])}. Swing lows {lst(lv['swing_lows'])}. Round {q(lv['round_below'])}/{q(lv['round_above'])}.
+Last {len(s['recent_candles'])} candles, time open high low close:
 {candles}"""

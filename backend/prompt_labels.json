@@ -3,7 +3,8 @@
  "prompts": {
   "1": {
    "styles": [
-    "range"
+    "range",
+    "mean_reversion"
    ],
    "market": "range",
    "sessions": [
@@ -15,40 +16,10 @@
    ],
    "timeframes": [],
    "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "2": {
-   "styles": [
-    "trend_following"
-   ],
-   "market": "trend",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [],
-   "direction": "buy",
-   "reviewed": false
-  },
-  "3": {
-   "styles": [
-    "range"
-   ],
-   "market": "range",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "low",
-    "normal"
-   ],
-   "timeframes": [],
-   "direction": "buy",
-   "reviewed": false
-  },
-  "4": {
    "styles": [
     "range",
     "trend_following"
@@ -62,7 +33,45 @@
    ],
    "timeframes": [],
    "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "3": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "4": {
+   "styles": [
+    "range",
+    "mean_reversion"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "5": {
    "styles": [
@@ -81,11 +90,13 @@
     "4h"
    ],
    "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "6": {
    "styles": [
-    "range"
+    "range",
+    "mean_reversion"
    ],
    "market": "range",
    "sessions": [
@@ -97,11 +108,131 @@
    ],
    "timeframes": [],
    "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "7": {
    "styles": [
-    "general"
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "8": {
+   "styles": [
+    "mean_reversion",
+    "breakout"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "1h",
+    "4h"
+   ],
+   "direction": "buy",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "9": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "10": {
+   "styles": [
+    "breakout"
+   ],
+   "market": "range",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [
+    "1h"
+   ],
+   "direction": "both",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "11": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [
+    "1h"
+   ],
+   "direction": "buy",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "12": {
+   "styles": [
+    "mean_reversion"
+   ],
+   "market": "any",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "13": {
+   "styles": [
+    "trend_following",
+    "range"
    ],
    "market": "any",
    "sessions": [
@@ -110,13 +241,57 @@
    "volatility": [
     "any"
    ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "buy",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "14": {
+   "styles": [
+    "breakout",
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
    "timeframes": [],
    "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
-  "8": {
+  "15": {
    "styles": [
-    "general"
+    "momentum",
+    "range"
+   ],
+   "market": "any",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "16": {
+   "styles": [
+    "trend_following",
+    "range"
    ],
    "market": "any",
    "sessions": [
@@ -129,63 +304,30 @@
     "1h",
     "4h"
    ],
-   "direction": "both",
-   "reviewed": false
-  },
-  "9": {
-   "styles": [
-    "range",
-    "trend_following"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [],
    "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
-  "10": {
+  "17": {
    "styles": [
-    "breakout",
-    "range",
-    "trend_following"
+    "mean_reversion"
    ],
-   "market": "any",
+   "market": "range",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
     "normal",
     "high"
    ],
-   "timeframes": [
-    "1h"
-   ],
-   "direction": "both",
-   "reviewed": false
-  },
-  "11": {
-   "styles": [
-    "trend_following"
-   ],
-   "market": "trend",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [
-    "1h"
-   ],
+   "timeframes": [],
    "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
-  "12": {
+  "18": {
    "styles": [
     "mean_reversion",
     "range"
@@ -198,120 +340,18 @@
     "low",
     "normal"
    ],
-   "timeframes": [],
-   "direction": "buy",
-   "reviewed": false
-  },
-  "13": {
-   "styles": [
-    "range",
-    "trend_following"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [
-    "4h"
-   ],
-   "direction": "buy",
-   "reviewed": false
-  },
-  "14": {
-   "styles": [
-    "breakout",
-    "range"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "normal",
-    "high"
-   ],
-   "timeframes": [],
-   "direction": "buy",
-   "reviewed": false
-  },
-  "15": {
-   "styles": [
-    "momentum",
-    "range",
-    "trend_following"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "normal",
-    "high"
-   ],
-   "timeframes": [],
-   "direction": "buy",
-   "reviewed": false
-  },
-  "16": {
-   "styles": [
-    "range"
-   ],
-   "market": "range",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "low",
-    "normal"
-   ],
    "timeframes": [
     "1h",
     "4h"
    ],
    "direction": "buy",
-   "reviewed": false
-  },
-  "17": {
-   "styles": [
-    "range"
-   ],
-   "market": "range",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "low",
-    "normal"
-   ],
-   "timeframes": [],
-   "direction": "buy",
-   "reviewed": false
-  },
-  "18": {
-   "styles": [
-    "range"
-   ],
-   "market": "range",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "low",
-    "normal"
-   ],
-   "timeframes": [
-    "1h",
-    "4h"
-   ],
-   "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "19": {
    "styles": [
-    "range"
+    "range",
+    "mean_reversion"
    ],
    "market": "range",
    "sessions": [
@@ -323,28 +363,29 @@
    ],
    "timeframes": [],
    "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "20": {
    "styles": [
     "range"
    ],
-   "market": "range",
+   "market": "any",
    "sessions": [
-    "asia",
-    "london"
+    "any"
    ],
    "volatility": [
-    "low",
-    "normal"
+    "any"
    ],
    "timeframes": [],
    "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "21": {
    "styles": [
-    "range"
+    "range",
+    "mean_reversion"
    ],
    "market": "range",
    "sessions": [
@@ -356,11 +397,13 @@
    ],
    "timeframes": [],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "22": {
    "styles": [
-    "general"
+    "range",
+    "trend_following"
    ],
    "market": "any",
    "sessions": [
@@ -371,10 +414,12 @@
    ],
    "timeframes": [],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "23": {
    "styles": [
+    "mean_reversion",
     "range"
    ],
    "market": "range",
@@ -390,13 +435,15 @@
     "4h"
    ],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "24": {
    "styles": [
-    "general"
+    "mean_reversion",
+    "breakout"
    ],
-   "market": "any",
+   "market": "range",
    "sessions": [
     "any"
    ],
@@ -405,7 +452,8 @@
    ],
    "timeframes": [],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "25": {
    "styles": [
@@ -424,10 +472,12 @@
     "4h"
    ],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "26": {
    "styles": [
+    "mean_reversion",
     "range"
    ],
    "market": "range",
@@ -442,17 +492,19 @@
     "1h",
     "4h"
    ],
-   "direction": "both",
-   "reviewed": false
+   "direction": "sell",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "27": {
    "styles": [
-    "breakout",
-    "range"
+    "mean_reversion"
    ],
-   "market": "any",
+   "market": "range",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
     "normal",
@@ -460,11 +512,52 @@
    ],
    "timeframes": [],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "28": {
    "styles": [
-    "range"
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "sell",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "29": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "30": {
+   "styles": [
+    "mean_reversion"
    ],
    "market": "range",
    "sessions": [
@@ -474,44 +567,10 @@
     "low",
     "normal"
    ],
-   "timeframes": [
-    "4h"
-   ],
-   "direction": "sell",
-   "reviewed": false
-  },
-  "29": {
-   "styles": [
-    "range",
-    "trend_following"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
    "timeframes": [],
    "direction": "sell",
-   "reviewed": false
-  },
-  "30": {
-   "styles": [
-    "mean_reversion",
-    "range",
-    "trend_following"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [],
-   "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "31": {
    "styles": [
@@ -519,52 +578,62 @@
    ],
    "market": "trend",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
-    "any"
+    "normal",
+    "high"
    ],
    "timeframes": [
     "1h"
    ],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "32": {
    "styles": [
-    "range"
+    "mean_reversion"
    ],
-   "market": "range",
+   "market": "any",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
-    "low",
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "33": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
     "normal"
    ],
    "timeframes": [],
    "direction": "sell",
-   "reviewed": false
-  },
-  "33": {
-   "styles": [
-    "general"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [],
-   "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "34": {
    "styles": [
-    "range",
-    "trend_following"
+    "trend_following",
+    "range"
    ],
    "market": "any",
    "sessions": [
@@ -577,15 +646,19 @@
     "4h"
    ],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "35": {
    "styles": [
+    "breakout",
     "range"
    ],
    "market": "range",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
     "low",
@@ -593,44 +666,50 @@
    ],
    "timeframes": [],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "36": {
    "styles": [
+    "trend_following",
     "range"
    ],
-   "market": "range",
+   "market": "any",
    "sessions": [
     "any"
    ],
    "volatility": [
-    "low",
-    "normal"
+    "any"
    ],
    "timeframes": [
     "1h",
     "4h"
    ],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "37": {
    "styles": [
-    "general"
+    "mean_reversion",
+    "range"
    ],
-   "market": "any",
+   "market": "range",
    "sessions": [
     "any"
    ],
    "volatility": [
-    "any"
+    "normal",
+    "high"
    ],
    "timeframes": [],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "38": {
    "styles": [
+    "mean_reversion",
     "range"
    ],
    "market": "range",
@@ -643,25 +722,32 @@
    ],
    "timeframes": [],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "39": {
    "styles": [
-    "general"
+    "trend_following",
+    "momentum"
    ],
-   "market": "any",
+   "market": "trend",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
-    "any"
+    "normal",
+    "high"
    ],
    "timeframes": [],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "40": {
    "styles": [
+    "mean_reversion",
     "range"
    ],
    "market": "range",
@@ -674,7 +760,8 @@
    ],
    "timeframes": [],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "41": {
    "styles": [
@@ -682,14 +769,18 @@
    ],
    "market": "trend",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
-    "any"
+    "normal",
+    "high"
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "42": {
    "styles": [
@@ -697,26 +788,31 @@
    ],
    "market": "trend",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
-    "any"
+    "normal",
+    "high"
    ],
    "timeframes": [
     "4h"
    ],
    "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "43": {
    "styles": [
     "momentum",
-    "range",
     "trend_following"
    ],
-   "market": "any",
+   "market": "trend",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
     "normal",
@@ -724,16 +820,19 @@
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "44": {
    "styles": [
     "breakout",
-    "range"
+    "trend_following"
    ],
-   "market": "any",
+   "market": "trend",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
     "normal",
@@ -741,16 +840,18 @@
    ],
    "timeframes": [],
    "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "45": {
    "styles": [
-    "momentum",
-    "range"
+    "momentum"
    ],
-   "market": "any",
+   "market": "trend",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
     "normal",
@@ -760,17 +861,19 @@
     "4h"
    ],
    "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "46": {
    "styles": [
-    "breakout",
-    "momentum",
-    "range"
+    "trend_following",
+    "breakout"
    ],
-   "market": "any",
+   "market": "trend",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
     "normal",
@@ -778,7 +881,8 @@
    ],
    "timeframes": [],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "47": {
    "styles": [
@@ -786,23 +890,29 @@
    ],
    "market": "trend",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
-    "any"
+    "normal",
+    "high"
    ],
    "timeframes": [],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "48": {
    "styles": [
     "breakout",
-    "range"
+    "trend_following"
    ],
-   "market": "any",
+   "market": "trend",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
     "normal",
@@ -810,7 +920,8 @@
    ],
    "timeframes": [],
    "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "49": {
    "styles": [
@@ -818,24 +929,29 @@
    ],
    "market": "trend",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
-    "any"
+    "normal",
+    "high"
    ],
    "timeframes": [],
    "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "50": {
    "styles": [
-    "breakout",
     "momentum",
-    "trend_following"
+    "breakout"
    ],
    "market": "trend",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
     "normal",
@@ -843,16 +959,19 @@
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "51": {
    "styles": [
-    "breakout",
-    "range"
+    "momentum",
+    "breakout"
    ],
    "market": "any",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
     "normal",
@@ -862,59 +981,68 @@
     "4h"
    ],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "52": {
    "styles": [
-    "range",
     "trend_following"
    ],
-   "market": "any",
+   "market": "trend",
    "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [
-    "4h",
-    "1d"
-   ],
-   "direction": "buy",
-   "reviewed": false
-  },
-  "53": {
-   "styles": [
-    "breakout",
-    "range"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
     "normal",
     "high"
    ],
+   "timeframes": [
+    "1d",
+    "4h"
+   ],
+   "direction": "buy",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "53": {
+   "styles": [
+    "breakout"
+   ],
+   "market": "range",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "54": {
    "styles": [
     "breakout"
    ],
-   "market": "trend",
+   "market": "range",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
-    "normal",
-    "high"
+    "low",
+    "normal"
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "55": {
    "styles": [
@@ -922,23 +1050,206 @@
    ],
    "market": "trend",
    "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "56": {
+   "styles": [
+    "trend_following",
+    "momentum"
+   ],
+   "market": "trend",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "57": {
+   "styles": [
+    "breakout",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "buy",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "58": {
+   "styles": [
+    "breakout"
+   ],
+   "market": "range",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "59": {
+   "styles": [
+    "breakout"
+   ],
+   "market": "range",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "60": {
+   "styles": [
+    "trend_following",
+    "range"
+   ],
+   "market": "trend",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "both",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "61": {
+   "styles": [
+    "mean_reversion"
+   ],
+   "market": "any",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [
+    "1h"
+   ],
+   "direction": "buy",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "62": {
+   "styles": [
+    "trend_following",
+    "breakout"
+   ],
+   "market": "trend",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [
+    "1h"
+   ],
+   "direction": "both",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "63": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [
+    "1h"
+   ],
+   "direction": "both",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "64": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
     "any"
    ],
    "volatility": [
     "any"
    ],
    "timeframes": [],
-   "direction": "buy",
-   "reviewed": false
+   "direction": "both",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
-  "56": {
+  "65": {
    "styles": [
     "momentum",
     "trend_following"
    ],
    "market": "trend",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
     "normal",
@@ -946,12 +1257,107 @@
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
-  "57": {
+  "66": {
+   "styles": [
+    "mean_reversion"
+   ],
+   "market": "any",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "67": {
    "styles": [
     "breakout",
-    "range",
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "sell",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "68": {
+   "styles": [
+    "mean_reversion"
+   ],
+   "market": "range",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "69": {
+   "styles": [
+    "mean_reversion",
+    "momentum"
+   ],
+   "market": "any",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "70": {
+   "styles": [
+    "mean_reversion",
+    "range"
+   ],
+   "market": "range",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "sell",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "71": {
+   "styles": [
     "trend_following"
    ],
    "market": "any",
@@ -959,50 +1365,37 @@
     "any"
    ],
    "volatility": [
-    "normal",
-    "high"
+    "any"
    ],
    "timeframes": [],
    "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
-  "58": {
+  "72": {
    "styles": [
-    "breakout",
-    "range"
+    "breakout"
    ],
    "market": "any",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
     "normal",
     "high"
    ],
-   "timeframes": [],
+   "timeframes": [
+    "1h"
+   ],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
-  "59": {
+  "73": {
    "styles": [
-    "breakout",
-    "mean_reversion",
-    "range"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "normal",
-    "high"
-   ],
-   "timeframes": [],
-   "direction": "both",
-   "reviewed": false
-  },
-  "60": {
-   "styles": [
+    "range",
     "trend_following"
    ],
    "market": "trend",
@@ -1016,129 +1409,41 @@
     "4h"
    ],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
-  "61": {
+  "74": {
    "styles": [
-    "mean_reversion"
-   ],
-   "market": "range",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "low",
-    "normal"
-   ],
-   "timeframes": [
-    "1h"
-   ],
-   "direction": "buy",
-   "reviewed": false
-  },
-  "62": {
-   "styles": [
-    "trend_following"
-   ],
-   "market": "trend",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [
-    "1h"
-   ],
-   "direction": "both",
-   "reviewed": false
-  },
-  "63": {
-   "styles": [
-    "general"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [
-    "1h"
-   ],
-   "direction": "both",
-   "reviewed": false
-  },
-  "64": {
-   "styles": [
-    "momentum"
-   ],
-   "market": "trend",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "normal",
-    "high"
-   ],
-   "timeframes": [],
-   "direction": "both",
-   "reviewed": false
-  },
-  "65": {
-   "styles": [
-    "general"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [],
-   "direction": "both",
-   "reviewed": false
-  },
-  "66": {
-   "styles": [
-    "momentum"
-   ],
-   "market": "trend",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "normal",
-    "high"
-   ],
-   "timeframes": [],
-   "direction": "sell",
-   "reviewed": false
-  },
-  "67": {
-   "styles": [
-    "general"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [],
-   "direction": "both",
-   "reviewed": false
-  },
-  "68": {
-   "styles": [
+    "trend_following",
     "breakout"
    ],
    "market": "trend",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [
+    "4h"
+   ],
+   "direction": "sell",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "75": {
+   "styles": [
+    "trend_following",
+    "momentum"
+   ],
+   "market": "trend",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
     "normal",
@@ -1146,227 +1451,119 @@
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
-  "69": {
+  "76": {
+   "styles": [
+    "mean_reversion"
+   ],
+   "market": "any",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "77": {
+   "styles": [
+    "breakout"
+   ],
+   "market": "range",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "low",
+    "normal"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "78": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "79": {
    "styles": [
     "mean_reversion"
    ],
    "market": "range",
    "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "low",
-    "normal"
-   ],
-   "timeframes": [],
-   "direction": "both",
-   "reviewed": false
-  },
-  "70": {
-   "styles": [
-    "range"
-   ],
-   "market": "range",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "low",
-    "normal"
-   ],
-   "timeframes": [
-    "4h"
-   ],
-   "direction": "sell",
-   "reviewed": false
-  },
-  "71": {
-   "styles": [
-    "general"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
     "any"
-   ],
-   "timeframes": [],
-   "direction": "both",
-   "reviewed": false
-  },
-  "72": {
-   "styles": [
-    "range",
-    "trend_following"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [
-    "1h"
-   ],
-   "direction": "both",
-   "reviewed": false
-  },
-  "73": {
-   "styles": [
-    "mean_reversion",
-    "range",
-    "trend_following"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [
-    "4h"
-   ],
-   "direction": "both",
-   "reviewed": false
-  },
-  "74": {
-   "styles": [
-    "range"
-   ],
-   "market": "range",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "low",
-    "normal"
-   ],
-   "timeframes": [
-    "4h"
-   ],
-   "direction": "sell",
-   "reviewed": false
-  },
-  "75": {
-   "styles": [
-    "momentum"
-   ],
-   "market": "trend",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "normal",
-    "high"
-   ],
-   "timeframes": [],
-   "direction": "both",
-   "reviewed": false
-  },
-  "76": {
-   "styles": [
-    "mean_reversion",
-    "range"
-   ],
-   "market": "range",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "low",
-    "normal"
-   ],
-   "timeframes": [],
-   "direction": "both",
-   "reviewed": false
-  },
-  "77": {
-   "styles": [
-    "breakout",
-    "range"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "normal",
-    "high"
-   ],
-   "timeframes": [],
-   "direction": "both",
-   "reviewed": false
-  },
-  "78": {
-   "styles": [
-    "general"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [],
-   "direction": "both",
-   "reviewed": false
-  },
-  "79": {
-   "styles": [
-    "breakout",
-    "range"
-   ],
-   "market": "any",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "normal",
-    "high"
    ],
    "timeframes": [],
    "direction": "sell",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "80": {
    "styles": [
-    "general"
+    "momentum"
    ],
    "market": "any",
    "sessions": [
-    "any"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
-    "any"
+    "high"
    ],
    "timeframes": [
     "1h"
    ],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "81": {
    "styles": [
     "mean_reversion",
-    "range",
-    "trend_following"
+    "range"
    ],
    "market": "any",
    "sessions": [
-    "london"
+    "london",
+    "overlap",
+    "new_york"
    ],
    "volatility": [
     "any"
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "82": {
    "styles": [
@@ -1380,16 +1577,18 @@
     "any"
    ],
    "timeframes": [
-    "1h",
+    "1d",
     "4h",
-    "1d"
+    "1h"
    ],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "83": {
    "styles": [
-    "range"
+    "range",
+    "mean_reversion"
    ],
    "market": "range",
    "sessions": [
@@ -1401,14 +1600,14 @@
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "84": {
    "styles": [
-    "mean_reversion",
     "trend_following"
    ],
-   "market": "any",
+   "market": "trend",
    "sessions": [
     "any"
    ],
@@ -1416,17 +1615,18 @@
     "any"
    ],
    "timeframes": [
-    "1h",
+    "1d",
     "4h",
-    "1d"
+    "1h"
    ],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "85": {
    "styles": [
-    "mean_reversion",
-    "range"
+    "range",
+    "mean_reversion"
    ],
    "market": "range",
    "sessions": [
@@ -1438,64 +1638,93 @@
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "86": {
-   "styles": [
-    "trend_following"
-   ],
-   "market": "trend",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [],
-   "direction": "both",
-   "reviewed": false
-  },
-  "87": {
-   "styles": [
-    "scalping",
-    "trend_following"
-   ],
-   "market": "trend",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [
-    "15m",
-    "4h",
-    "1d"
-   ],
-   "direction": "both",
-   "reviewed": false
-  },
-  "88": {
    "styles": [
     "range",
     "trend_following"
    ],
    "market": "any",
    "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "87": {
+   "styles": [
+    "trend_following",
+    "breakout"
+   ],
+   "market": "trend",
+   "sessions": [
+    "london",
+    "overlap",
+    "new_york"
+   ],
+   "volatility": [
+    "normal",
+    "high"
+   ],
+   "timeframes": [
+    "1d",
+    "4h",
+    "15m"
+   ],
+   "direction": "both",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "88": {
+   "styles": [
+    "trend_following"
+   ],
+   "market": "trend",
+   "sessions": [
     "any"
    ],
    "volatility": [
     "any"
    ],
    "timeframes": [
-    "1h",
+    "1d",
     "4h",
-    "1d"
+    "1h"
    ],
    "direction": "buy",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "89": {
+   "styles": [
+    "range",
+    "mean_reversion"
+   ],
+   "market": "any",
+   "sessions": [
+    "any"
+   ],
+   "volatility": [
+    "any"
+   ],
+   "timeframes": [
+    "4h",
+    "1h"
+   ],
+   "direction": "sell",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
+  },
+  "90": {
    "styles": [
     "general"
    ],
@@ -1506,17 +1735,14 @@
    "volatility": [
     "any"
    ],
-   "timeframes": [
-    "1h",
-    "4h"
-   ],
-   "direction": "sell",
-   "reviewed": false
+   "timeframes": [],
+   "direction": "both",
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
-  "90": {
+  "91": {
    "styles": [
-    "range",
-    "trend_following"
+    "general"
    ],
    "market": "any",
    "sessions": [
@@ -1527,22 +1753,8 @@
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
-  },
-  "91": {
-   "styles": [
-    "trend_following"
-   ],
-   "market": "trend",
-   "sessions": [
-    "any"
-   ],
-   "volatility": [
-    "any"
-   ],
-   "timeframes": [],
-   "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "92": {
    "styles": [
@@ -1557,7 +1769,8 @@
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "93": {
    "styles": [
@@ -1574,23 +1787,24 @@
     "1h"
    ],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "94": {
    "styles": [
-    "range"
+    "general"
    ],
-   "market": "range",
+   "market": "any",
    "sessions": [
     "any"
    ],
    "volatility": [
-    "low",
-    "normal"
+    "any"
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "95": {
    "styles": [
@@ -1605,23 +1819,24 @@
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "96": {
    "styles": [
-    "breakout"
+    "general"
    ],
-   "market": "trend",
+   "market": "any",
    "sessions": [
     "any"
    ],
    "volatility": [
-    "normal",
-    "high"
+    "any"
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "97": {
    "styles": [
@@ -1636,11 +1851,12 @@
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "98": {
    "styles": [
-    "general"
+    "breakout"
    ],
    "market": "any",
    "sessions": [
@@ -1651,7 +1867,8 @@
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "99": {
    "styles": [
@@ -1659,21 +1876,21 @@
    ],
    "market": "any",
    "sessions": [
-    "overlap"
+    "any"
    ],
    "volatility": [
     "any"
    ],
    "timeframes": [],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   },
   "100": {
    "styles": [
-    "range",
     "trend_following"
    ],
-   "market": "any",
+   "market": "trend",
    "sessions": [
     "any"
    ],
@@ -1681,12 +1898,13 @@
     "any"
    ],
    "timeframes": [
-    "1h",
+    "1d",
     "4h",
-    "1d"
+    "1h"
    ],
    "direction": "both",
-   "reviewed": false
+   "reviewed": true,
+   "reviewed_by": "Claude, 2026-10-08, from the prompt text"
   }
  }
 }

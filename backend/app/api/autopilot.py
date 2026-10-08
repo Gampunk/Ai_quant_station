@@ -366,69 +366,122 @@ def _classify_exit_reason(close_deals: list[dict], profit: float):
     return classification, exit_reason, source
 
 
-BRIEF_SYSTEM = """You are a disciplined quant trader. The backend has already measured the market
-and shortlisted the strategies that fit it best. Your job: pick the ONE strategy whose conditions
-are actually met by the brief, and either give a precise trade setup for it or say there is none.
-Rules:
-- Use only the numbers in the brief. Do not invent prices or indicators.
-- The stop loss is required: beyond a nearby swing level, about 1 to 1.5 ATR from entry.
-- The take profit must be at least 1.5 times the stop distance.
-- If no strategy's conditions are clearly met, answer NO_SETUP. No trade is better than a forced one.
-- Answer with ONE JSON object and nothing else."""
+BRIEF_SYSTEM = """You are a disciplined quant trader. The backend measured the market and
+shortlisted strategies. Pick the one strategy whose conditions the numbers meet, and give its setup,
+or NO_SETUP if none is clearly met. Use only the numbers given. Stop loss required, beyond a nearby
+swing, about 1 to 1.5 ATR away. Target at least 1.5 times the stop distance. Reply only in the
+requested line format."""
 
 
 def _brief_user_message(symbol: str, signals: dict, shortlist_items: list[dict]) -> str:
     from ..core.market_signals import brief_text
-    menu = []
-    for item in shortlist_items:
-        tags = item["tags"]
-        label = ", ".join(f"{k}: {tags[k] if isinstance(tags[k], str) else '/'.join(tags[k])}"
-                          for k in ("styles", "market", "sessions", "volatility", "direction") if tags.get(k))
-        menu.append(f"STRATEGY {item['prompt']['id']} (backend fit score {item['score']}; {label}):\n{item['prompt']['text']}")
-    return (brief_text(symbol, signals) + "\n\nSHORTLISTED STRATEGIES:\n\n" + "\n\n".join(menu) + """
+    menu = [f"STRATEGY {item['prompt']['id']}: {' '.join(item['prompt']['text'].split())}" for item in shortlist_items]
+    return (brief_text(symbol, signals) + "\n\n" + "\n".join(menu) + """
 
-Answer with exactly one JSON object:
-{"decision": "TRADE_SETUP" or "NO_SETUP",
- "strategy_id": the id of the strategy you used (required in both cases),
- "direction": "BUY" or "SELL", "order_type": "market", "limit" or "stop",
- "entry_price": number (for market orders, the current price), "stop_loss": number, "take_profit": number,
- "confidence": 0-100, "reasoning": "which conditions of the strategy the brief meets, with the numbers"}
-For NO_SETUP give only decision, strategy_id and reasoning.""")
+Reply with these lines only:
+DECISION: TRADE_SETUP or NO_SETUP
+STRATEGY: id
+DIRECTION: BUY or SELL
+ORDER: market, limit or stop
+ENTRY: price
+STOP: price
+TARGET: price
+CONFIDENCE: 0-100
+REASON: under 30 words, with the numbers
+For NO_SETUP only DECISION, STRATEGY, REASON.""")
+
+
+_FIELD_NAMES = {
+    "decision": "decision", "action": "decision",
+    "strategy": "strategy", "strategy_id": "strategy", "prompt": "strategy", "prompt_id": "strategy",
+    "direction": "direction", "side": "direction",
+    "order": "order", "order_type": "order", "type": "order",
+    "entry": "entry", "entry_price": "entry",
+    "stop": "stop", "stop_loss": "stop", "sl": "stop",
+    "target": "target", "take_profit": "target", "tp": "target",
+    "confidence": "confidence",
+    "reason": "reason", "reasoning": "reason",
+}
+
+
+def _brief_fields(reply: str) -> dict:
+    """The answer's fields, from KEY: value lines, or from a JSON object if that is what came back."""
+    fields = {}
+    match = re.search(r"\{.*\}", reply, re.S)
+    if match:
+        try:
+            obj = json.loads(match.group(0))
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    name = _FIELD_NAMES.get(str(key).strip().lower().replace(" ", "_"))
+                    if name and value not in (None, ""):
+                        fields[name] = str(value)
+        except json.JSONDecodeError:
+            pass
+    # A JSON answer cut off before its closing brace: take the pairs that did arrive.
+    for key, value in re.findall(r'"([A-Za-z_ ]+)"\s*:\s*"?([^",}\n]+)', reply):
+        name = _FIELD_NAMES.get(key.strip().lower().replace(" ", "_"))
+        if name and name not in fields:
+            fields[name] = value.strip()
+    for line in reply.splitlines():
+        m = re.match(r"^[\s*#>\-`]*([A-Za-z][A-Za-z _]*?)[\s*`]*[:=]\s*(.+?)\s*$", line)
+        if not m:
+            continue
+        name = _FIELD_NAMES.get(m.group(1).strip().lower().replace(" ", "_"))
+        if name and name not in fields:
+            fields[name] = m.group(2).strip().strip("*`\"'")
+    return fields
+
+
+def _number(value) -> float | None:
+    m = re.search(r"-?\d+(?:[.,]\d+)?", str(value or "").replace(",", ""))
+    return float(m.group(0)) if m else None
 
 
 def _parse_brief_decision(reply: str, allowed_ids: list[str], price: float) -> dict:
-    """The AI's answer to the brief, checked. kind is trade, no_setup or invalid (with a reason)."""
-    match = re.search(r"\{.*\}", reply or "", re.S)
-    if not match:
-        return {"kind": "invalid", "reason": "no JSON object in the reply"}
-    try:
-        obj = json.loads(match.group(0))
-    except json.JSONDecodeError as e:
-        return {"kind": "invalid", "reason": f"unreadable JSON: {e}"}
-    sid = str(obj.get("strategy_id", "")).strip().lstrip("#")
-    decision = str(obj.get("decision", "")).upper()
-    reasoning = str(obj.get("reasoning", ""))[:2000]
-    if decision == "NO_SETUP":
-        return {"kind": "no_setup", "strategy_id": sid if sid in allowed_ids else None, "reasoning": reasoning}
-    if decision != "TRADE_SETUP":
-        return {"kind": "invalid", "reason": f"decision was {obj.get('decision')!r}"}
+    """The AI's answer to the brief, checked. kind is trade, no_setup or invalid (with a reason).
+
+    Accepts the requested KEY: value lines, a JSON object, or plain text that says
+    NO_SETUP. Bold markers, extra words after a number and missing optional lines
+    are tolerated, so a model that does not follow the format exactly still works.
+    """
+    reply = reply or ""
+    fields = _brief_fields(reply)
+    decision = re.sub(r"[^A-Z]", "", fields.get("decision", "").upper())
+    if not decision:
+        if re.search(r"\bNO[\s_-]?SETUP\b", reply, re.I):
+            decision = "NOSETUP"
+        elif re.search(r"\bTRADE[\s_-]?SETUP\b", reply, re.I):
+            decision = "TRADESETUP"
+    sid_match = re.search(r"[A-Za-z_]*\d+", fields.get("strategy", ""))
+    sid = sid_match.group(0).lstrip("#") if sid_match else ""
+    if sid.lower().startswith("strategy"):
+        sid = sid[len("strategy"):]
+    reasoning = fields.get("reason", "")[:2000]
+
+    if decision == "NOSETUP":
+        return {"kind": "no_setup", "strategy_id": sid if sid in allowed_ids else None,
+                "reasoning": reasoning or " ".join(reply.split())[:300]}
+    if decision != "TRADESETUP":
+        return {"kind": "invalid", "reason": "no TRADE_SETUP or NO_SETUP decision in the reply"}
     if sid not in allowed_ids:
         return {"kind": "invalid", "reason": f"strategy {sid!r} was not on the shortlist {allowed_ids}"}
-    direction = str(obj.get("direction", "")).upper()
-    order_type = str(obj.get("order_type", "market")).lower()
-    if direction not in ("BUY", "SELL") or order_type not in ("market", "limit", "stop"):
-        return {"kind": "invalid", "reason": f"direction {direction!r} / order type {order_type!r}"}
-    try:
-        sl = float(obj["stop_loss"])
-        tp = float(obj["take_profit"]) if obj.get("take_profit") not in (None, "") else None
-        entry = float(obj.get("entry_price") or price) if order_type != "market" else price
-        confidence = int(float(obj.get("confidence", 50)))
-    except (KeyError, TypeError, ValueError) as e:
-        return {"kind": "invalid", "reason": f"missing or non-numeric level: {e}"}
+    direction = fields.get("direction", "").upper()
+    direction = "BUY" if "BUY" in direction or "LONG" in direction else "SELL" if "SELL" in direction or "SHORT" in direction else ""
+    order = fields.get("order", "market").lower()
+    order_type = "limit" if "limit" in order else "stop" if "stop" in order else "market"
+    sl, tp, entry = _number(fields.get("stop")), _number(fields.get("target")), _number(fields.get("entry"))
+    if not direction:
+        return {"kind": "invalid", "reason": "no BUY or SELL direction"}
+    if sl is None:
+        return {"kind": "invalid", "reason": "no stop loss price"}
+    if order_type != "market" and entry is None:
+        return {"kind": "invalid", "reason": f"a {order_type} order needs an entry price"}
+    confidence = _number(fields.get("confidence"))
     return {"kind": "trade", "strategy_id": sid, "setup": {
         "action": "TRADE_SETUP", "direction": direction, "order_type": order_type,
-        "entry_price": entry, "stop_loss": sl, "take_profit": tp,
-        "confidence": confidence, "reasoning": reasoning}}
+        "entry_price": price if order_type == "market" else entry, "stop_loss": sl, "take_profit": tp,
+        "confidence": int(confidence) if confidence is not None else 50, "reasoning": reasoning}}
 
 
 def _parse_trade_setup(output: str):
@@ -1315,7 +1368,8 @@ async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
     _ai_failure = {"reason": ""}
 
     async def _call_ai_with_retry(messages: list, provider: str, model: str, max_retries: int = 3, stage: str = "initial",
-                                  single_provider: bool = False) -> tuple[str | None, dict | None, dict | None]:
+                                  single_provider: bool = False, max_tokens: int = 2500,
+                                  extract_code: bool = True) -> tuple[str | None, dict | None, dict | None]:
         """Call AI with multi-key fallback + provider fallback.
 
         For each provider, resolves ALL available API keys (comma-separated).
@@ -1400,12 +1454,12 @@ async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
                             model=actual_model,
                             messages=messages,
                             temperature=0.2,
-                            max_tokens=2500,
+                            max_tokens=max_tokens,
                             timeout=60
                         )
                         latency_ms = int((time.time() - _t0) * 1000)
                         content = response.choices[0].message.content or ""
-                        match = re.search(r'```(?:python)?\n?(.*?)```', content, re.DOTALL)
+                        match = re.search(r'```(?:python)?\n?(.*?)```', content, re.DOTALL) if extract_code else None
                         result = match.group(1).strip() if match else content.strip()
                         usage = None
                         if hasattr(response, 'usage') and response.usage:
@@ -1513,6 +1567,8 @@ async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
         reply, _last_usage, full_raw_response = await _call_ai_with_retry(
             messages=[{"role": "system", "content": BRIEF_SYSTEM}, {"role": "user", "content": brief_message}],
             provider=provider, model=model, max_retries=2, stage="brief",
+            # Thinking models spend part of the limit before answering; 2500 cut answers off.
+            max_tokens=8000, extract_code=False,
         )
         if not reply:
             busy = _ai_failure.get("rate_limited")
@@ -1528,7 +1584,8 @@ async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
         decision = _parse_brief_decision(reply, allowed_ids, signals["price"])
         top_id = allowed_ids[0]
         if decision["kind"] == "invalid":
-            add_log(user_id, f"AI answer not usable: {decision['reason']}", "WARNING")
+            snippet = " ".join(reply.split())[:200]
+            add_log(user_id, f"AI answer not usable: {decision['reason']}. It began: {snippet!r}", "WARNING")
             decision_context["ai_choice"] = {"kind": "invalid", "reason": decision["reason"]}
             await _update_autopilot_cycle(cycle_id, selection_context=decision_context)
             state["stats"]["error_count"] += 1

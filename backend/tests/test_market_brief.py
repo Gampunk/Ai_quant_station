@@ -80,8 +80,9 @@ def test_the_brief_is_short_and_complete():
     s = ms.compute_signals(_candles(), REGIME, datetime(2026, 10, 9, 13, 0, tzinfo=timezone.utc))
     assert s["ok"] and s["session"] == "overlap" and len(s["recent_candles"]) == ms.RECENT_CANDLES
     text = ms.brief_text("XAUUSD", s)
-    for part in ("Session: overlap", "Regime: bullish_trend", "Volume:", "Swing highs", "Last 30 candles"):
+    for part in ("Session overlap", "Regime bullish_trend", "Volume ", "Swing highs", f"Last {ms.RECENT_CANDLES} candles"):
         assert part in text
+    assert len(text) < 1500, f"the market part of the brief is {len(text)} characters"
     raw = "\n".join(json.dumps(c) for c in _candles())
     assert len(text) < len(raw) / 5, "the brief should be far smaller than the raw candles it replaces"
 
@@ -177,3 +178,40 @@ def test_no_setup_and_garbage():
     assert _parse_brief_decision("I think you should buy", ["5"], 1.0)["kind"] == "invalid"
     assert _parse_brief_decision('{"decision": "TRADE_SETUP", "strategy_id": "5", "direction": "BUY"}',
                                  ["5"], 1.0)["kind"] == "invalid"
+
+
+# ── Answers that do not follow the format exactly still work ────────────────
+def _parse(reply, ids=("5", "12", "40"), price=2000.0):
+    from app.api.autopilot import _parse_brief_decision
+    return _parse_brief_decision(reply, list(ids), price)
+
+
+def test_the_requested_line_format():
+    d = _parse("DECISION: TRADE_SETUP\nSTRATEGY: 12\nDIRECTION: BUY\nORDER: market\nENTRY: 2000\n"
+               "STOP: 1990.5\nTARGET: 2020\nCONFIDENCE: 70\nREASON: support held at 1991")
+    assert d["kind"] == "trade" and d["strategy_id"] == "12"
+    assert d["setup"]["stop_loss"] == 1990.5 and d["setup"]["take_profit"] == 2020.0
+    assert d["setup"]["reasoning"] == "support held at 1991"
+
+
+def test_markdown_and_extra_words_are_tolerated():
+    d = _parse("Here is my answer:\n**DECISION:** TRADE_SETUP\n**Strategy:** #40\n- Direction: Short\n"
+               "Stop: 2012.3 (above the swing high)\nTarget: 1975\nConfidence: 65%")
+    assert d["kind"] == "trade" and d["strategy_id"] == "40" and d["setup"]["direction"] == "SELL"
+    assert d["setup"]["stop_loss"] == 2012.3 and d["setup"]["confidence"] == 65
+
+
+def test_a_json_answer_cut_off_midway_is_still_read():
+    d = _parse('```json\n{"decision": "TRADE_SETUP", "strategy_id": "5", "direction": "BUY", '
+               '"order_type": "market", "stop_loss": 1992.0, "take_profit": 2015.0, "reasoning": "breakout ab')
+    assert d["kind"] == "trade" and d["strategy_id"] == "5" and d["setup"]["stop_loss"] == 1992.0
+
+
+def test_plain_text_no_setup():
+    d = _parse("After reviewing all three strategies, none of their conditions are met. NO SETUP.")
+    assert d["kind"] == "no_setup" and "none of their conditions" in d["reasoning"]
+
+
+def test_a_trade_without_a_stop_is_refused():
+    d = _parse("DECISION: TRADE_SETUP\nSTRATEGY: 12\nDIRECTION: BUY\nTARGET: 2020")
+    assert d["kind"] == "invalid" and "stop" in d["reason"]

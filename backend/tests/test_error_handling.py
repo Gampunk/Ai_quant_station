@@ -402,8 +402,8 @@ def _brief_ai(calls, answer):
         async def create(self, model, messages, **kwargs):
             text = messages[-1]["content"]
             calls.append(text)
-            price = float(re.search(r"^Price: ([\d.]+)", text, re.M).group(1))
-            ids = re.findall(r"^STRATEGY (\S+) \(", text, re.M)
+            price = float(re.search(r"Price ([\d.]+)\.", text).group(1))
+            ids = re.findall(r"^STRATEGY (\S+):", text, re.M)
             reply = answer(price, ids)
             if isinstance(reply, Exception):
                 raise reply
@@ -447,15 +447,15 @@ async def _brief_cycle(fake_broker, monkeypatch, db_session, answer):
 
 
 def _second_choice_buy(price, ids):
-    return json.dumps({"decision": "TRADE_SETUP", "strategy_id": ids[1], "direction": "BUY", "order_type": "market",
-                       "entry_price": price, "stop_loss": round(price - 8, 2), "take_profit": round(price + 16, 2),
-                       "confidence": 72, "reasoning": "pullback to EMA20 held"})
+    return (f"DECISION: TRADE_SETUP\nSTRATEGY: {ids[1]}\nDIRECTION: BUY\nORDER: market\nENTRY: {price}\n"
+            f"STOP: {round(price - 8, 2)}\nTARGET: {round(price + 16, 2)}\nCONFIDENCE: 72\n"
+            f"REASON: pullback to EMA20 held")
 
 
 async def test_one_call_with_a_small_brief_places_the_ais_choice(fake_broker, monkeypatch, db_session):
     calls, messages, cycle = await _brief_cycle(fake_broker, monkeypatch, db_session, _second_choice_buy)
     assert len(calls) == 1, f"{len(calls)} AI calls in one cycle"
-    assert len(calls[0]) < 8000, f"the brief was {len(calls[0])} characters"
+    assert len(calls[0]) < 3000, f"the brief was {len(calls[0])} characters"
     assert len(re.findall(r"^STRATEGY ", calls[0], re.M)) == settings.AUTOPILOT_SHORTLIST
     assert cycle.outcome == "trade_executed", (cycle.outcome, cycle.outcome_reason, messages[-6:])
     choice = cycle.selection_context["ai_choice"]
