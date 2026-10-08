@@ -307,3 +307,78 @@ async def test_the_chosen_model_is_the_one_used(fake_broker, monkeypatch, db_ses
 async def test_each_cycle_is_counted_once(fake_broker, monkeypatch, db_session):
     _, messages = await _one_gemini_cycle(fake_broker, monkeypatch, db_session, "chat-model")
     assert sum(m.startswith("=== Starting Cycle") for m in messages) == 1, [m for m in messages if "Starting Cycle" in m]
+
+
+# ── One cycle asks the AI as few times as possible (Part 1) ─────────────────
+# Seen on the test server: one cycle called the single keyed provider about ten
+# times, through failover to providers without keys and the backup step.
+def _scripted_ai(calls, replies):
+    """A fake AI that answers each call with the next reply; an Exception reply is raised."""
+    class Completions:
+        async def create(self, model, messages, **kwargs):
+            calls.append((model, messages[-1]["content"][:60]))
+            reply = replies.pop(0) if replies else RuntimeError("Error code: 429 - RESOURCE_EXHAUSTED")
+            if isinstance(reply, Exception):
+                raise reply
+            message = SimpleNamespace(content=reply)
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=Completions())
+    return FakeClient
+
+
+async def _scripted_cycle(fake_broker, monkeypatch, db_session, replies):
+    monkeypatch.setattr(settings, "MT5_CONNECTOR_URL", fake_broker)
+    monkeypatch.setattr(settings, "MT5_API_TOKEN", "")
+    await connector_client.initialize()
+    models_cache._blacklist.clear()
+
+    async def keys(provider, *args, **kwargs):
+        return ["test-key"] if provider == "gemini" else []
+    monkeypatch.setattr(providers, "resolve_all_api_keys", keys)
+
+    async def instant(*args, **kwargs):
+        return None
+    monkeypatch.setattr(autopilot.asyncio, "sleep", instant)
+    calls = []
+    monkeypatch.setattr(autopilot, "AsyncOpenAI", _scripted_ai(calls, list(replies)))
+
+    db_session.add(AutopilotSettings(user_id=1, symbol="XAUUSD", provider="gemini", model="chat-model"))
+    await db_session.commit()
+    autopilot._user_states.pop(1, None)
+    await autopilot.run_autopilot_cycle(1)
+    messages = [entry["message"] for entry in autopilot._get_state(1)["logs"]]
+    return calls, messages
+
+
+DUNDER_CODE = "```python\nif __name__ == '__main__':\n    print('x')\n```"
+NO_SETUP_CODE = "```python\nprint('NO_SETUP')\n```"
+
+
+async def test_rejected_code_goes_back_to_the_same_ai_once(fake_broker, monkeypatch, db_session):
+    calls, messages = await _scripted_cycle(fake_broker, monkeypatch, db_session, [DUNDER_CODE, NO_SETUP_CODE])
+    assert len(calls) == 2, calls
+    assert all(model == "chat-model" for model, _ in calls), "the chosen model must be used every time"
+    assert any("Asking it to fix the code once" in m for m in messages), messages[-6:]
+    assert any("fixed its code: NO_SETUP" in m for m in messages), messages[-6:]
+
+
+async def test_providers_without_a_key_are_never_tried(fake_broker, monkeypatch, db_session):
+    _, messages = await _scripted_cycle(fake_broker, monkeypatch, db_session, [DUNDER_CODE, DUNDER_CODE])
+    assert not any(m.startswith("Trying provider") for m in messages), [m for m in messages if "Trying provider" in m]
+
+
+async def test_no_setup_is_accepted_with_one_call(fake_broker, monkeypatch, db_session):
+    calls, messages = await _scripted_cycle(fake_broker, monkeypatch, db_session, [NO_SETUP_CODE])
+    assert len(calls) == 1, calls
+    assert not any("backup" in m.lower() for m in messages), messages[-6:]
+
+
+async def test_a_busy_provider_ends_the_cycle_instead_of_piling_on(fake_broker, monkeypatch, db_session):
+    busy = RuntimeError("Error code: 503 - This model is currently experiencing high demand. UNAVAILABLE")
+    calls, messages = await _scripted_cycle(fake_broker, monkeypatch, db_session, [DUNDER_CODE, busy, busy, busy])
+    assert len(calls) <= 3, calls
+    assert any("busy" in m for m in messages), messages[-6:]
+    assert not any(m.startswith("Backup:") for m in messages), "the backup must not run while the provider is busy"

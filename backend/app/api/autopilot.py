@@ -53,6 +53,9 @@ def _capture_raw_response(response) -> dict | None:
 # make it look like a refused key, so the same broken model was retried every cycle.
 _MODEL_UNUSABLE = ("only supports interactions api", "model_not_supported", "model not supported",
                    "is not supported", "404", "not found", "does not exist", "unknown model")
+# Rate limited or overloaded: worth waiting for, not worth asking again at once.
+_BUSY = ("429", "too_many_requests", "queue_exceeded", "resource_exhausted",
+         "503", "unavailable", "overloaded", "high demand")
 _KEY_REFUSED = ("api key not valid", "api_key_invalid", "invalid api key", "invalid_api_key",
                 "incorrect api key", "unauthorized", "401", "expired")
 
@@ -361,6 +364,24 @@ def _classify_exit_reason(close_deals: list[dict], profit: float):
         source = "unavailable"
     exit_reason = classification if classification not in ("PROFIT", "LOSS") else "UNKNOWN"
     return classification, exit_reason, source
+
+
+def _parse_trade_setup(output: str):
+    """A TRADE_SETUP from sandbox output: a ```json block, or a JSON line. None if absent."""
+    jm = re.search(r'```json\n?(.*?)```', output or "", re.DOTALL)
+    if jm:
+        try:
+            return json.loads(jm.group(1))
+        except json.JSONDecodeError:
+            pass
+    for line in (output or "").strip().split("\n"):
+        try:
+            obj = json.loads(line.strip())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and obj.get("action") == "TRADE_SETUP":
+            return obj
+    return None
 
 
 def _classify_execution_error(message: str) -> str:
@@ -1174,7 +1195,8 @@ async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
     # Why the last _call_ai_with_retry returned nothing, for the cycle's log line.
     _ai_failure = {"reason": ""}
 
-    async def _call_ai_with_retry(messages: list, provider: str, model: str, max_retries: int = 3, stage: str = "initial") -> tuple[str | None, dict | None, dict | None]:
+    async def _call_ai_with_retry(messages: list, provider: str, model: str, max_retries: int = 3, stage: str = "initial",
+                                  single_provider: bool = False) -> tuple[str | None, dict | None, dict | None]:
         """Call AI with multi-key fallback + provider fallback.
 
         For each provider, resolves ALL available API keys (comma-separated).
@@ -1183,6 +1205,10 @@ async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
 
         Returns (content, usage_dict) where usage_dict has prompt_tokens, completion_tokens, total_tokens.
         On failure returns (None, None) and leaves the reason in _ai_failure.
+
+        single_provider=True asks only `provider`, as the failover, self-correction
+        and backup steps do. They used to fall through the whole provider list, so
+        with one key every one of them called the same provider again.
         """
         from ..core.providers import PROVIDERS, get_provider_names, get_base_url, resolve_all_api_keys
 
@@ -1190,8 +1216,12 @@ async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
         no_key: list[str] = []
         last_error = ""
         _ai_failure["reason"] = "the reply was empty"  # if a provider answers with nothing
+        _ai_failure["rate_limited"] = False
 
-        if model_routing and model_routing["provider"] in providers:
+        if single_provider:
+            providers = [provider]
+            provider_idx = 0
+        elif model_routing and model_routing["provider"] in providers:
             providers = [model_routing["provider"]] + [
                 p for p in providers if p != model_routing["provider"]
             ]
@@ -1280,11 +1310,12 @@ async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
                         return result, usage, _capture_raw_response(response)
                     except Exception as e:
                         err_str = str(e).lower()
-                        if "429" in err_str or "too_many_requests" in err_str or "queue_exceeded" in err_str:
+                        if any(m in err_str for m in _BUSY):
                             # Rate limited — try next key for this provider
-                            add_log(user_id, f"Provider {p} key {key_idx + 1} rate limited (429), trying next key...", "WARNING")
+                            add_log(user_id, f"Provider {p} key {key_idx + 1} is busy (rate limited or overloaded): {str(e)[:80]}", "WARNING")
                             await _log_call("rate_limited", p, actual_model, stage, err=str(e)[:200])
-                            last_error = f"{p} is rate limiting requests"
+                            last_error = f"{p} is rate limiting requests or overloaded"
+                            _ai_failure["rate_limited"] = True
                             continue
                         elif any(m in err_str for m in _MODEL_UNUSABLE):
                             # This model cannot be used this way (for example one that "only
@@ -1468,6 +1499,8 @@ Use this: repeat what worked, propose an alternative to anything listed as under
     code_prompt = f"""You are a quant trader. Write Python code to analyze market data.
 
 IMPORTANT RULES:
+0. NEVER write any name with double underscores (no __name__, __main__, __len__, __class__, __import__).
+   Code containing them is rejected before it runs.
 1. Write DIRECT executable statements -- NOT a function definition. The code runs via exec(), NOT by calling a function.
    WRONG (will produce NO output):
       def calculate_signals(df): ...
@@ -1587,23 +1620,36 @@ Strategy:
     _known_working = [p for p in _remaining if p in _priority]
     _others = [p for p in _remaining if p not in _priority]
     _retry_providers = [provider] + _known_working + _others
-    if not _retry_providers:
-        _retry_providers = [provider]
+    # Only providers that have a key: asking the rest only fell through to the
+    # one provider that does, multiplying calls to it.
+    from ..core.providers import resolve_all_api_keys as _keys_for
+    _retry_providers = [p for p in dict.fromkeys(_retry_providers)
+                        if p == provider or await _keys_for(p, settings, user_id, AsyncSessionLocal)]
+
+    def _model_for(p: str) -> str:
+        return model if p == provider else PROVIDERS[p]["models"][0]
+
+    _busy = False
 
     for p_idx, retry_p in enumerate(_retry_providers):
         # First iteration uses the already-generated code from the initial call.
         # Subsequent iterations generate new code with the next provider.
+        if _busy:
+            break  # the provider is rate limiting: stop here, the next cycle tries again
         if p_idx > 0:
             add_log(user_id, f"Trying provider {retry_p} for code generation...", "INFO")
             new_code, _last_usage, _raw_resp = await _call_ai_with_retry(
                 messages=[{"role": "user", "content": code_prompt}],
                 provider=retry_p,
-                model=PROVIDERS[retry_p]["models"][0],
+                model=_model_for(retry_p),
                 max_retries=2,
                 stage="failover",
+                single_provider=True,
             )
             if _raw_resp:
                 full_raw_response = _raw_resp
+            if _ai_failure.get("rate_limited"):
+                _busy = True
             if not new_code:
                 add_log(user_id, f"{retry_p} code generation returned nothing ({_ai_failure['reason']}), skipping")
                 continue
@@ -1651,9 +1697,11 @@ Strategy:
                 break
 
             if "NO_SETUP" in output:
+                # The AI's answer stands. Asking other providers until one says yes
+                # would be shopping for a trade, and costs calls.
                 saw_no_setup = True
-                add_log(user_id, f"{retry_p} says NO_SETUP, trying next provider", "WARNING")
-                continue
+                add_log(user_id, f"{retry_p} says NO_SETUP", "INFO")
+                break
 
             # Unclear output — try self-correction once with same provider
             add_log(user_id, f"{retry_p} output unclear, trying self-correction...", "WARNING")
@@ -1664,9 +1712,10 @@ Strategy:
                     {"role": "user", "content": f"The code ran but didn't output a valid TRADE_SETUP or NO_SETUP. Fix it to output exactly one of these formats. Output was:\n{output[:400]}"}
                 ],
                 provider=retry_p,
-                model=PROVIDERS[retry_p]["models"][0],
+                model=_model_for(retry_p),
                 max_retries=2,
                 stage="self_correct",
+                single_provider=True,
             )
             if _raw_resp:
                 full_raw_response = _raw_resp
@@ -1711,12 +1760,56 @@ Strategy:
             else:
                 add_log(user_id, f"{retry_p} self-correction failed", "WARNING")
         else:
-            # Sandbox error — try next provider
-            sand_err = sandbox_result.get("error", "Unknown error")[:200]
-            add_log(user_id, f"{retry_p} code error: {sand_err}", "WARNING")
+            # Sandbox error: give the same AI one chance to fix its code before
+            # moving on. It used to go straight to the next provider.
+            sand_err = sandbox_result.get("error", "Unknown error")[:300]
+            add_log(user_id, f"{retry_p} code error: {sand_err[:200]}. Asking it to fix the code once.", "WARNING")
+            fixed, _last_usage, _raw_resp = await _call_ai_with_retry(
+                messages=[
+                    {"role": "user", "content": code_prompt},
+                    {"role": "assistant", "content": generated_code},
+                    {"role": "user", "content": f"The code failed with this error:\n{sand_err}\n"
+                                                "Fix it. Never use names with double underscores. "
+                                                "Output ONLY the corrected Python code."},
+                ],
+                provider=retry_p,
+                model=_model_for(retry_p),
+                max_retries=1,
+                stage="self_correct",
+                single_provider=True,
+            )
+            if _ai_failure.get("rate_limited"):
+                _busy = True
+            if fixed:
+                generated_code = fixed
+                ai_response = generated_code
+                try:
+                    sandbox_result = await run_python_code(code=generated_code, market_data=market_data,
+                                                           symbol=symbol, user_id=user_id)
+                except Exception as e:
+                    add_log(user_id, f"Corrected code from {retry_p} also failed: {str(e)}", "ERROR")
+                    continue
+                if sandbox_result.get("success"):
+                    fixed_output = sandbox_result.get("output", "")
+                    setup = _parse_trade_setup(fixed_output)
+                    if setup:
+                        add_log(user_id, f"TRADE_SETUP found via {retry_p} after fixing its code (conf={setup.get('confidence')}%)")
+                        break
+                    if "NO_SETUP" in fixed_output:
+                        saw_no_setup = True
+                        add_log(user_id, f"{retry_p} fixed its code: NO_SETUP", "INFO")
+                        break
+                else:
+                    add_log(user_id, f"{retry_p} fixed code still failed: {sandbox_result.get('error', '')[:200]}", "WARNING")
 
     # ── BACKUP: all sandbox providers failed, send 50 candles + indicators directly ──
-    if not setup:
+    if not setup and _busy:
+        add_log(user_id, "The AI provider is busy (rate limited or overloaded). Skipping the backup; "
+                         "the next cycle tries again.", "WARNING")
+        state["stats"]["skipped_count"] += 1
+        await _finish_autopilot_cycle(user_id, cycle_id, "ai_provider_busy", _ai_failure["reason"])
+        return
+    if not setup and not saw_no_setup:
         add_log(user_id, "All providers failed sandbox, trying backup (50 candles + indicators)...", "WARNING")
 
         # Build candle text block (last 50)
@@ -1800,12 +1893,16 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
             fallback_response, _last_usage, _raw_resp = await _call_ai_with_retry(
                 messages=[{"role": "user", "content": backup_prompt}],
                 provider=retry_p,
-                model=PROVIDERS[retry_p]["models"][0],
+                model=_model_for(retry_p),
                 max_retries=2,
                 stage="backup",
+                single_provider=True,
             )
             if _raw_resp:
                 full_raw_response = _raw_resp
+            if _ai_failure.get("rate_limited"):
+                add_log(user_id, "The AI provider is busy; stopping the backup. The next cycle tries again.", "WARNING")
+                break
             if not fallback_response:
                 add_log(user_id, f"Backup {retry_p} returned nothing ({_ai_failure['reason']}), skipping")
                 continue
@@ -1837,40 +1934,42 @@ Output ONLY one of the following (no code, no explanation outside the JSON):
 
             if "NO_SETUP" in fallback_response:
                 saw_no_setup = True
-                add_log(user_id, f"Backup {retry_p}: NO_SETUP, trying next provider", "WARNING")
-                continue
+                add_log(user_id, f"Backup {retry_p}: NO_SETUP", "INFO")
+                break
 
             add_log(user_id, f"Backup {retry_p}: unclear response, trying next provider", "WARNING")
 
-        if not setup:
-            add_log(user_id, "All backup providers: NO_SETUP or failed", "WARNING")
-            state["stats"]["skipped_count"] += 1
-            async with AsyncSessionLocal() as db:
-                no_setup_record = AutopilotTrade(
-                    user_id=user_id, prompt_number=prompt_num, prompt_text=prompt_text,
-                    symbol=symbol, direction="NONE", order_type="market", lot_size=lot_size,
-                    execution_status="skipped", decision_type="NO_SETUP",
-                    reasoning="All providers returned NO_SETUP or failed",
-                    market_regime=market_regime.get("regime") if market_regime else None,
-                    regime_details=market_regime,
-                    prompt_tags=decision_context.get("selected_tags"),
-                    decision_score=decision_context.get("selected_score"),
-                    decision_context=decision_context,
-                    source=_source,
-                    cycle_number=state["stats"]["total_runs"],
-                    cycle_id=cycle_id,
-                )
-                db.add(no_setup_record)
-                await db.commit()
-            await _finish_autopilot_cycle(
-                user_id,
-                cycle_id,
-                "no_setup" if saw_no_setup else "ai_provider_or_response_failed",
-                "Model explicitly returned NO_SETUP" if saw_no_setup else "No valid setup produced after provider and sandbox fallbacks",
-                execution_status="skipped",
-                decision_source=_source,
+    # No setup, whether the AI said NO_SETUP or every attempt failed: record it and end the cycle.
+    if not setup:
+        add_log(user_id, "No setup this cycle: the AI said NO_SETUP" if saw_no_setup
+                else "No setup this cycle: every attempt failed", "INFO" if saw_no_setup else "WARNING")
+        state["stats"]["skipped_count"] += 1
+        async with AsyncSessionLocal() as db:
+            no_setup_record = AutopilotTrade(
+                user_id=user_id, prompt_number=prompt_num, prompt_text=prompt_text,
+                symbol=symbol, direction="NONE", order_type="market", lot_size=lot_size,
+                execution_status="skipped", decision_type="NO_SETUP",
+                reasoning="The AI returned NO_SETUP" if saw_no_setup else "Every attempt failed",
+                market_regime=market_regime.get("regime") if market_regime else None,
+                regime_details=market_regime,
+                prompt_tags=decision_context.get("selected_tags"),
+                decision_score=decision_context.get("selected_score"),
+                decision_context=decision_context,
+                source=_source,
+                cycle_number=state["stats"]["total_runs"],
+                cycle_id=cycle_id,
             )
-            return
+            db.add(no_setup_record)
+            await db.commit()
+        await _finish_autopilot_cycle(
+            user_id,
+            cycle_id,
+            "no_setup" if saw_no_setup else "ai_provider_or_response_failed",
+            "Model explicitly returned NO_SETUP" if saw_no_setup else "No valid setup produced after provider and sandbox fallbacks",
+            execution_status="skipped",
+            decision_source=_source,
+        )
+        return
 
     direction = setup.get("direction", "BUY").upper()
     order_type = setup.get("order_type", "market").lower()
