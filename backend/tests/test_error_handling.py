@@ -236,3 +236,74 @@ async def test_refresh_fails_safely_when_the_old_token_cannot_be_revoked(client,
 
     resp = await client.post("/api/auth/refresh", json={"refresh_token": pair["refresh_token"]})
     assert resp.status_code == 503, "a new pair was issued while the old refresh token stayed valid"
+
+
+# ── An unusable model is set aside, not mistaken for a bad key ──────────────
+# Seen on the Version 2 test server: Gemini answered every call with
+# 400 "This model only supports Interactions API" (INVALID_ARGUMENT). The word
+# "invalid" made it look like a refused key, and the chosen model was ignored.
+from types import SimpleNamespace  # noqa: E402
+
+from app.core import models_cache  # noqa: E402
+
+INTERACTIONS_ONLY = ("Error code: 400 - [{'error': {'code': 400, 'message': 'This model only "
+                     "supports Interactions API.', 'status': 'INVALID_ARGUMENT'}}]")
+
+
+def _fake_ai(calls):
+    class Completions:
+        async def create(self, model, **kwargs):
+            calls.append(model)
+            if model == "interactions-only-model":
+                raise RuntimeError(INTERACTIONS_ONLY)
+            message = SimpleNamespace(content="```python\nprint('NO_SETUP')\n```")
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=Completions())
+    return FakeClient
+
+
+async def _one_gemini_cycle(fake_broker, monkeypatch, db_session, chosen_model):
+    monkeypatch.setattr(settings, "MT5_CONNECTOR_URL", fake_broker)
+    monkeypatch.setattr(settings, "MT5_API_TOKEN", "")
+    await connector_client.initialize()
+    models_cache._blacklist.clear()
+
+    async def keys(provider, *args, **kwargs):
+        return ["test-key"] if provider == "gemini" else []
+    monkeypatch.setattr(providers, "resolve_all_api_keys", keys)
+
+    async def live_models(*args, **kwargs):
+        return [m for m in ("interactions-only-model", "chat-model")
+                if not models_cache.is_blacklisted("gemini", m)]
+    monkeypatch.setattr(autopilot, "_get_live_models", live_models)
+    calls = []
+    monkeypatch.setattr(autopilot, "AsyncOpenAI", _fake_ai(calls))
+
+    db_session.add(AutopilotSettings(user_id=1, symbol="XAUUSD", provider="gemini", model=chosen_model))
+    await db_session.commit()
+    autopilot._user_states.pop(1, None)
+    await autopilot.run_autopilot_cycle(1)
+    messages = [entry["message"] for entry in autopilot._get_state(1)["logs"]]
+    models_cache._blacklist.clear()
+    return calls, messages
+
+
+async def test_an_unusable_model_is_set_aside_and_another_is_tried(fake_broker, monkeypatch, db_session):
+    calls, messages = await _one_gemini_cycle(fake_broker, monkeypatch, db_session, "interactions-only-model")
+    assert calls[:2] == ["interactions-only-model", "chat-model"], calls
+    assert any("cannot be used here" in m for m in messages), messages[-8:]
+    assert not any("refused the key" in m or "auth failed" in m for m in messages), "a model problem was blamed on the key"
+    assert any(m.startswith("AI generated code") for m in messages), messages[-8:]
+
+
+async def test_the_chosen_model_is_the_one_used(fake_broker, monkeypatch, db_session):
+    calls, _ = await _one_gemini_cycle(fake_broker, monkeypatch, db_session, "chat-model")
+    assert calls and calls[0] == "chat-model", "the model chosen on the Autopilot page was ignored"
+
+
+async def test_each_cycle_is_counted_once(fake_broker, monkeypatch, db_session):
+    _, messages = await _one_gemini_cycle(fake_broker, monkeypatch, db_session, "chat-model")
+    assert sum(m.startswith("=== Starting Cycle") for m in messages) == 1, [m for m in messages if "Starting Cycle" in m]

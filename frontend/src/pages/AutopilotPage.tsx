@@ -245,22 +245,34 @@ export default function AutopilotPage() {
     }
   }
 
+  // One Start or Stop at a time: repeated clicks used to start and stop the loop
+  // several times a second, cancelling each cycle before it could finish.
+  const [switching, setSwitching] = useState(false)
+
   const handleStart = async () => {
-    await saveSettings()
+    if (switching) return
+    setSwitching(true)
     try {
+      await saveSettings()
       await axios.post('/api/autopilot/start')
-      fetchStatus()
+      await fetchStatus()
     } catch (error: any) {
       toast({ title: 'Start Failed', description: error.response?.data?.detail || error.message, variant: 'destructive' })
+    } finally {
+      setSwitching(false)
     }
   }
 
   const handleStop = async () => {
+    if (switching) return
+    setSwitching(true)
     try {
       await axios.post('/api/autopilot/stop')
-      fetchStatus()
+      await fetchStatus()
     } catch (error) {
       console.error('Failed to stop autopilot:', error)
+    } finally {
+      setSwitching(false)
     }
   }
 
@@ -376,9 +388,9 @@ export default function AutopilotPage() {
             {status?.enabled ? 'Running' : 'Stopped'}
           </div>
           {status?.enabled ? (
-            <Button variant="destructive" onClick={handleStop}>Stop</Button>
+            <Button variant="destructive" onClick={handleStop} disabled={switching}>{switching ? 'Stopping...' : 'Stop'}</Button>
           ) : (
-            <Button onClick={handleStart}>Start Autopilot</Button>
+            <Button onClick={handleStart} disabled={switching}>{switching ? 'Starting...' : 'Start Autopilot'}</Button>
           )}
         </div>
       </div>

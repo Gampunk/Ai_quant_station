@@ -48,6 +48,14 @@ def _capture_raw_response(response) -> dict | None:
         except Exception:  # swallow-ok: the raw copy is only kept for debugging
             return None
 
+# How an AI provider's error is told apart. A model problem is checked first: Gemini
+# answers an unusable model with 400 INVALID_ARGUMENT, and the word "invalid" used to
+# make it look like a refused key, so the same broken model was retried every cycle.
+_MODEL_UNUSABLE = ("only supports interactions api", "model_not_supported", "model not supported",
+                   "is not supported", "404", "not found", "does not exist", "unknown model")
+_KEY_REFUSED = ("api key not valid", "api_key_invalid", "invalid api key", "invalid_api_key",
+                "incorrect api key", "unauthorized", "401", "expired")
+
 _user_states: Dict[int, dict] = {}
 _user_locks: Dict[int, asyncio.Lock] = {}
 _trade_sync_locks: Dict[int, asyncio.Lock] = {}
@@ -1062,10 +1070,6 @@ async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
                 s.mt5_connected = True
                 await db.commit()
 
-    state["stats"]["total_runs"] += 1
-    state["stats"]["last_run"] = datetime.now(timezone.utc).isoformat()
-    add_log(user_id, f"=== Starting Cycle #{state['stats']['total_runs']} ===")
-
     # Read from the database every cycle, so restarts and back-syncs cannot skew them.
     await _refresh_daily_stats(user_id)
     if state["stats"]["daily_trade_count"] >= max_trades:
@@ -1224,10 +1228,16 @@ async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
                         await _log_call("no_key", p, model if p == provider else PROVIDERS[p]["models"][0], stage)
                     continue
 
+                from ..core.models_cache import is_blacklisted
                 if model_routing and p == model_routing["provider"]:
                     actual_model = model_routing["model"]
+                elif p == provider and model and not is_blacklisted(p, model):
+                    # The model chosen on the Autopilot page. It used to be ignored:
+                    # the provider's first listed model was taken instead.
+                    actual_model = model
                 else:
                     actual_model = await get_best_model(p, all_keys)
+                model_unusable = False
 
                 # Try each key for this provider
                 for key_idx, api_key in enumerate(all_keys):
@@ -1276,7 +1286,19 @@ async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
                             await _log_call("rate_limited", p, actual_model, stage, err=str(e)[:200])
                             last_error = f"{p} is rate limiting requests"
                             continue
-                        elif "expired" in err_str or "invalid" in err_str or "unauthorized" in err_str or "401" in err_str:
+                        elif any(m in err_str for m in _MODEL_UNUSABLE):
+                            # This model cannot be used this way (for example one that "only
+                            # supports Interactions API"). The key is fine: set the model aside
+                            # for 24 hours and let the next attempt pick another, without waiting.
+                            from ..core.models_cache import blacklist_model
+                            blacklist_model(p, actual_model)
+                            add_log(user_id, f"Provider {p} model {actual_model} cannot be used here "
+                                             f"({str(e)[:120]}). Set aside; trying another model.", "WARNING")
+                            await _log_call("model_not_found", p, actual_model, stage, err=str(e)[:200])
+                            last_error = f"{p} model {actual_model} cannot be used: {str(e)[:120]}"
+                            model_unusable = True
+                            break
+                        elif any(m in err_str for m in _KEY_REFUSED):
                             # Auth failed — try next key for this provider
                             add_log(user_id, f"Provider {p} key {key_idx + 1} auth failed, trying next key...", "WARNING")
                             await _log_call("auth_failed", p, actual_model, stage, err=str(e)[:200])
@@ -1294,14 +1316,6 @@ async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
                             await _log_call("tier_not_allowed", p, actual_model, stage, err=str(e)[:200])
                             last_error = f"{p} does not allow this model on the account (403)"
                             break  # Skip to next provider
-                        elif "404" in err_str or "model_not_supported" in err_str or "not found" in err_str:
-                            # Model not available — blacklist it, try next key (different model via live fetch)
-                            from ..core.models_cache import blacklist_model
-                            blacklist_model(p, actual_model)
-                            add_log(user_id, f"Provider {p} model {actual_model} not available (404), blacklisted, trying next key...", "WARNING")
-                            await _log_call("model_not_found", p, actual_model, stage, err=str(e)[:200])
-                            last_error = f"{p} does not offer {actual_model} (404)"
-                            continue  # Try next key — get_best_model will pick a different model
                         else:
                             # Other error — try next key for this provider
                             err_msg = str(e)[:200]
@@ -1313,6 +1327,8 @@ async def run_autopilot_cycle(user_id: int, cycle_id: str | None = None):
                 # All keys for this provider exhausted — wait before trying next provider
                 if not last_error and len(no_key) == len(providers) - provider_idx:
                     continue  # no key at all: nothing to wait for
+                if model_unusable:
+                    continue  # another model is tried at once; waiting would not help
                 if attempt < max_retries - 1:
                     wait = min(2 ** attempt * 10, 60)
                     await asyncio.sleep(wait)

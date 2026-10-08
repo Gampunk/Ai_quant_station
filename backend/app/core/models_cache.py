@@ -108,6 +108,12 @@ async def _fetch_models_from_api(provider_id: str, api_key: str, base_url: str, 
     return []
 
 
+def is_blacklisted(provider_id: str, model_id: str) -> bool:
+    """True if the model failed in the last 24 hours and should not be tried."""
+    stamp = _blacklist.get(provider_id, {}).get(model_id)
+    return stamp is not None and time.time() - stamp <= BLACKLIST_TTL
+
+
 def blacklist_model(provider_id: str, model_id: str) -> None:
     """Blacklist a model that returned 404. Won't be used for 24 hours."""
     if provider_id not in _blacklist:
