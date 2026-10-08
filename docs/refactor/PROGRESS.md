@@ -836,3 +836,35 @@ Checks 5 and 6 were rerun after a password reset and a fresh login: the first at
 - Guessing a target hit from the comment: `test_a_comment_mentioning_tp_does_not_make_a_target_hit` fails.
 - The gate not sending the stop it set: `test_the_atr_default_stop_is_sent_to_the_broker` fails.
 - The monitor repeating an alert: `test_a_failure_is_reported_only_once_and_its_recovery_once` fails.
+
+## Autopilot Parts 1 and 2 (approved 2026-10-08: Part 1, 2a, 3a)
+
+**Status:** built. Checks on the Version 2 test server.
+
+**Part 1, fewer AI calls per cycle:**
+- Failover only to providers with a key, one provider per call, the chosen model every time.
+- Rejected code goes back to its author once.
+- NO_SETUP is accepted, not asked of the next provider.
+- 503 counts as busy, and a busy provider ends the cycle (`ai_provider_busy`).
+
+**Part 2, the brief:**
+- The backend measures the market (`core/market_signals.py`).
+- It shortlists 3 prompts by their labels (`prompt_labels.json`) and past results.
+- One AI call picks the prompt and gives the setup or NO_SETUP, as JSON.
+- Every cycle stores the signals, the shortlist and the AI's choice, including whether it beat the ranking.
+- The old path stays available with `AUTOPILOT_DECISION_MODE=code`.
+
+**Tests:** backend 435 passed and 6 skipped, connector 72, frontend 109, lint, type check, build.
+
+**Your checks**
+1. Update the server (`git pull`, rebuild the frontend, restart `quant-station-v2`). No new packages, no database change.
+2. Autopilot log per cycle: `Signals: session ..., volatility ..., volume ...`, then `Shortlist for the AI: #a (score), #b, #c`, then `AI brief: N characters, 3 strategies, one call`, then `AI chose Strategy #x`, then TRADE_SETUP or NO_SETUP. Exactly one AI call per cycle.
+3. Over a day: far fewer 429 or 503 errors than before. Any that happen end the cycle as `ai_provider_busy` and the next cycle carries on.
+4. Labels: on the server, `cd backend && sudo -u quantv2 .venv/bin/python scripts/draft_prompt_labels.py draft --ai gemini --model <your model>` (about 5 AI calls). Download `backend/prompt_labels.csv`, review it in a spreadsheet, upload it, then `... import prompt_labels.csv`. Restart is not needed; labels are read every cycle.
+
+**Negative controls.** Claude ran these; each failed where stated.
+- Part 1 code removed: the 4 call-count tests fail.
+- Sessions shifted an hour: 5 session tests fail.
+- Market fit points removed: the trend/range fit test fails.
+- Any strategy id accepted: the off-shortlist test fails.
+

@@ -83,6 +83,8 @@ Optional:
 | `ALLOW_REMOTE_CONNECTOR` | False | Allow a connector address outside local and private networks |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | — | Where heartbeat alerts are sent. Empty: alerts are only logged and listed on the Risk Limits card |
 | `BCRYPT_ROUNDS` | 12 | Password hashing cost. Below 12 is refused outside `APP_ENV=test` |
+| `AUTOPILOT_DECISION_MODE` | brief | `brief`: backend signals + label shortlist + one AI call per cycle. `code`: the AI writes analysis code from raw candles |
+| `AUTOPILOT_SHORTLIST` | 3 | How many prompts the AI chooses from in brief mode |
 | `INSTANCE_LABEL` | Version 2 | Shown in the sidebar, `/api/instance` and `/health`, to tell side-by-side deployments apart |
 | `HUGGINGFACE_API_KEY` | — | For data archiving |
 | `CORS_ORIGINS` | `http://localhost:5173,http://localhost:3000` | Allowed CORS origins |
@@ -361,9 +363,17 @@ Flow:
   → Background loop (asyncio.create_task, per-user):
     1. Sync results of previous trades
     2. Fetch market data via async httpx
-    3. Classify the market regime (trend, volatility) from 15m candles, then pick
-       a prompt at random weighted by regime fit and past win rate
-    4. Call AI to analyze market + detect TRADE_SETUP JSON
+    3. Classify the market regime (trend, volatility) from 15m candles
+    4. Brief mode (AUTOPILOT_DECISION_MODE=brief, the default):
+       - core/market_signals.py measures session, volatility, volume, momentum and
+         key levels; the values and how they were computed are stored with the cycle
+       - prompts are ranked by regime fit, their stored labels (prompt_labels.json)
+         against those signals, and past results; the top AUTOPILOT_SHORTLIST (3) go on
+       - ONE AI call gets the brief (signals + last 30 candles) and the 3 prompts, and
+         answers in JSON: the prompt it used and a TRADE_SETUP, or NO_SETUP
+       - the record says whether the AI picked the top-ranked prompt
+       Code mode (the older path): the AI gets 200-300 candles and writes analysis
+       code; one keyed provider at a time, one fix-up, NO_SETUP accepted
     5. If setup found → the risk gate sizes it from equity and the stop loss
        (the AI's lot is ignored), checks the limits, then sends it via the connector
     6. Sleep (configurable interval, default 300s)
@@ -640,6 +650,7 @@ with summer time). The backend works in real UTC throughout.
 | `execute.py` sandbox | AI Analyst, Autopilot and Historical Lab code runs through this module, always in a subprocess. Prompt Backtest still has its own runner (to be merged in step B1) |
 | `chat_memory_id` in trade link | Enables win-rate tracking per strategy prompt (RAG pipeline). Terminal orders without an explicit id auto-link to the user's latest same-symbol analysis within 24h |
 | 5-minute profit reconciler | `app/core/trade_reconcile.py` matches open `trade_records` against MT5 history deals, through the connector client, and writes `profit_loss` for trades closed outside the app (stop, target, manual close) |
+| Prompt labels | `backend/prompt_labels.json`: styles, market, sessions, volatility, timeframes and direction for each of the 100 prompts. Drafted by `scripts/draft_prompt_labels.py` (keyword, optionally AI), reviewed by a person in `prompt_labels.csv`, stored with its `import` command. Personal prompts fall back to keyword labels |
 | Stop loss policy | Every order needs a stop loss; the risk gate sizes the order from it. Version 1's fixed 0.2% default stop was replaced by an optional risk setting that fills a missing stop at an ATR multiple (see `docs/refactor/V1_V2_DECISIONS.md`) |
 | `PRAGMA foreign_keys=ON` for SQLite | Required for CASCADE deletes to work on SQLite |
 | No silent errors | A handler that catches `Exception` must log, re-raise, or carry `# swallow-ok: <reason>` on its `except` line. Code in `app/` logs instead of printing. `tests/test_error_handling.py` enforces both. The price sync ends a run with failed symbols in `PriceSyncFailed` |
